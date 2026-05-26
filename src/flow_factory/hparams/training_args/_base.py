@@ -313,7 +313,12 @@ class TrainingArguments(ArgABC):
                 )
 
         # --- Optimizer defaults ---
-        self.adam_betas = (self.adam_betas[0], self.adam_betas[1])
+        # Explicit float() casts guard against scientific-notation values (e.g. 1e-4)
+        # arriving as strings from non-standard config sources or future CLI overrides.
+        self.adam_betas = (float(self.adam_betas[0]), float(self.adam_betas[1]))
+        self.adam_weight_decay = float(self.adam_weight_decay)
+        self.adam_epsilon = float(self.adam_epsilon)
+        self.max_grad_norm = float(self.max_grad_norm)
 
         if self.learning_rate is None:
             if 'lora' in self.trainer_type.lower():
@@ -321,6 +326,8 @@ class TrainingArguments(ArgABC):
             else:
                 self.learning_rate = 1e-5
             logger.info(f"`learning_rate` is not set, using default {self.learning_rate} for `{self.trainer_type}` training.")
+        else:
+            self.learning_rate = float(self.learning_rate)
 
     def compute_gradient_accumulation_steps(
         self, num_batches_per_epoch: int,
@@ -384,11 +391,17 @@ class TrainingArguments(ArgABC):
 # ============================================================================
 
 def _standardize_clip_range(value, name: str) -> tuple[float, float]:
-    """Convert a scalar or sequence to a symmetric (lo, hi) tuple."""
+    """Convert a scalar or sequence to a symmetric (lo, hi) tuple.
+
+    Handles values that may arrive as strings (e.g. "1e-4" from YAML parsing)
+    by explicitly casting to float.
+    """
     if not isinstance(value, (tuple, list)):
-        return (-abs(value), abs(value))
-    assert value[0] < value[1], f"`{name}` lower bound must be less than upper bound, got {value}."
-    return (value[0], value[1])
+        v = float(value)
+        return (-abs(v), abs(v))
+    lo, hi = float(value[0]), float(value[1])
+    assert lo < hi, f"`{name}` lower bound must be less than upper bound, got ({lo}, {hi})."
+    return (lo, hi)
 
 
 def _standardize_timestep_range(value: Union[float, Tuple[float, float]]) -> Tuple[float, float]:

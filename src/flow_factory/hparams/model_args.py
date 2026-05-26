@@ -112,7 +112,7 @@ class ModelArguments(ArgABC):
         },
     )
 
-    def __post_init__(self):        
+    def __post_init__(self):
         if isinstance(self.master_weight_dtype, str):
             self.master_weight_dtype = dtype_map[self.master_weight_dtype]
 
