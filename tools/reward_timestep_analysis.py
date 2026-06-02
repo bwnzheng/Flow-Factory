@@ -291,13 +291,14 @@ class GradientAnalyzer:
             neg_embeds = prompt_embeds_info["negative_prompt_embeds"]
             neg_pooled = prompt_embeds_info["negative_pooled_prompt_embeds"]
 
-        # Prepare latents
+        # Prepare latents — must require grad so the full trajectory builds a computation graph
         num_channels = pipe.transformer.config.in_channels
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         latents = pipe.prepare_latents(
             1, num_channels, config.height, config.width,
             self.dtype, self.device, generator,
         )
+        latents.requires_grad_(True)
 
         # Set scheduler timesteps
         patch_size = pipe.transformer.config.patch_size
