@@ -334,13 +334,11 @@ class GradientAnalyzer:
                 pe_input = prompt_embeds
                 pp_input = pooled
 
-            # Checkpointed transformer forward.
-            # use_reentrant=True is deprecated but avoids graph lifetime issues
-            # with multiple forward/backward passes on the same model.
-            v_pred = torch.utils.checkpoint.checkpoint(
-                _transformer_forward,
+            # Direct transformer forward without checkpoint wrapping.
+            # Plain forward pass produces reasonable activation memory for
+            # ~50 steps on a 24 GB GPU.
+            v_pred = _transformer_forward(
                 self.pipe.transformer, x_input, t_input, pe_input, pp_input,
-                use_reentrant=True,
             )
 
             if do_cfg:
