@@ -334,11 +334,13 @@ class GradientAnalyzer:
                 pe_input = prompt_embeds
                 pp_input = pooled
 
-            # Checkpointed transformer forward
+            # Checkpointed transformer forward.
+            # use_reentrant=True is deprecated but avoids graph lifetime issues
+            # with multiple forward/backward passes on the same model.
             v_pred = torch.utils.checkpoint.checkpoint(
                 _transformer_forward,
                 self.pipe.transformer, x_input, t_input, pe_input, pp_input,
-                use_reentrant=False,
+                use_reentrant=True,
             )
 
             if do_cfg:
@@ -396,9 +398,21 @@ class GradientAnalyzer:
         # Encode text (non-differentiable, cached)
         text_features = reward_fn._encode_text(prompt)
 
+        # Clear any accumulated parameter grads from previous trajectories,
+        # otherwise autograd sees them as "already backward-ed" graph state.
+        for p in self.pipe.transformer.parameters():
+            p.grad = None
+        for p in self.pipe.vae.parameters():
+            p.grad = None
+        for p in reward_fn.model.parameters():
+            p.grad = None
+
         # Compute reward and backward
         reward_val = reward_fn(decoded, text_features)
         reward_val.backward()
+
+        # Explicitly release intermediates so the computation graph is freed
+        del v_preds, x_final, decoded, latents
 
         # Map analysis indices to sigma values (continuous time in [0, 1])
         sigmas = self.pipe.scheduler.sigmas
