@@ -381,15 +381,6 @@ class GradientAnalyzer:
         # Run forward trajectory
         v_preds, x_final, timesteps = self.run_trajectory(prompt_embeds_info)
 
-        # Register hooks on analysis v_preds
-        grad_norms: Dict[int, float] = {}
-
-        for idx in analysis_indices:
-            def _hook(grad: torch.Tensor, _idx: int = idx) -> None:
-                grad_norms[_idx] = grad.detach().norm().item()
-
-            v_preds[idx].register_hook(_hook)
-
         # VAE decode (differentiable)
         latents = x_final / self.pipe.vae.config.scaling_factor + self.pipe.vae.config.shift_factor
         latents = latents.to(self.dtype)
@@ -398,21 +389,22 @@ class GradientAnalyzer:
         # Encode text (non-differentiable, cached)
         text_features = reward_fn._encode_text(prompt)
 
-        # Clear any accumulated parameter grads from previous trajectories,
-        # otherwise autograd sees them as "already backward-ed" graph state.
-        for p in self.pipe.transformer.parameters():
-            p.grad = None
-        for p in self.pipe.vae.parameters():
-            p.grad = None
-        for p in reward_fn.model.parameters():
-            p.grad = None
-
-        # Compute reward and backward
+        # Compute reward
         reward_val = reward_fn(decoded, text_features)
-        reward_val.backward()
 
-        # Explicitly release intermediates so the computation graph is freed
-        del v_preds, x_final, decoded, latents
+        # Compute d(reward)/d(v_pred) directly via autograd.grad.
+        # This avoids hooks + .backward() which can cause graph lifetime
+        # issues across multiple forward passes on the same model.
+        target_v_preds = [v_preds[idx] for idx in analysis_indices]
+        grads = torch.autograd.grad(
+            reward_val, target_v_preds,
+            retain_graph=False,
+            allow_unused=False,
+        )
+        grad_norms: Dict[int, float] = {
+            idx: g.detach().norm().item()
+            for idx, g in zip(analysis_indices, grads)
+        }
 
         # Map analysis indices to sigma values (continuous time in [0, 1])
         sigmas = self.pipe.scheduler.sigmas
