@@ -405,6 +405,7 @@ class GradientAnalyzer:
             idx: g.detach().norm().item()
             for idx, g in zip(analysis_indices, grads)
         }
+        reward_scalar = reward_val.item()
 
         # Release the computation graph explicitly so the next trajectory
         # starts with a clean autograd state.
@@ -419,7 +420,7 @@ class GradientAnalyzer:
         else:
             sigmas = sigmas.float()
 
-        return dict(grad_norms), reward_val.item(), timesteps, sigmas
+        return dict(grad_norms), reward_scalar, timesteps, sigmas
 
 
 # ============================================================================
