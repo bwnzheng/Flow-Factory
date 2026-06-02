@@ -427,9 +427,10 @@ class GradientAnalyzer:
 # Visualization
 # ============================================================================
 
-def save_results(results: List[Dict], output_dir: str):
+def save_results(results: List[Dict], output_dir: str, ckpt_epoch: str = ""):
     """Save raw results as JSON."""
     os.makedirs(output_dir, exist_ok=True)
+    prefix = f"checkpoint-{ckpt_epoch}_" if ckpt_epoch else ""
     out = {
         "results": [
             {
@@ -444,14 +445,15 @@ def save_results(results: List[Dict], output_dir: str):
             for r in results
         ],
     }
-    path = os.path.join(output_dir, "gradient_norms.json")
+    path = os.path.join(output_dir, f"{prefix}gradient_norms.json")
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"Results saved to {path}")
 
 
-def plot_gradient_norms(results: List[Dict], output_dir: str):
+def plot_gradient_norms(results: List[Dict], output_dir: str, ckpt_epoch: str = ""):
     """Plot gradient norms vs sigma (noise level) for each reward."""
+    prefix = f"checkpoint-{ckpt_epoch}_" if ckpt_epoch else ""
     if not HAS_MPL:
         print("matplotlib not available, skipping plots.")
         return
@@ -497,7 +499,7 @@ def plot_gradient_norms(results: List[Dict], output_dir: str):
     ax.legend()
 
     fig.tight_layout()
-    path = os.path.join(output_dir, "gradient_norms.png")
+    path = os.path.join(output_dir, f"{prefix}gradient_norms.png")
     fig.savefig(path, dpi=150)
     print(f"Plot saved to {path}")
     plt.close(fig)
@@ -566,9 +568,16 @@ def main(config_path: str):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+    # Extract checkpoint epoch for output filenames
+    ckpt_epoch = ""
+    if config.checkpoint:
+        ckpt_name = os.path.basename(config.checkpoint.rstrip("/"))
+        if ckpt_name.startswith("checkpoint-"):
+            ckpt_epoch = ckpt_name.split("checkpoint-")[1]
+
     # Save and visualize
-    save_results(all_results, config.output_dir)
-    plot_gradient_norms(all_results, config.output_dir)
+    save_results(all_results, config.output_dir, ckpt_epoch)
+    plot_gradient_norms(all_results, config.output_dir, ckpt_epoch)
 
     print(f"\nDone. Results in {config.output_dir}/")
 
