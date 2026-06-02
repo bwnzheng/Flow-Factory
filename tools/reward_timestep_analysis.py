@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -334,11 +335,12 @@ class GradientAnalyzer:
                 pe_input = prompt_embeds
                 pp_input = pooled
 
-            # Direct transformer forward without checkpoint wrapping.
-            # Plain forward pass produces reasonable activation memory for
-            # ~50 steps on a 24 GB GPU.
-            v_pred = _transformer_forward(
+            # Checkpointed transformer forward.
+            # use_reentrant=False is required for compat with autograd.grad().
+            v_pred = torch.utils.checkpoint.checkpoint(
+                _transformer_forward,
                 self.pipe.transformer, x_input, t_input, pe_input, pp_input,
+                use_reentrant=False,
             )
 
             if do_cfg:
@@ -403,6 +405,12 @@ class GradientAnalyzer:
             idx: g.detach().norm().item()
             for idx, g in zip(analysis_indices, grads)
         }
+
+        # Release the computation graph explicitly so the next trajectory
+        # starts with a clean autograd state.
+        del grads, target_v_preds, v_preds, x_final, decoded, latents, reward_val
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Map analysis indices to sigma values (continuous time in [0, 1])
         sigmas = self.pipe.scheduler.sigmas
@@ -547,8 +555,15 @@ def main(config_path: str):
                 "sigmas": sigmas,
             })
 
-            # Clean up GPU memory
+            # Aggressively free GPU memory and ensure autograd engine state is reset
+            del grad_norms
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # End of prompt: clear prompt embeddings to release any PyTorch-internal refs
+        del prompt_embeds_info
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     # Save and visualize
     save_results(all_results, config.output_dir)
