@@ -249,6 +249,7 @@ class GradientAnalyzer:
 
         self.pipe.transformer.eval()
 
+    @torch.no_grad()
     def _encode_prompt(self, prompt: str) -> Dict[str, torch.Tensor]:
         do_cfg = self.config.guidance_scale > 1.0
         result = self.pipe.encode_prompt(
