@@ -163,19 +163,12 @@ class DifferentiableCLIPReward:
     def _encode_text(self, prompt: str) -> torch.Tensor:
         inputs = self.processor(text=prompt, return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.cuda() for k, v in inputs.items()}
-        text_features = self.model.get_text_features(**inputs)
+        text_features = self.model.get_text_features(**inputs).pooler_output
         return F.normalize(text_features, p=2, dim=-1)
 
     def __call__(self, image_tensor: torch.Tensor, text_features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            image_tensor: (1, C, H, W) VAE output in [-1, 1]
-            text_features: (1, D) pre-computed normalized text features
-        Returns:
-            scalar reward (cosine similarity)
-        """
         pixel_values = _preprocess_image_for_clip(image_tensor)
-        image_features = self.model.get_image_features(pixel_values=pixel_values)
+        image_features = self.model.get_image_features(pixel_values=pixel_values).pooler_output
         image_features = F.normalize(image_features, p=2, dim=-1)
         return (image_features * text_features).sum(dim=-1).squeeze(0)
 
@@ -192,12 +185,12 @@ class DifferentiablePickScore:
     def _encode_text(self, prompt: str) -> torch.Tensor:
         inputs = self.processor(text=prompt, return_tensors="pt", padding=True, truncation=True, max_length=77)
         inputs = {k: v.cuda() for k, v in inputs.items()}
-        text_features = self.model.get_text_features(**inputs)
+        text_features = self.model.get_text_features(**inputs).pooler_output
         return text_features / text_features.norm(p=2, dim=-1, keepdim=True)
 
     def __call__(self, image_tensor: torch.Tensor, text_features: torch.Tensor) -> torch.Tensor:
         pixel_values = _preprocess_image_for_clip(image_tensor)
-        image_features = self.model.get_image_features(pixel_values=pixel_values)
+        image_features = self.model.get_image_features(pixel_values=pixel_values).pooler_output
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         raw_score = self.logit_scale * (text_features * image_features).sum(dim=-1)
         return (raw_score / 26.0).squeeze(0)
