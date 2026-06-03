@@ -815,6 +815,7 @@ def main(config_path: str):
         "dtype": config.dtype,
         "num_gpus": config.num_gpus,
         "num_inference_steps": config.num_inference_steps,
+        "per_device_batch_size": config.per_device_batch_size,
         "guidance_scale": config.guidance_scale,
         "height": config.height, "width": config.width, "seed": config.seed,
         "num_analysis_timesteps": config.num_analysis_timesteps,
