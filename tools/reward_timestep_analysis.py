@@ -56,6 +56,7 @@ class AnalysisConfig:
     num_gpus: int = 1
 
     num_inference_steps: int = 50
+    per_device_batch_size: int = 1   # >1 = batch multiple prompts per trajectory run
     guidance_scale: float = 1.0
     height: int = 512
     width: int = 512
@@ -86,6 +87,7 @@ def parse_config(path: str) -> AnalysisConfig:
         dtype=model.get("dtype", "bfloat16"),
         num_gpus=model.get("num_gpus", 1),
         num_inference_steps=inference.get("num_inference_steps", 50),
+        per_device_batch_size=inference.get("per_device_batch_size", 1),
         guidance_scale=inference.get("guidance_scale", 1.0),
         height=inference.get("height", 512),
         width=inference.get("width", 512),
@@ -256,10 +258,11 @@ class GradientAnalyzer:
         self.pipe.transformer.eval()
 
     @torch.no_grad()
-    def _encode_prompt(self, prompt: str) -> Dict[str, torch.Tensor]:
+    def _encode_prompts(self, prompts: List[str]) -> Dict[str, torch.Tensor]:
+        """Encode a list of prompts into batched embeddings."""
         do_cfg = self.config.guidance_scale > 1.0
         result = self.pipe.encode_prompt(
-            prompt=prompt, prompt_2=prompt, prompt_3=prompt,
+            prompt=prompts, prompt_2=prompts, prompt_3=prompts,
             device=self.device, do_classifier_free_guidance=do_cfg,
         )
         if do_cfg:
@@ -267,16 +270,18 @@ class GradientAnalyzer:
             return {
                 "prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled,
                 "negative_prompt_embeds": neg_embeds, "negative_pooled_prompt_embeds": neg_pooled,
-                "do_cfg": True,
+                "do_cfg": True, "batch_size": len(prompts),
             }
         else:
             prompt_embeds, _, pooled, _ = result
-            return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled, "do_cfg": False}
+            return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled,
+                    "do_cfg": False, "batch_size": len(prompts)}
 
     def run_trajectory(self, prompt_embeds_info: Dict) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
         pipe = self.pipe
         config = self.config
         do_cfg = prompt_embeds_info["do_cfg"]
+        batch_size = prompt_embeds_info["batch_size"]
         prompt_embeds = prompt_embeds_info["prompt_embeds"]
         pooled = prompt_embeds_info["pooled_prompt_embeds"]
         if do_cfg:
@@ -285,10 +290,16 @@ class GradientAnalyzer:
 
         num_channels = pipe.transformer.config.in_channels
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
-        latents = pipe.prepare_latents(
-            1, num_channels, config.height, config.width,
-            self.dtype, self.device, generator,
-        )
+        # We need different noise per sample — expand seed for each
+        latents_list = []
+        for b in range(batch_size):
+            g = torch.Generator(device="cpu").manual_seed(config.seed + b)
+            lat = pipe.prepare_latents(
+                1, num_channels, config.height, config.width,
+                self.dtype, self.device, g,
+            )
+            latents_list.append(lat)
+        latents = torch.cat(latents_list, dim=0)
         latents.requires_grad_(True)
 
         patch_size = pipe.transformer.config.patch_size
@@ -307,7 +318,7 @@ class GradientAnalyzer:
         x_t = latents
         for i in range(len(timesteps)):
             t = timesteps[i]
-            t_embed = t.expand(1).to(self.dtype)
+            t_embed = t.expand(batch_size).to(self.dtype)
             if do_cfg:
                 x_input = torch.cat([x_t, x_t], dim=0)
                 t_input = t_embed.repeat(2)
@@ -332,29 +343,54 @@ class GradientAnalyzer:
 
         return v_preds, x_t, timesteps
 
-    def compute_gradient_norms(
-        self, prompt: str, prompt_embeds_info: Dict, reward_fn, reward_name: str,
-    ) -> Tuple[Dict[int, float], Dict[int, torch.Tensor], float, torch.Tensor, torch.Tensor]:
+    def compute_gradient_norms_batched(
+        self, prompts: List[str], prompt_embeds_info: Dict, reward_fn, reward_name: str,
+    ) -> Tuple[List[Tuple[Dict[int, float], Dict[int, torch.Tensor], float]], torch.Tensor, torch.Tensor]:
+        """Run a batched trajectory, compute per-prompt reward and gradient norms.
+
+        Returns:
+            per_prompt: list of (grad_norms, grad_vectors, reward_value) per prompt
+            timesteps: scheduler timesteps
+            sigmas: scheduler sigmas
+        """
         config = self.config
+        batch_size = len(prompts)
         analysis_indices = _sample_analysis_indices(config.num_inference_steps, config.num_analysis_timesteps)
 
         v_preds, x_final, timesteps = self.run_trajectory(prompt_embeds_info)
 
+        # VAE decode (batched)
         latents = x_final / self.pipe.vae.config.scaling_factor + self.pipe.vae.config.shift_factor
         latents = latents.to(self.dtype)
-        decoded = self.pipe.vae.decode(latents, return_dict=False)[0]
+        decoded = self.pipe.vae.decode(latents, return_dict=False)[0]  # (B, C, H, W)
 
-        text_features = reward_fn._encode_text(prompt)
-        reward_val = reward_fn(decoded, text_features)
+        # Compute reward for each prompt in the batch
+        rewards_list = []
+        for b in range(batch_size):
+            text_features = reward_fn._encode_text(prompts[b])
+            rv = reward_fn(decoded[b:b + 1], text_features)
+            rewards_list.append(rv)
 
+        # Per-sample gradient extraction via autograd.grad with grad_outputs
         target_v_preds = [v_preds[idx] for idx in analysis_indices]
-        grads = torch.autograd.grad(reward_val, target_v_preds, retain_graph=False, allow_unused=False)
-        grad_norms = {idx: g.detach().norm().item() for idx, g in zip(analysis_indices, grads)}
-        # Save flattened gradient vectors for cosine-similarity computation
-        grad_vectors = {idx: g.detach().flatten().cpu() for idx, g in zip(analysis_indices, grads)}
-        reward_scalar = reward_val.item()
+        all_grad_norms: List[Dict[int, float]] = []
+        all_grad_vectors: List[Dict[int, torch.Tensor]] = []
+        all_reward_values: List[float] = []
 
-        del grads, target_v_preds, v_preds, x_final, decoded, latents, reward_val
+        for b in range(batch_size):
+            retain = (b < batch_size - 1)
+            grads = torch.autograd.grad(
+                rewards_list[b], target_v_preds,
+                retain_graph=retain, allow_unused=False,
+            )
+            # Extract sample b's gradient from each batched v_pred
+            grad_norms = {idx: g[b:b + 1].detach().norm().item() for idx, g in zip(analysis_indices, grads)}
+            grad_vectors = {idx: g[b].detach().flatten().cpu() for idx, g in zip(analysis_indices, grads)}
+            all_grad_norms.append(grad_norms)
+            all_grad_vectors.append(grad_vectors)
+            all_reward_values.append(rewards_list[b].item())
+
+        del grads, target_v_preds, v_preds, x_final, decoded, latents, rewards_list
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -364,7 +400,7 @@ class GradientAnalyzer:
         else:
             sigmas = sigmas.float()
 
-        return grad_norms, grad_vectors, reward_scalar, timesteps, sigmas
+        return list(zip(all_grad_norms, all_grad_vectors, all_reward_values)), timesteps, sigmas
 
 
 # ============================================================================
@@ -393,62 +429,78 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
         reward_fns.append((name, fn))
 
     results = []
-    for prompt_idx, prompt in enumerate(prompts):
-        print(f"[GPU {gpu_id}][ckpt {epoch}] Prompt [{prompt_idx + 1}/{len(prompts)}]: {prompt[:60]}...")
-        prompt_embeds_info = analyzer._encode_prompt(prompt)
+    batch_size = config.per_device_batch_size
 
-        # Collect gradient info for all rewards of this prompt
-        prompt_grads: Dict[str, Dict[int, torch.Tensor]] = {}  # reward_name → {idx: flat_grad_tensor}
-        prompt_results: List[Dict] = []
+    # Pre-encode all prompts (batched encoding is faster than per-prompt)
+    prompt_embeds_cache = {}  # reward_name → {prompt_str: text_features}
+    for reward_name, reward_fn in reward_fns:
+        prompt_embeds_cache[reward_name] = {}
+        for p in prompts:
+            prompt_embeds_cache[reward_name][p] = reward_fn._encode_text(p)
+
+    # Process prompts in batches
+    for batch_start in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[batch_start:batch_start + batch_size]
+        batch_indices = list(range(batch_start, batch_start + len(batch_prompts)))
+        bs = len(batch_prompts)
+        print(f"[GPU {gpu_id}][ckpt {epoch}] Batch [{batch_start + 1}-{batch_start + bs}/{len(prompts)}]")
+
+        prompt_embeds_info = analyzer._encode_prompts(batch_prompts)
+
+        # Collect gradient vectors for all rewards across this batch
+        batch_grads: Dict[str, List[Dict[int, torch.Tensor]]] = {}  # reward_name → [per-prompt {idx: vec}]
+        batch_results: List[Dict] = []
 
         for reward_name, reward_fn in reward_fns:
-            grad_norms, grad_vectors, reward_value, timesteps, sigmas = analyzer.compute_gradient_norms(
-                prompt, prompt_embeds_info, reward_fn, reward_name,
+            per_prompt_data, timesteps, sigmas = analyzer.compute_gradient_norms_batched(
+                batch_prompts, prompt_embeds_info, reward_fn, reward_name,
             )
-            print(f"[GPU {gpu_id}][ckpt {epoch}]   {reward_name}: value={reward_value:.4f}, "
-                  f"grad_norms=[{min(grad_norms.values()):.6f}, {max(grad_norms.values()):.6f}]")
+            batch_grads[reward_name] = []
+            for b, (grad_norms, grad_vectors, reward_value) in enumerate(per_prompt_data):
+                batch_grads[reward_name].append(grad_vectors)
+                batch_results.append({
+                    "epoch": epoch,
+                    "prompt": batch_prompts[b],
+                    "prompt_idx": batch_indices[b],
+                    "reward": reward_name,
+                    "reward_value": reward_value,
+                    "grad_norms": grad_norms,
+                    "timesteps": timesteps.tolist(),
+                    "sigmas": [float(sigmas[i]) for i in range(len(sigmas))],
+                })
+                print(f"[GPU {gpu_id}][ckpt {epoch}]   [{batch_indices[b]}] {reward_name}: "
+                      f"value={reward_value:.4f}, "
+                      f"grad_norms=[{min(grad_norms.values()):.6f}, {max(grad_norms.values()):.6f}]")
 
-            prompt_grads[reward_name] = grad_vectors
-            prompt_results.append({
-                "epoch": epoch,
-                "prompt": prompt,
-                "prompt_idx": prompt_idx,
-                "reward": reward_name,
-                "reward_value": reward_value,
-                "grad_norms": grad_norms,
-                "timesteps": timesteps.tolist(),
-                "sigmas": [float(sigmas[i]) for i in range(len(sigmas))],
-            })
-            del grad_norms
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        # Compute pairwise cosine similarities between reward gradients
+        # Compute pairwise cosine similarities for each prompt in the batch
         reward_names = [name for name, _ in reward_fns]
-        analysis_indices = sorted(prompt_grads[reward_names[0]].keys())
-        cosine_sim: Dict[str, Dict[int, float]] = {}  # "rA_vs_rB" → {idx: cos_sim}
+        analysis_indices = sorted(batch_grads[reward_names[0]][0].keys())
+        sigmas_list = [float(sigmas[i]) for i in range(len(sigmas))]
 
-        for i in range(len(reward_names)):
-            for j in range(i + 1, len(reward_names)):
-                rA, rB = reward_names[i], reward_names[j]
-                key = f"{rA}_vs_{rB}"
-                cosine_sim[key] = {}
-                for idx in analysis_indices:
-                    gA = prompt_grads[rA][idx]
-                    gB = prompt_grads[rB][idx]
-                    cos = (gA @ gB) / (gA.norm() * gB.norm() + 1e-8)
-                    cosine_sim[key][idx] = cos.item()
+        for b in range(bs):
+            prompt_grads = {rn: batch_grads[rn][b] for rn in reward_names}
+            cosine_sim: Dict[str, Dict[int, float]] = {}
+            for i in range(len(reward_names)):
+                for j in range(i + 1, len(reward_names)):
+                    rA, rB = reward_names[i], reward_names[j]
+                    key = f"{rA}_vs_{rB}"
+                    cosine_sim[key] = {}
+                    for idx in analysis_indices:
+                        gA = prompt_grads[rA][idx]
+                        gB = prompt_grads[rB][idx]
+                        cos = (gA @ gB) / (gA.norm() * gB.norm() + 1e-8)
+                        cosine_sim[key][idx] = cos.item()
 
-        # Attach cosine similarity to each result entry
-        sigmas_list = prompt_results[0]["sigmas"]
-        for entry in prompt_results:
-            entry["cosine_sim"] = cosine_sim
-            # Keep sigmas on first entry only (for plotting)
-            if entry["reward"] != reward_names[0]:
-                entry["sigmas"] = sigmas_list  # reference, fine since we serialize later
+            # Attach cosine sim to this prompt's entries in batch_results
+            base_idx = b  # first entry for this prompt is at batch offset b
+            for ri in range(len(reward_names)):
+                entry_idx = base_idx + ri * bs
+                batch_results[entry_idx]["cosine_sim"] = cosine_sim
 
-        results.extend(prompt_results)
-        del prompt_grads, prompt_embeds_info
+        results.extend(batch_results)
+        del batch_grads, prompt_embeds_info, batch_results
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # Clean up to free GPU memory before next worker
     del analyzer
