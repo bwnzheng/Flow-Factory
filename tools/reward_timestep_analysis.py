@@ -62,6 +62,7 @@ class AnalysisConfig:
     seed: int = 42
 
     num_analysis_timesteps: int = 20
+    max_epochs: int = 0        # 0 = no limit
     prompts_file: str = ""
     prompts: List[str] = field(default_factory=list)
 
@@ -90,6 +91,7 @@ def parse_config(path: str) -> AnalysisConfig:
         width=inference.get("width", 512),
         seed=inference.get("seed", 42),
         num_analysis_timesteps=analysis.get("num_analysis_timesteps", 20),
+        max_epochs=analysis.get("max_epochs", 0),
         prompts_file=analysis.get("prompts_file", ""),
         prompts=analysis.get("prompts", []),
         rewards=raw.get("rewards", []),
@@ -744,6 +746,8 @@ def main(config_path: str):
 
     # Discover checkpoints
     checkpoints = discover_checkpoints(config.checkpoint_dir)
+    if config.max_epochs > 0:
+        checkpoints = [(e, p) for e, p in checkpoints if e <= config.max_epochs]
     if not checkpoints:
         print(f"ERROR: No checkpoint-* subdirectories found in {config.checkpoint_dir}")
         sys.exit(1)
