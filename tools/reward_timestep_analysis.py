@@ -4,8 +4,8 @@ Reward Per-Timestep Analysis Tool for NFT Checkpoints.
 
 Computes ||d(reward)/d(v_pred_t)|| — the gradient norm of each reward w.r.t.
 the velocity prediction at each timestep — by backpropagating through the
-full ODE denoising trajectory. This reveals which denoising stages each
-reward is most sensitive to.
+full ODE denoising trajectory. Supports batch analysis across multiple
+checkpoints with multiprocessing (one GPU per process).
 
 Usage:
     python tools/reward_timestep_analysis.py -c tools/reward_timestep_analysis.yaml
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import multiprocessing as mp
 import os
 import sys
 from dataclasses import dataclass, field
@@ -27,16 +28,13 @@ import torch.nn.functional as F
 import yaml
 from diffusers import StableDiffusion3Pipeline
 from peft import PeftModel
-from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 
-# ── flow_factory imports ──────────────────────────────────────────────
 from flow_factory.scheduler import (
     FlowMatchEulerDiscreteSDEScheduler,
     set_scheduler_timesteps,
 )
 
-# ── matplotlib (optional) ─────────────────────────────────────────────
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -53,8 +51,9 @@ except ImportError:
 @dataclass
 class AnalysisConfig:
     base_model: str = "stabilityai/stable-diffusion-3.5-medium"
-    checkpoint: str = ""
+    checkpoint_dir: str = ""
     dtype: str = "bfloat16"
+    num_gpus: int = 1
 
     num_inference_steps: int = 50
     guidance_scale: float = 1.0
@@ -81,8 +80,9 @@ def parse_config(path: str) -> AnalysisConfig:
 
     return AnalysisConfig(
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
-        checkpoint=model.get("checkpoint", ""),
+        checkpoint_dir=model.get("checkpoint_dir", ""),
         dtype=model.get("dtype", "bfloat16"),
+        num_gpus=model.get("num_gpus", 1),
         num_inference_steps=inference.get("num_inference_steps", 50),
         guidance_scale=inference.get("guidance_scale", 1.0),
         height=inference.get("height", 512),
@@ -100,20 +100,37 @@ def resolve_dtype(dtype_str: str) -> torch.dtype:
 
 
 # ============================================================================
+# Checkpoint discovery
+# ============================================================================
+
+def discover_checkpoints(checkpoint_dir: str) -> List[Tuple[int, str]]:
+    """Find all checkpoint-N subdirectories, return sorted list of (epoch, path)."""
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+    entries = []
+    for name in os.listdir(checkpoint_dir):
+        if name.startswith("checkpoint-"):
+            try:
+                epoch = int(name.split("checkpoint-")[1])
+            except ValueError:
+                continue
+            path = os.path.join(checkpoint_dir, name)
+            if os.path.isdir(path):
+                entries.append((epoch, path))
+    return sorted(entries)
+
+
+# ============================================================================
 # Pipeline + LoRA loading
 # ============================================================================
 
-def load_pipeline(config: AnalysisConfig) -> StableDiffusion3Pipeline:
-    dtype = resolve_dtype(config.dtype)
+def load_pipeline(base_model: str, dtype_str: str) -> StableDiffusion3Pipeline:
+    dtype = resolve_dtype(dtype_str)
     pipe = StableDiffusion3Pipeline.from_pretrained(
-        config.base_model,
-        torch_dtype=dtype,
-        low_cpu_mem_usage=False,
+        base_model, torch_dtype=dtype, low_cpu_mem_usage=False,
     )
-
     scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
-        pipe.scheduler.config,
-        dynamics_type="ODE",
+        pipe.scheduler.config, dynamics_type="ODE",
     )
     scheduler.eval()
     pipe.scheduler = scheduler
@@ -123,9 +140,7 @@ def load_pipeline(config: AnalysisConfig) -> StableDiffusion3Pipeline:
 
 def load_lora(pipe: StableDiffusion3Pipeline, checkpoint_path: str, dtype: torch.dtype):
     pipe.transformer = PeftModel.from_pretrained(
-        pipe.transformer,
-        checkpoint_path,
-        torch_dtype=dtype,
+        pipe.transformer, checkpoint_path, torch_dtype=dtype,
     )
     pipe.transformer = pipe.transformer.merge_and_unload()
 
@@ -134,28 +149,20 @@ def load_lora(pipe: StableDiffusion3Pipeline, checkpoint_path: str, dtype: torch
 # Differentiable reward functions
 # ============================================================================
 
-# CLIP normalization constants (OpenAI CLIP)
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
 
 def _preprocess_image_for_clip(image_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Convert VAE output tensor (in [-1, 1]) to CLIP-preprocessed tensor.
-    All operations are differentiable.
-    """
     image_01 = (image_tensor + 1.0) / 2.0
     image_01 = image_01.clamp(0.0, 1.0)
     image_224 = F.interpolate(image_01, size=(224, 224), mode="bilinear", align_corners=False)
-
     mean = torch.tensor(CLIP_MEAN, device=image_224.device, dtype=image_224.dtype).view(1, 3, 1, 1)
     std = torch.tensor(CLIP_STD, device=image_224.device, dtype=image_224.dtype).view(1, 3, 1, 1)
     return (image_224 - mean) / std
 
 
 class DifferentiableCLIPReward:
-    """CLIP cosine-similarity reward, fully differentiable."""
-
     def __init__(self, model_name: str = "openai/clip-vit-large-patch14"):
         self.model = CLIPModel.from_pretrained(model_name).eval().cuda()
         self.processor = CLIPProcessor.from_pretrained(model_name)
@@ -175,8 +182,6 @@ class DifferentiableCLIPReward:
 
 
 class DifferentiablePickScore:
-    """PickScore reward (CLIP-ViT-H based), fully differentiable."""
-
     def __init__(self):
         self.model = CLIPModel.from_pretrained("yuvalkirstain/PickScore_v1").eval().cuda()
         self.processor = CLIPProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
@@ -198,7 +203,6 @@ class DifferentiablePickScore:
 
 
 def load_reward_fn(reward_cfg: Dict[str, Any]) -> Tuple[str, Any]:
-    """Load a differentiable reward function by name."""
     rtype = reward_cfg.get("reward_model", reward_cfg.get("type", ""))
     rname = reward_cfg.get("name", rtype)
     if rtype in ("CLIP", "clip"):
@@ -215,7 +219,6 @@ def load_reward_fn(reward_cfg: Dict[str, Any]) -> Tuple[str, Any]:
 # ============================================================================
 
 def _sample_analysis_indices(num_steps: int, num_samples: int) -> List[int]:
-    """Sample evenly-spaced timestep indices from [0, num_steps-1]."""
     if num_samples >= num_steps:
         return list(range(num_steps))
     indices = np.linspace(0, num_steps - 1, num_samples).round().astype(int).tolist()
@@ -223,7 +226,6 @@ def _sample_analysis_indices(num_steps: int, num_samples: int) -> List[int]:
 
 
 def _transformer_forward(transformer, hidden_states, timestep, encoder_hidden_states, pooled_projections):
-    """Wrapper for checkpointing — must be a free function for pickle support."""
     return transformer(
         hidden_states=hidden_states,
         timestep=timestep,
@@ -234,19 +236,18 @@ def _transformer_forward(transformer, hidden_states, timestep, encoder_hidden_st
 
 
 class GradientAnalyzer:
-    """Runs the ODE trajectory with gradient tracking and computes per-timestep reward sensitivities."""
-
-    def __init__(self, config: AnalysisConfig):
+    def __init__(self, config: AnalysisConfig, checkpoint_path: str = ""):
         self.config = config
+        self.checkpoint_path = checkpoint_path
         self.dtype = resolve_dtype(config.dtype)
         self.device = torch.device("cuda")
 
-        print("Loading SD3.5 pipeline...")
-        self.pipe = load_pipeline(config)
+        print(f"[GPU {torch.cuda.current_device()}] Loading SD3.5 pipeline...")
+        self.pipe = load_pipeline(config.base_model, config.dtype)
 
-        if config.checkpoint:
-            print(f"Loading LoRA checkpoint: {config.checkpoint}")
-            load_lora(self.pipe, config.checkpoint, self.dtype)
+        if checkpoint_path:
+            print(f"[GPU {torch.cuda.current_device()}] Loading LoRA: {checkpoint_path}")
+            load_lora(self.pipe, checkpoint_path, self.dtype)
 
         self.pipe.transformer.eval()
 
@@ -254,45 +255,30 @@ class GradientAnalyzer:
     def _encode_prompt(self, prompt: str) -> Dict[str, torch.Tensor]:
         do_cfg = self.config.guidance_scale > 1.0
         result = self.pipe.encode_prompt(
-            prompt=prompt,
-            prompt_2=prompt,
-            prompt_3=prompt,
-            device=self.device,
-            do_classifier_free_guidance=do_cfg,
+            prompt=prompt, prompt_2=prompt, prompt_3=prompt,
+            device=self.device, do_classifier_free_guidance=do_cfg,
         )
         if do_cfg:
             prompt_embeds, neg_embeds, pooled, neg_pooled = result
             return {
-                "prompt_embeds": prompt_embeds,
-                "pooled_prompt_embeds": pooled,
-                "negative_prompt_embeds": neg_embeds,
-                "negative_pooled_prompt_embeds": neg_pooled,
+                "prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled,
+                "negative_prompt_embeds": neg_embeds, "negative_pooled_prompt_embeds": neg_pooled,
                 "do_cfg": True,
             }
         else:
             prompt_embeds, _, pooled, _ = result
-            return {
-                "prompt_embeds": prompt_embeds,
-                "pooled_prompt_embeds": pooled,
-                "do_cfg": False,
-            }
+            return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled, "do_cfg": False}
 
     def run_trajectory(self, prompt_embeds_info: Dict) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
-        """
-        Run the ODE denoising trajectory with gradient tracking.
-        Returns (v_preds, x_final, timesteps) where v_preds retains grad info.
-        """
         pipe = self.pipe
         config = self.config
         do_cfg = prompt_embeds_info["do_cfg"]
         prompt_embeds = prompt_embeds_info["prompt_embeds"]
         pooled = prompt_embeds_info["pooled_prompt_embeds"]
-
         if do_cfg:
             neg_embeds = prompt_embeds_info["negative_prompt_embeds"]
             neg_pooled = prompt_embeds_info["negative_pooled_prompt_embeds"]
 
-        # Prepare latents — must require grad so the full trajectory builds a computation graph
         num_channels = pipe.transformer.config.in_channels
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         latents = pipe.prepare_latents(
@@ -301,16 +287,12 @@ class GradientAnalyzer:
         )
         latents.requires_grad_(True)
 
-        # Set scheduler timesteps
         patch_size = pipe.transformer.config.patch_size
         image_seq_len = (latents.shape[2] // patch_size) * (latents.shape[3] // patch_size)
         timesteps = set_scheduler_timesteps(
-            scheduler=pipe.scheduler,
-            num_inference_steps=config.num_inference_steps,
-            seq_len=image_seq_len,
-            device=self.device,
+            scheduler=pipe.scheduler, num_inference_steps=config.num_inference_steps,
+            seq_len=image_seq_len, device=self.device,
         )
-        # sigmas may be torch.Tensor or np.ndarray depending on diffusers version
         sigmas = pipe.scheduler.sigmas
         if isinstance(sigmas, np.ndarray):
             sigmas = torch.from_numpy(sigmas).to(self.device)
@@ -319,189 +301,415 @@ class GradientAnalyzer:
 
         v_preds = []
         x_t = latents
-
         for i in range(len(timesteps)):
             t = timesteps[i]
             t_embed = t.expand(1).to(self.dtype)
-
             if do_cfg:
                 x_input = torch.cat([x_t, x_t], dim=0)
                 t_input = t_embed.repeat(2)
                 pe_input = torch.cat([neg_embeds, prompt_embeds], dim=0)
                 pp_input = torch.cat([neg_pooled, pooled], dim=0)
             else:
-                x_input = x_t
-                t_input = t_embed
-                pe_input = prompt_embeds
-                pp_input = pooled
+                x_input = x_t; t_input = t_embed; pe_input = prompt_embeds; pp_input = pooled
 
-            # Checkpointed transformer forward.
-            # use_reentrant=False is required for compat with autograd.grad().
             v_pred = torch.utils.checkpoint.checkpoint(
-                _transformer_forward,
-                self.pipe.transformer, x_input, t_input, pe_input, pp_input,
+                _transformer_forward, self.pipe.transformer,
+                x_input, t_input, pe_input, pp_input,
                 use_reentrant=False,
             )
-
             if do_cfg:
                 v_pred_uncond, v_pred_text = v_pred.chunk(2)
                 v_pred = v_pred_uncond + config.guidance_scale * (v_pred_text - v_pred_uncond)
-
             v_preds.append(v_pred)
 
-            # ODE step: x_{t+1} = x_t + v_pred * (sigma_next - sigma_t)
             sigma_t = sigmas[i]
             sigma_next = sigmas[i + 1] if i + 1 < len(sigmas) else torch.tensor(0.0, device=self.device)
-            dt = sigma_next - sigma_t
-            x_t = x_t + v_pred * dt
+            x_t = x_t + v_pred * (sigma_next - sigma_t)
 
         return v_preds, x_t, timesteps
 
     def compute_gradient_norms(
-        self,
-        prompt: str,
-        prompt_embeds_info: Dict,
-        reward_fn,
-        reward_name: str,
-    ) -> Tuple[Dict[int, float], float, torch.Tensor, torch.Tensor]:
-        """
-        Run trajectory, compute reward, backprop, and extract ||d(reward)/d(v_pred)||
-        at analysis timesteps.
-
-        Returns:
-            grad_norms: dict mapping timestep index → gradient norm
-            reward_value: scalar reward value
-            timesteps: the scheduler timesteps (shifted, in [0, 1000])
-            sigmas: the scheduler sigmas (in [0, 1])
-        """
+        self, prompt: str, prompt_embeds_info: Dict, reward_fn, reward_name: str,
+    ) -> Tuple[Dict[int, float], Dict[int, torch.Tensor], float, torch.Tensor, torch.Tensor]:
         config = self.config
         analysis_indices = _sample_analysis_indices(config.num_inference_steps, config.num_analysis_timesteps)
-        print(f"  [{reward_name}] Analysis timestep indices: {analysis_indices}")
 
-        # Run forward trajectory
         v_preds, x_final, timesteps = self.run_trajectory(prompt_embeds_info)
 
-        # VAE decode (differentiable)
         latents = x_final / self.pipe.vae.config.scaling_factor + self.pipe.vae.config.shift_factor
         latents = latents.to(self.dtype)
         decoded = self.pipe.vae.decode(latents, return_dict=False)[0]
 
-        # Encode text (non-differentiable, cached)
         text_features = reward_fn._encode_text(prompt)
-
-        # Compute reward
         reward_val = reward_fn(decoded, text_features)
 
-        # Compute d(reward)/d(v_pred) directly via autograd.grad.
-        # This avoids hooks + .backward() which can cause graph lifetime
-        # issues across multiple forward passes on the same model.
         target_v_preds = [v_preds[idx] for idx in analysis_indices]
-        grads = torch.autograd.grad(
-            reward_val, target_v_preds,
-            retain_graph=False,
-            allow_unused=False,
-        )
-        grad_norms: Dict[int, float] = {
-            idx: g.detach().norm().item()
-            for idx, g in zip(analysis_indices, grads)
-        }
+        grads = torch.autograd.grad(reward_val, target_v_preds, retain_graph=False, allow_unused=False)
+        grad_norms = {idx: g.detach().norm().item() for idx, g in zip(analysis_indices, grads)}
+        # Save flattened gradient vectors for cosine-similarity computation
+        grad_vectors = {idx: g.detach().flatten().cpu() for idx, g in zip(analysis_indices, grads)}
         reward_scalar = reward_val.item()
 
-        # Release the computation graph explicitly so the next trajectory
-        # starts with a clean autograd state.
         del grads, target_v_preds, v_preds, x_final, decoded, latents, reward_val
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Map analysis indices to sigma values (continuous time in [0, 1])
         sigmas = self.pipe.scheduler.sigmas
         if isinstance(sigmas, np.ndarray):
             sigmas = torch.from_numpy(sigmas).float()
         else:
             sigmas = sigmas.float()
 
-        return dict(grad_norms), reward_scalar, timesteps, sigmas
+        return grad_norms, grad_vectors, reward_scalar, timesteps, sigmas
+
+
+# ============================================================================
+# Per-checkpoint worker (for multiprocessing)
+# ============================================================================
+
+def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
+    """Run full analysis on a single checkpoint. Entry point for multiprocessing."""
+    gpu_id, epoch, checkpoint_path, config_dict, prompts, reward_cfgs = worker_args
+
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f"cuda:{gpu_id}")
+
+    # Reconstruct config
+    config = AnalysisConfig(**config_dict)
+
+    print(f"\n[GPU {gpu_id}] Checkpoint epoch={epoch} | path={checkpoint_path}")
+
+    # Load analyzer with this checkpoint
+    analyzer = GradientAnalyzer(config, checkpoint_path)
+
+    # Load reward functions
+    reward_fns = []
+    for rcfg in reward_cfgs:
+        name, fn = load_reward_fn(rcfg)
+        reward_fns.append((name, fn))
+
+    results = []
+    for prompt_idx, prompt in enumerate(prompts):
+        print(f"[GPU {gpu_id}][ckpt {epoch}] Prompt [{prompt_idx + 1}/{len(prompts)}]: {prompt[:60]}...")
+        prompt_embeds_info = analyzer._encode_prompt(prompt)
+
+        # Collect gradient info for all rewards of this prompt
+        prompt_grads: Dict[str, Dict[int, torch.Tensor]] = {}  # reward_name → {idx: flat_grad_tensor}
+        prompt_results: List[Dict] = []
+
+        for reward_name, reward_fn in reward_fns:
+            grad_norms, grad_vectors, reward_value, timesteps, sigmas = analyzer.compute_gradient_norms(
+                prompt, prompt_embeds_info, reward_fn, reward_name,
+            )
+            print(f"[GPU {gpu_id}][ckpt {epoch}]   {reward_name}: value={reward_value:.4f}, "
+                  f"grad_norms=[{min(grad_norms.values()):.6f}, {max(grad_norms.values()):.6f}]")
+
+            prompt_grads[reward_name] = grad_vectors
+            prompt_results.append({
+                "epoch": epoch,
+                "prompt": prompt,
+                "prompt_idx": prompt_idx,
+                "reward": reward_name,
+                "reward_value": reward_value,
+                "grad_norms": grad_norms,
+                "timesteps": timesteps.tolist(),
+                "sigmas": [float(sigmas[i]) for i in range(len(sigmas))],
+            })
+            del grad_norms
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # Compute pairwise cosine similarities between reward gradients
+        reward_names = [name for name, _ in reward_fns]
+        analysis_indices = sorted(prompt_grads[reward_names[0]].keys())
+        cosine_sim: Dict[str, Dict[int, float]] = {}  # "rA_vs_rB" → {idx: cos_sim}
+
+        for i in range(len(reward_names)):
+            for j in range(i + 1, len(reward_names)):
+                rA, rB = reward_names[i], reward_names[j]
+                key = f"{rA}_vs_{rB}"
+                cosine_sim[key] = {}
+                for idx in analysis_indices:
+                    gA = prompt_grads[rA][idx]
+                    gB = prompt_grads[rB][idx]
+                    cos = (gA @ gB) / (gA.norm() * gB.norm() + 1e-8)
+                    cosine_sim[key][idx] = cos.item()
+
+        # Attach cosine similarity to each result entry
+        sigmas_list = prompt_results[0]["sigmas"]
+        for entry in prompt_results:
+            entry["cosine_sim"] = cosine_sim
+            # Keep sigmas on first entry only (for plotting)
+            if entry["reward"] != reward_names[0]:
+                entry["sigmas"] = sigmas_list  # reference, fine since we serialize later
+
+        results.extend(prompt_results)
+        del prompt_grads, prompt_embeds_info
+
+    # Clean up to free GPU memory before next worker
+    del analyzer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return {"epoch": epoch, "results": results}
 
 
 # ============================================================================
 # Visualization
 # ============================================================================
 
-def save_results(results: List[Dict], output_dir: str, ckpt_epoch: str = ""):
-    """Save raw results as JSON."""
+def save_per_checkpoint_results(results: List[Dict], output_dir: str, epoch: int):
     os.makedirs(output_dir, exist_ok=True)
-    prefix = f"checkpoint-{ckpt_epoch}_" if ckpt_epoch else ""
-    out = {
-        "results": [
-            {
-                "prompt": r["prompt"],
-                "reward": r["reward"],
-                "reward_value": r["reward_value"],
-                "timestep_indices": sorted(r["grad_norms"].keys()),
-                "sigma_values": [float(r["sigmas"][i]) for i in sorted(r["grad_norms"].keys())],
-                "timestep_values": [float(r["timesteps"][i]) for i in sorted(r["grad_norms"].keys())],
-                "grad_norms": [r["grad_norms"][i] for i in sorted(r["grad_norms"].keys())],
-            }
-            for r in results
-        ],
-    }
-    path = os.path.join(output_dir, f"{prefix}gradient_norms.json")
+    # Serialize: convert int-keyed dicts to lists for clean JSON
+    serializable = []
+    for r in results:
+        entry = {
+            "epoch": r["epoch"],
+            "prompt": r["prompt"],
+            "prompt_idx": r["prompt_idx"],
+            "reward": r["reward"],
+            "reward_value": r["reward_value"],
+            "timestep_indices": sorted(r["grad_norms"].keys()),
+            "sigma_values": [float(r["sigmas"][i]) for i in sorted(r["grad_norms"].keys())],
+            "grad_norms": [r["grad_norms"][i] for i in sorted(r["grad_norms"].keys())],
+        }
+        if "cosine_sim" in r and r["cosine_sim"]:
+            cs_json = {}
+            for pair_key, idx_dict in r["cosine_sim"].items():
+                cs_json[pair_key] = {
+                    "timestep_indices": sorted(idx_dict.keys()),
+                    "sigma_values": [float(r["sigmas"][i]) for i in sorted(idx_dict.keys())],
+                    "cosine_sim": [idx_dict[i] for i in sorted(idx_dict.keys())],
+                }
+            entry["cosine_sim"] = cs_json
+        serializable.append(entry)
+
+    path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.json")
     with open(path, "w") as f:
-        json.dump(out, f, indent=2)
-    print(f"Results saved to {path}")
+        json.dump({"epoch": epoch, "results": serializable}, f, indent=2)
+    print(f"  Saved {path}")
 
 
-def plot_gradient_norms(results: List[Dict], output_dir: str, ckpt_epoch: str = ""):
-    """Plot gradient norms vs sigma (noise level) for each reward."""
-    prefix = f"checkpoint-{ckpt_epoch}_" if ckpt_epoch else ""
+def plot_per_checkpoint(results: List[Dict], output_dir: str, epoch: int):
+    """Single-checkpoint plot: gradient norms vs sigma for each reward."""
     if not HAS_MPL:
-        print("matplotlib not available, skipping plots.")
         return
-
     from collections import defaultdict
 
-    reward_data: Dict[str, Dict[float, List[float]]] = defaultdict(lambda: defaultdict(list))
-
+    reward_data = defaultdict(lambda: defaultdict(list))
     for r in results:
         rname = r["reward"]
         indices = sorted(r["grad_norms"].keys())
         sigmas = r["sigmas"]
         for t_idx in indices:
-            sigma_val = float(sigmas[t_idx])
-            reward_data[rname][sigma_val].append(r["grad_norms"][t_idx])
+            reward_data[rname][float(sigmas[t_idx])].append(r["grad_norms"][t_idx])
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Plot 1: Raw gradient norms vs sigma (sigma=1 = pure noise, sigma=0 = clean)
     ax = axes[0]
     for rname, t_data in reward_data.items():
-        sigma_vals = sorted(t_data.keys(), reverse=True)  # high sigma first (noisy → clean)
-        means = [np.mean(t_data[s]) for s in sigma_vals]
-        stds = [np.std(t_data[s]) for s in sigma_vals]
-        ax.errorbar(sigma_vals, means, yerr=stds, marker="o", label=rname, capsize=3)
-    ax.set_xlabel("Sigma (noise level: 1 = pure noise, 0 = clean)")
+        svals = sorted(t_data.keys(), reverse=True)
+        means = [np.mean(t_data[s]) for s in svals]
+        stds = [np.std(t_data[s]) for s in svals]
+        ax.errorbar(svals, means, yerr=stds, marker="o", label=rname, capsize=3)
+    ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
     ax.set_ylabel("||d(reward)/d(v_pred)||")
-    ax.set_title("Per-timestep Reward Gradient Norm")
-    ax.invert_xaxis()  # high sigma (noisy) on left, low sigma (clean) on right
-    ax.legend()
+    ax.set_title(f"Per-timestep Gradient Norm (epoch {epoch})")
+    ax.invert_xaxis(); ax.legend()
 
-    # Plot 2: Normalized
     ax = axes[1]
     for rname, t_data in reward_data.items():
-        sigma_vals = sorted(t_data.keys(), reverse=True)
-        means = np.array([np.mean(t_data[s]) for s in sigma_vals])
+        svals = sorted(t_data.keys(), reverse=True)
+        means = np.array([np.mean(t_data[s]) for s in svals])
         means = (means - means.min()) / (means.max() - means.min() + 1e-8)
-        ax.plot(sigma_vals, means, marker="o", label=rname)
-    ax.set_xlabel("Sigma (noise level: 1 = pure noise, 0 = clean)")
+        ax.plot(svals, means, marker="o", label=rname)
+    ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
     ax.set_ylabel("Normalized gradient norm")
-    ax.set_title("Normalized Per-timestep Sensitivity")
-    ax.invert_xaxis()
-    ax.legend()
+    ax.set_title(f"Normalized Sensitivity (epoch {epoch})")
+    ax.invert_xaxis(); ax.legend()
 
     fig.tight_layout()
-    path = os.path.join(output_dir, f"{prefix}gradient_norms.png")
+    path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.png")
     fig.savefig(path, dpi=150)
-    print(f"Plot saved to {path}")
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
+def plot_cosine_similarity(results: List[Dict], output_dir: str, epoch: int):
+    """Per-checkpoint plot: cosine similarity vs sigma for each reward pair."""
+    if not HAS_MPL or not results:
+        return
+    from collections import defaultdict
+
+    # Collect pairwise cosine similarities across prompts
+    pair_sigma_data: Dict[str, Dict[float, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for r in results:
+        cs = r.get("cosine_sim", {})
+        sigmas = r["sigmas"]
+        for pair_key, idx_dict in cs.items():
+            for t_idx, cos_val in idx_dict.items():
+                pair_sigma_data[pair_key][float(sigmas[t_idx])].append(cos_val)
+
+    if not pair_sigma_data:
+        return
+
+    n_pairs = len(pair_sigma_data)
+    fig, axes = plt.subplots(1, n_pairs, figsize=(7 * n_pairs, 5), squeeze=False)
+    axes = axes[0]
+
+    for ax, (pair_key, sigma_data) in zip(axes, sorted(pair_sigma_data.items())):
+        svals = sorted(sigma_data.keys(), reverse=True)
+        means = [np.mean(sigma_data[s]) for s in svals]
+        stds = [np.std(sigma_data[s]) for s in svals]
+        ax.errorbar(svals, means, yerr=stds, marker="o", capsize=3)
+        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
+        ax.set_ylabel("Cosine similarity")
+        ax.set_title(f"Gradient cos-sim: {pair_key} (epoch {epoch})")
+        ax.invert_xaxis()
+        ax.set_ylim(-1.05, 1.05)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, f"checkpoint-{epoch}_cosine_sim.png")
+    fig.savefig(path, dpi=150)
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
+def plot_aggregate(all_checkpoint_results: List[Dict], output_dir: str):
+    """Aggregate plot: gradient norm heatmap across checkpoints × timesteps."""
+    if not HAS_MPL or not all_checkpoint_results:
+        return
+
+    from collections import defaultdict
+    from matplotlib.colors import Normalize
+
+    # Build data: reward → epoch → sigma → mean_grad_norm
+    reward_epoch_sigma: Dict[str, Dict[int, Dict[float, float]]] = defaultdict(lambda: defaultdict(dict))
+    sigmas_global = set()
+
+    for ckpt_data in all_checkpoint_results:
+        epoch = ckpt_data["epoch"]
+        for r in ckpt_data["results"]:
+            rname = r["reward"]
+            indices = sorted(r["grad_norms"].keys())
+            sigmas = r["sigmas"]
+            for t_idx in indices:
+                s = float(sigmas[t_idx])
+                sigmas_global.add(s)
+                if s not in reward_epoch_sigma[rname][epoch]:
+                    reward_epoch_sigma[rname][epoch][s] = []
+                reward_epoch_sigma[rname][epoch][s].append(r["grad_norms"][t_idx])
+
+    sigmas_sorted = sorted(sigmas_global, reverse=True)
+    epochs_sorted = sorted(set(ckpt["epoch"] for ckpt in all_checkpoint_results))
+
+    n_rewards = len(reward_epoch_sigma)
+    fig, axes = plt.subplots(1, n_rewards, figsize=(7 * n_rewards, 5), squeeze=False)
+    axes = axes[0]
+
+    for ax_idx, (rname, epoch_sigma_data) in enumerate(sorted(reward_epoch_sigma.items())):
+        ax = axes[ax_idx]
+        # Build matrix: rows=epochs, cols=sigmas
+        matrix = np.zeros((len(epochs_sorted), len(sigmas_sorted)))
+        for ei, epoch in enumerate(epochs_sorted):
+            for si, s in enumerate(sigmas_sorted):
+                vals = epoch_sigma_data.get(epoch, {}).get(s, [])
+                matrix[ei, si] = np.mean(vals) if vals else np.nan
+
+        # Normalize per reward for comparison
+        vmin = np.nanmin(matrix)
+        vmax = np.nanmax(matrix)
+        im = ax.imshow(matrix, aspect="auto", origin="lower",
+                       extent=[sigmas_sorted[-1], sigmas_sorted[0], epochs_sorted[0], epochs_sorted[-1]],
+                       cmap="viridis", norm=Normalize(vmin=vmin, vmax=vmax))
+        ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
+        ax.set_ylabel("Checkpoint epoch")
+        ax.set_title(f"{rname} — ||d(reward)/d(v_pred)||")
+        ax.invert_xaxis()
+        plt.colorbar(im, ax=ax)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "aggregate_heatmap.png")
+    fig.savefig(path, dpi=150)
+    print(f"Aggregate heatmap saved to {path}")
+    plt.close(fig)
+
+    # --- Aggregate cosine similarity heatmaps ---
+    # Build data: reward_pair → epoch → sigma → mean_cos_sim
+    pair_epoch_sigma: Dict[str, Dict[int, Dict[float, float]]] = defaultdict(lambda: defaultdict(dict))
+
+    for ckpt_data in all_checkpoint_results:
+        epoch = ckpt_data["epoch"]
+        for r in ckpt_data["results"]:
+            cs = r.get("cosine_sim", {})
+            sigmas = r["sigmas"]
+            for pair_key, idx_dict in cs.items():
+                for t_idx, cos_val in idx_dict.items():
+                    s = float(sigmas[t_idx])
+                    if s not in pair_epoch_sigma[pair_key][epoch]:
+                        pair_epoch_sigma[pair_key][epoch][s] = []
+                    pair_epoch_sigma[pair_key][epoch][s].append(cos_val)
+
+    if pair_epoch_sigma:
+        n_pairs = len(pair_epoch_sigma)
+        fig, axes = plt.subplots(1, n_pairs, figsize=(7 * n_pairs, 5), squeeze=False)
+        axes = axes[0]
+        for ax, (pair_key, epoch_sigma) in zip(axes, sorted(pair_epoch_sigma.items())):
+            matrix = np.zeros((len(epochs_sorted), len(sigmas_sorted)))
+            for ei, epoch in enumerate(epochs_sorted):
+                for si, s in enumerate(sigmas_sorted):
+                    vals = epoch_sigma.get(epoch, {}).get(s, [])
+                    matrix[ei, si] = np.mean(vals) if vals else np.nan
+            vmin = max(np.nanmin(matrix), -1.0)
+            vmax = min(np.nanmax(matrix), 1.0)
+            im = ax.imshow(matrix, aspect="auto", origin="lower",
+                           extent=[sigmas_sorted[-1], sigmas_sorted[0], epochs_sorted[0], epochs_sorted[-1]],
+                           cmap="RdBu_r", norm=Normalize(vmin=vmin, vmax=vmax))
+            ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
+            ax.set_ylabel("Checkpoint epoch")
+            ax.set_title(f"Gradient cos-sim: {pair_key}")
+            ax.invert_xaxis()
+            plt.colorbar(im, ax=ax)
+        fig.tight_layout()
+        path = os.path.join(output_dir, "aggregate_cosine_sim.png")
+        fig.savefig(path, dpi=150)
+        print(f"Aggregate cosine similarity saved to {path}")
+        plt.close(fig)
+
+    # Also create per-reward line plots comparing checkpoints at selected sigmas
+    plot_checkpoint_comparison(reward_epoch_sigma, epochs_sorted, sigmas_sorted, output_dir)
+
+
+def plot_checkpoint_comparison(reward_epoch_sigma, epochs_sorted, sigmas_sorted, output_dir):
+    """Per-reward line plot: gradient norm vs sigma, one line per checkpoint."""
+    if not HAS_MPL:
+        return
+
+    n_rewards = len(reward_epoch_sigma)
+    fig, axes = plt.subplots(1, n_rewards, figsize=(7 * n_rewards, 5), squeeze=False)
+    axes = axes[0]
+
+    for ax_idx, (rname, epoch_sigma_data) in enumerate(sorted(reward_epoch_sigma.items())):
+        ax = axes[ax_idx]
+        for epoch in epochs_sorted:
+            svals = []; means = []
+            for s in sigmas_sorted:
+                vals = epoch_sigma_data.get(epoch, {}).get(s, [])
+                if vals:
+                    svals.append(s)
+                    means.append(np.mean(vals))
+            if svals:
+                ax.plot(svals, means, marker=".", label=f"epoch {epoch}", alpha=0.7)
+        ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
+        ax.set_ylabel("||d(reward)/d(v_pred)||")
+        ax.set_title(f"{rname} — across checkpoints")
+        ax.invert_xaxis(); ax.legend(fontsize=7)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "checkpoint_comparison.png")
+    fig.savefig(path, dpi=150)
+    print(f"Checkpoint comparison saved to {path}")
     plt.close(fig)
 
 
@@ -511,73 +719,86 @@ def plot_gradient_norms(results: List[Dict], output_dir: str, ckpt_epoch: str = 
 
 def main(config_path: str):
     config = parse_config(config_path)
-    print(f"Output directory: {config.output_dir}")
+    print(f"Checkpoint dir : {config.checkpoint_dir}")
+    print(f"Output dir     : {config.output_dir}")
     os.makedirs(config.output_dir, exist_ok=True)
 
     if not config.prompts:
-        print("ERROR: No prompts specified in config.")
-        sys.exit(1)
+        print("ERROR: No prompts specified."); sys.exit(1)
     if not config.rewards:
-        print("ERROR: No rewards specified in config.")
+        print("ERROR: No rewards specified."); sys.exit(1)
+    if not config.checkpoint_dir:
+        print("ERROR: No checkpoint_dir specified."); sys.exit(1)
+
+    # Discover checkpoints
+    checkpoints = discover_checkpoints(config.checkpoint_dir)
+    if not checkpoints:
+        print(f"ERROR: No checkpoint-* subdirectories found in {config.checkpoint_dir}")
         sys.exit(1)
+    print(f"Found {len(checkpoints)} checkpoints: {[e for e, _ in checkpoints]}")
 
-    analyzer = GradientAnalyzer(config)
+    num_gpus = min(config.num_gpus, torch.cuda.device_count())
+    print(f"Using {num_gpus} GPUs")
 
-    # Load reward functions (each wraps a CLIP model)
-    reward_fns: List[Tuple[str, Any]] = []
-    for rcfg in config.rewards:
-        name, fn = load_reward_fn(rcfg)
-        reward_fns.append((name, fn))
-        print(f"Loaded reward: {name}")
+    # Prepare config dict for pickling (dataclass → dict)
+    config_dict = {
+        "base_model": config.base_model,
+        "checkpoint_dir": config.checkpoint_dir,
+        "dtype": config.dtype,
+        "num_gpus": config.num_gpus,
+        "num_inference_steps": config.num_inference_steps,
+        "guidance_scale": config.guidance_scale,
+        "height": config.height, "width": config.width, "seed": config.seed,
+        "num_analysis_timesteps": config.num_analysis_timesteps,
+        "prompts": config.prompts,
+        "rewards": config.rewards,
+        "output_dir": config.output_dir,
+    }
 
-    all_results: List[Dict] = []
+    # Build worker tasks: (gpu_id, epoch, checkpoint_path, config_dict, prompts, reward_cfgs)
+    tasks = []
+    for i, (epoch, ckpt_path) in enumerate(checkpoints):
+        gpu_id = i % num_gpus
+        tasks.append((gpu_id, epoch, ckpt_path, config_dict, config.prompts, config.rewards))
 
-    for prompt_idx, prompt in enumerate(config.prompts):
-        print(f"\n{'='*60}")
-        print(f"Prompt [{prompt_idx + 1}/{len(config.prompts)}]: {prompt}")
-        print(f"{'='*60}")
+    all_checkpoint_results = []
 
-        # Encode prompt once
-        prompt_embeds_info = analyzer._encode_prompt(prompt)
+    if num_gpus > 1 and len(checkpoints) > 1:
+        # Multiprocessing: spawn one process per checkpoint, round-robin GPUs
+        mp.set_start_method("spawn", force=True)
+        with mp.Pool(processes=min(num_gpus, len(checkpoints))) as pool:
+            for ckpt_result in pool.imap_unordered(_analyze_one_checkpoint, tasks):
+                epoch = ckpt_result["epoch"]
+                results = ckpt_result["results"]
+                print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
+                save_per_checkpoint_results(results, config.output_dir, epoch)
+                plot_per_checkpoint(results, config.output_dir, epoch)
+                plot_cosine_similarity(results, config.output_dir, epoch)
+                all_checkpoint_results.append(ckpt_result)
+    else:
+        # Single GPU: run sequentially
+        for task in tasks:
+            ckpt_result = _analyze_one_checkpoint(task)
+            epoch = ckpt_result["epoch"]
+            results = ckpt_result["results"]
+            print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
+            save_per_checkpoint_results(results, config.output_dir, epoch)
+            plot_per_checkpoint(results, config.output_dir, epoch)
+            plot_cosine_similarity(results, config.output_dir, epoch)
+            all_checkpoint_results.append(ckpt_result)
 
-        for reward_name, reward_fn in reward_fns:
-            print(f"  Computing gradients for {reward_name}...")
-            grad_norms, reward_value, timesteps, sigmas = analyzer.compute_gradient_norms(
-                prompt, prompt_embeds_info, reward_fn, reward_name,
-            )
-            print(f"    Reward value: {reward_value:.4f}")
-            print(f"    Gradient norms range: [{min(grad_norms.values()):.6f}, {max(grad_norms.values()):.6f}]")
+    # Aggregate plots across all checkpoints
+    all_checkpoint_results.sort(key=lambda x: x["epoch"])
+    plot_aggregate(all_checkpoint_results, config.output_dir)
 
-            all_results.append({
-                "prompt": prompt,
-                "prompt_idx": prompt_idx,
-                "reward": reward_name,
-                "reward_value": reward_value,
-                "grad_norms": grad_norms,
-                "timesteps": timesteps,
-                "sigmas": sigmas,
-            })
-
-            # Aggressively free GPU memory and ensure autograd engine state is reset
-            del grad_norms
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        # End of prompt: clear prompt embeddings to release any PyTorch-internal refs
-        del prompt_embeds_info
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-    # Extract checkpoint epoch for output filenames
-    ckpt_epoch = ""
-    if config.checkpoint:
-        ckpt_name = os.path.basename(config.checkpoint.rstrip("/"))
-        if ckpt_name.startswith("checkpoint-"):
-            ckpt_epoch = ckpt_name.split("checkpoint-")[1]
-
-    # Save and visualize
-    save_results(all_results, config.output_dir, ckpt_epoch)
-    plot_gradient_norms(all_results, config.output_dir, ckpt_epoch)
+    # Save aggregate JSON
+    agg_path = os.path.join(config.output_dir, "all_checkpoints_summary.json")
+    summary = {
+        "checkpoints": [{"epoch": c["epoch"], "num_results": len(c["results"])}
+                        for c in all_checkpoint_results],
+    }
+    with open(agg_path, "w") as f:
+        json.dump(summary, f, indent=2)
 
     print(f"\nDone. Results in {config.output_dir}/")
 
