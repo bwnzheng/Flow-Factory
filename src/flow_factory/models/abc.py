@@ -129,8 +129,11 @@ class BaseAdapter(ABC):
         # Cache target module mapping
         self.target_module_map = self._init_target_module_map()
 
-        # Load checkpoint
-        if self.model_args.resume_path:
+        # Load checkpoint.
+        # 'lora'/'full' load into the unwrapped pipeline modules here (before prepare()).
+        # 'state' is deferred to post_init(): accelerator.load_state() only restores into
+        # modules/optimizer registered by accelerator.prepare(), which the trainer runs later.
+        if self.model_args.resume_path and self.model_args.resume_type != 'state':
             self.load_checkpoint(
                 self.model_args.resume_path,
                 resume_type=self.model_args.resume_type
@@ -164,6 +167,11 @@ class BaseAdapter(ABC):
     # ================================== Post Init =================================
     def post_init(self):
         """Hook for additional initialization after main trainer's `accelerator.prepare`."""
+        # Full training-state resume must happen here: accelerator.prepare() has now
+        # registered the trainable modules and optimizer, so accelerator.load_state()
+        # can actually restore model + optimizer + RNG (and any other prepared objects).
+        if self.model_args.resume_path and self.model_args.resume_type == 'state':
+            self.load_checkpoint(self.model_args.resume_path, resume_type='state')
         self._init_ema()
         self._init_ref_parameters()
 
@@ -1742,7 +1750,7 @@ class BaseAdapter(ABC):
             resume_type: Type of checkpoint to load.
                 - 'lora': Load LoRA adapters only
                 - 'full': Load full model weights
-                - 'state': Load full training state (model + optimizer + scheduler + RNG)
+                - 'state': Load full training state (model + optimizer + RNG)
                 - None: Auto-detect based on checkpoint directory contents
         """
         path = self._resolve_checkpoint_path(path)
