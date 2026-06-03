@@ -62,6 +62,7 @@ class AnalysisConfig:
     seed: int = 42
 
     num_analysis_timesteps: int = 20
+    prompts_file: str = ""
     prompts: List[str] = field(default_factory=list)
 
     rewards: List[Dict[str, Any]] = field(default_factory=list)
@@ -89,6 +90,7 @@ def parse_config(path: str) -> AnalysisConfig:
         width=inference.get("width", 512),
         seed=inference.get("seed", 42),
         num_analysis_timesteps=analysis.get("num_analysis_timesteps", 20),
+        prompts_file=analysis.get("prompts_file", ""),
         prompts=analysis.get("prompts", []),
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
@@ -728,8 +730,13 @@ def main(config_path: str):
     print(f"Output dir     : {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
 
+    # Load prompts from file or use inline list
+    if config.prompts_file:
+        with open(config.prompts_file, "r") as f:
+            config.prompts = [line.strip() for line in f if line.strip()]
+        print(f"Loaded {len(config.prompts)} prompts from {config.prompts_file}")
     if not config.prompts:
-        print("ERROR: No prompts specified."); sys.exit(1)
+        print("ERROR: No prompts specified (prompts_file or prompts)."); sys.exit(1)
     if not config.rewards:
         print("ERROR: No rewards specified."); sys.exit(1)
     if not config.checkpoint_dir:

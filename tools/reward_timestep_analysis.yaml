@@ -22,12 +22,10 @@ inference:
 # --- Analysis ---
 analysis:
   num_analysis_timesteps: 20
-  prompts:
-    - "A majestic dragon soaring above a futuristic city at sunset"
-    - "A tranquil Japanese garden with cherry blossoms and a koi pond"
-    - "An astronaut riding a horse on Mars during a dust storm"
-    - "A steampunk airship floating above Victorian-era London"
-    - "A close-up portrait of a wise old wizard with intricate robes"
+  # prompts_file: load prompts from a text file (one per line).
+  # When set, the inline `prompts` list below is ignored.
+  prompts_file: "dataset/pickscore/test.txt"
+  prompts: []
 
 # --- Rewards ---
 rewards:
