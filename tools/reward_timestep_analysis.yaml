@@ -1,26 +1,27 @@
 # Reward Per-Timestep Analysis Configuration
 # ===========================================
-# Computes ||d(reward)/d(v_pred_t)|| at each timestep by backpropagating
-# through the full ODE denoising trajectory.
+# Specify a checkpoint directory — all checkpoint-N subdirectories
+# will be auto-discovered and analyzed in parallel across GPUs.
 
 # --- Model ---
 model:
   base_model: "stabilityai/stable-diffusion-3.5-medium"
-  # Path to LoRA checkpoint directory (containing adapter_model.safetensors)
-  checkpoint: "saves/sd3-5_lora_nft_20260601_115058/checkpoints/checkpoint-120"
+  # Directory containing checkpoint-N subdirectories
+  checkpoint_dir: "saves/sd3-5_lora_nft_20260601_115058/checkpoints/"
   dtype: "bfloat16"
+  num_gpus: 1                # Number of GPUs to use in parallel
 
 # --- Inference ---
 inference:
-  num_inference_steps: 50    # Use more steps than training for finer analysis
-  guidance_scale: 1.0        # No CFG for cleaner gradient signal
+  num_inference_steps: 50
+  guidance_scale: 1.0
   height: 512
   width: 512
   seed: 42
 
 # --- Analysis ---
 analysis:
-  num_analysis_timesteps: 20  # Sample 20 evenly-spaced timesteps
+  num_analysis_timesteps: 20
   prompts:
     - "A majestic dragon soaring above a futuristic city at sunset"
     - "A tranquil Japanese garden with cherry blossoms and a koi pond"
@@ -28,7 +29,7 @@ analysis:
     - "A steampunk airship floating above Victorian-era London"
     - "A close-up portrait of a wise old wizard with intricate robes"
 
-# --- Rewards (one or more from: CLIP, PickScore) ---
+# --- Rewards ---
 rewards:
   - name: "clip_score"
     reward_model: "CLIP"

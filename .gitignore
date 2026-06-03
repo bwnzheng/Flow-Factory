@@ -76,6 +76,7 @@ saves/
 *.out
 output/
 outputs/
+analysis_output/
 
 # ====================
 # Debug output files (not directories like .agents/skills/ff-debug)
