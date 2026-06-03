@@ -719,9 +719,14 @@ def plot_checkpoint_comparison(reward_epoch_sigma, epochs_sorted, sigmas_sorted,
 
 def main(config_path: str):
     config = parse_config(config_path)
+    # Create output subfolder named after the run (parent dir of checkpoints/)
+    ckpt_dir = config.checkpoint_dir.rstrip("/")
+    run_name = os.path.basename(os.path.dirname(ckpt_dir))
+    output_dir = os.path.join(config.output_dir, run_name)
+    config.output_dir = output_dir  # update so workers use the correct path
     print(f"Checkpoint dir : {config.checkpoint_dir}")
-    print(f"Output dir     : {config.output_dir}")
-    os.makedirs(config.output_dir, exist_ok=True)
+    print(f"Output dir     : {output_dir}")
+    os.makedirs(output_dir, exist_ok=True)
 
     if not config.prompts:
         print("ERROR: No prompts specified."); sys.exit(1)
