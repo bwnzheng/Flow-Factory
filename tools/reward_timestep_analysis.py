@@ -258,39 +258,52 @@ class GradientAnalyzer:
         self.pipe.transformer.eval()
 
     @torch.no_grad()
-    def _encode_prompts(self, prompts: List[str]) -> Dict[str, torch.Tensor]:
-        """Encode a list of prompts into batched embeddings."""
-        do_cfg = self.config.guidance_scale > 1.0
-        result = self.pipe.encode_prompt(
-            prompt=prompts, prompt_2=prompts, prompt_3=prompts,
-            device=self.device, do_classifier_free_guidance=do_cfg,
-        )
-        if do_cfg:
+    def pre_encode_all_prompts(self, prompts: List[str]) -> List[Dict[str, torch.Tensor]]:
+        """Encode all prompts into SD3.5 text embeddings (batched), store on CPU.
+        Returns a list of per-prompt embedding dicts.
+        """
+        # Encode in chunks to avoid OOM on T5 (4.7B params × batch)
+        chunk_size = 32
+        all_embeds = []
+        for start in range(0, len(prompts), chunk_size):
+            chunk = prompts[start:start + chunk_size]
+            do_cfg = self.config.guidance_scale > 1.0
+            result = self.pipe.encode_prompt(
+                prompt=chunk, prompt_2=chunk, prompt_3=chunk,
+                device=self.device, do_classifier_free_guidance=do_cfg,
+            )
             prompt_embeds, neg_embeds, pooled, neg_pooled = result
-            return {
-                "prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled,
-                "negative_prompt_embeds": neg_embeds, "negative_pooled_prompt_embeds": neg_pooled,
-                "do_cfg": True, "batch_size": len(prompts),
-            }
-        else:
-            prompt_embeds, _, pooled, _ = result
-            return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled,
-                    "do_cfg": False, "batch_size": len(prompts)}
+            # Split batch back into per-prompt tensors (on CPU)
+            for b in range(len(chunk)):
+                info = {
+                    "prompt_embeds": prompt_embeds[b:b + 1].cpu(),
+                    "pooled_prompt_embeds": pooled[b:b + 1].cpu(),
+                    "do_cfg": do_cfg,
+                }
+                if do_cfg and neg_embeds is not None and neg_pooled is not None:
+                    info["negative_prompt_embeds"] = neg_embeds[b:b + 1].cpu()
+                    info["negative_pooled_prompt_embeds"] = neg_pooled[b:b + 1].cpu()
+                all_embeds.append(info)
+        return all_embeds
 
-    def run_trajectory(self, prompt_embeds_info: Dict) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
+    def run_trajectory(
+        self, batch_embeds: List[Dict[str, torch.Tensor]]
+    ) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Run ODE trajectory on a batch of pre-encoded prompt embeddings."""
         pipe = self.pipe
         config = self.config
-        do_cfg = prompt_embeds_info["do_cfg"]
-        batch_size = prompt_embeds_info["batch_size"]
-        prompt_embeds = prompt_embeds_info["prompt_embeds"]
-        pooled = prompt_embeds_info["pooled_prompt_embeds"]
+        batch_size = len(batch_embeds)
+        do_cfg = batch_embeds[0]["do_cfg"]
+
+        # Concatenate per-prompt embeddings into batched tensors on GPU
+        prompt_embeds = torch.cat([e["prompt_embeds"] for e in batch_embeds], dim=0).to(self.device)
+        pooled = torch.cat([e["pooled_prompt_embeds"] for e in batch_embeds], dim=0).to(self.device)
         if do_cfg:
-            neg_embeds = prompt_embeds_info["negative_prompt_embeds"]
-            neg_pooled = prompt_embeds_info["negative_pooled_prompt_embeds"]
+            neg_embeds = torch.cat([e["negative_prompt_embeds"] for e in batch_embeds], dim=0).to(self.device)
+            neg_pooled = torch.cat([e["negative_pooled_prompt_embeds"] for e in batch_embeds], dim=0).to(self.device)
 
         num_channels = pipe.transformer.config.in_channels
-        generator = torch.Generator(device="cpu").manual_seed(config.seed)
-        # We need different noise per sample — expand seed for each
+        # Different noise per sample
         latents_list = []
         for b in range(batch_size):
             g = torch.Generator(device="cpu").manual_seed(config.seed + b)
@@ -344,9 +357,9 @@ class GradientAnalyzer:
         return v_preds, x_t, timesteps
 
     def compute_gradient_norms_batched(
-        self, prompts: List[str], prompt_embeds_info: Dict, reward_fn, reward_name: str,
+        self, prompts: List[str], batch_embeds: List[Dict[str, torch.Tensor]], reward_fn, reward_name: str,
     ) -> Tuple[List[Tuple[Dict[int, float], Dict[int, torch.Tensor], float]], torch.Tensor, torch.Tensor]:
-        """Run a batched trajectory, compute per-prompt reward and gradient norms.
+        """Run a batched trajectory using pre-encoded embeddings, compute per-prompt results.
 
         Returns:
             per_prompt: list of (grad_norms, grad_vectors, reward_value) per prompt
@@ -357,7 +370,7 @@ class GradientAnalyzer:
         batch_size = len(prompts)
         analysis_indices = _sample_analysis_indices(config.num_inference_steps, config.num_analysis_timesteps)
 
-        v_preds, x_final, timesteps = self.run_trajectory(prompt_embeds_info)
+        v_preds, x_final, timesteps = self.run_trajectory(batch_embeds)
 
         # VAE decode (batched)
         latents = x_final / self.pipe.vae.config.scaling_factor + self.pipe.vae.config.shift_factor
@@ -431,21 +444,24 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
     results = []
     batch_size = config.per_device_batch_size
 
-    # Pre-encode all prompts (batched encoding is faster than per-prompt)
+    # Pre-encode: SD3.5 text embeddings (T5 + CLIP) — once for all prompts
+    print(f"[GPU {gpu_id}][ckpt {epoch}] Pre-encoding {len(prompts)} prompts...")
+    all_sd3_embeds = analyzer.pre_encode_all_prompts(prompts)
+    # Pre-encode: reward model text features
     prompt_embeds_cache = {}  # reward_name → {prompt_str: text_features}
     for reward_name, reward_fn in reward_fns:
         prompt_embeds_cache[reward_name] = {}
         for p in prompts:
             prompt_embeds_cache[reward_name][p] = reward_fn._encode_text(p)
+    print(f"[GPU {gpu_id}][ckpt {epoch}] Pre-encoding done.")
 
-    # Process prompts in batches
+    # Process prompts in batches using pre-encoded embeddings
     for batch_start in range(0, len(prompts), batch_size):
         batch_prompts = prompts[batch_start:batch_start + batch_size]
         batch_indices = list(range(batch_start, batch_start + len(batch_prompts)))
+        batch_embeds = all_sd3_embeds[batch_start:batch_start + batch_size]
         bs = len(batch_prompts)
         print(f"[GPU {gpu_id}][ckpt {epoch}] Batch [{batch_start + 1}-{batch_start + bs}/{len(prompts)}]")
-
-        prompt_embeds_info = analyzer._encode_prompts(batch_prompts)
 
         # Collect gradient vectors for all rewards across this batch
         batch_grads: Dict[str, List[Dict[int, torch.Tensor]]] = {}  # reward_name → [per-prompt {idx: vec}]
@@ -453,7 +469,7 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
 
         for reward_name, reward_fn in reward_fns:
             per_prompt_data, timesteps, sigmas = analyzer.compute_gradient_norms_batched(
-                batch_prompts, prompt_embeds_info, reward_fn, reward_name,
+                batch_prompts, batch_embeds, reward_fn, reward_name,
             )
             batch_grads[reward_name] = []
             for b, (grad_norms, grad_vectors, reward_value) in enumerate(per_prompt_data):
@@ -498,7 +514,7 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
                 batch_results[entry_idx]["cosine_sim"] = cosine_sim
 
         results.extend(batch_results)
-        del batch_grads, prompt_embeds_info, batch_results
+        del batch_grads, batch_results
         gc.collect()
         torch.cuda.empty_cache()
 
