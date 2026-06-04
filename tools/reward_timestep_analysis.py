@@ -514,17 +514,49 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
 # Visualization
 # ============================================================================
 
+def load_per_checkpoint_results(output_dir: str, epoch: int) -> Optional[Dict]:
+    """Load previously saved checkpoint results, converting back to in-memory format."""
+    path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        data = json.load(f)
+    # Reconstruct in-memory format: grad_norms as int→float dict
+    results = []
+    for r in data["results"]:
+        indices = r["timestep_indices"]
+        r["grad_norms"] = {idx: r["grad_norms"][i] for i, idx in enumerate(indices)}
+        # Restore full sigmas/timesteps lists for downstream plot functions
+        r["sigmas"] = r.get("sigmas", r.get("sigma_values", []))
+        r["timesteps"] = r.get("timesteps", r.get("timestep_values", r.get("timestep_indices", [])))
+        # Reconstruct cosine_sim if present
+        if "cosine_sim" in r and r["cosine_sim"]:
+            cs = {}
+            for pair_key, cs_data in r["cosine_sim"].items():
+                cs_indices = cs_data["timestep_indices"]
+                cs[pair_key] = {idx: cs_data["cosine_sim"][i] for i, idx in enumerate(cs_indices)}
+            r["cosine_sim"] = cs
+        results.append(r)
+    print(f"  Loaded existing results for checkpoint-{epoch} ({len(results)} records)")
+    return {"epoch": data["epoch"], "results": results}
+
+
 def save_per_checkpoint_results(results: List[Dict], output_dir: str, epoch: int):
     os.makedirs(output_dir, exist_ok=True)
     # Serialize: convert int-keyed dicts to lists for clean JSON
     serializable = []
     for r in results:
+        # Extract full sigmas/timesteps as lists for JSON
+        sigmas_full = [float(r["sigmas"][i]) for i in range(len(r["sigmas"]))] if not isinstance(r["sigmas"], list) else r["sigmas"]
+        timesteps_full = r["timesteps"] if isinstance(r["timesteps"], list) else r["timesteps"].tolist() if hasattr(r["timesteps"], "tolist") else list(r["timesteps"])
         entry = {
             "epoch": r["epoch"],
             "prompt": r["prompt"],
             "prompt_idx": r["prompt_idx"],
             "reward": r["reward"],
             "reward_value": r["reward_value"],
+            "timesteps": timesteps_full,
+            "sigmas": sigmas_full,
             "timestep_indices": sorted(r["grad_norms"].keys()),
             "sigma_values": [float(r["sigmas"][i]) for i in sorted(r["grad_norms"].keys())],
             "grad_norms": [r["grad_norms"][i] for i in sorted(r["grad_norms"].keys())],
@@ -824,37 +856,47 @@ def main(config_path: str):
         "output_dir": config.output_dir,
     }
 
-    # Build worker tasks: (gpu_id, epoch, checkpoint_path, config_dict, prompts, reward_cfgs)
-    tasks = []
-    for i, (epoch, ckpt_path) in enumerate(checkpoints):
-        gpu_id = i % num_gpus
-        tasks.append((gpu_id, epoch, ckpt_path, config_dict, config.prompts, config.rewards))
-
+    # Resume: load already-completed checkpoints, skip them in task list
     all_checkpoint_results = []
+    pending_checkpoints = []
+    for epoch, ckpt_path in checkpoints:
+        existing = load_per_checkpoint_results(output_dir, epoch)
+        if existing is not None:
+            all_checkpoint_results.append(existing)
+        else:
+            pending_checkpoints.append((epoch, ckpt_path))
 
-    if num_gpus > 1 and len(checkpoints) > 1:
-        # Multiprocessing: spawn one process per checkpoint, round-robin GPUs
-        mp.set_start_method("spawn", force=True)
-        with mp.Pool(processes=min(num_gpus, len(checkpoints))) as pool:
-            for ckpt_result in pool.imap_unordered(_analyze_one_checkpoint, tasks):
+    if pending_checkpoints:
+        print(f"Pending: {len(pending_checkpoints)} checkpoints to process")
+        # Build worker tasks for pending checkpoints
+        tasks = []
+        for i, (epoch, ckpt_path) in enumerate(pending_checkpoints):
+            gpu_id = i % num_gpus
+            tasks.append((gpu_id, epoch, ckpt_path, config_dict, config.prompts, config.rewards))
+
+        if num_gpus > 1 and len(tasks) > 1:
+            mp.set_start_method("spawn", force=True)
+            with mp.Pool(processes=min(num_gpus, len(tasks))) as pool:
+                for ckpt_result in pool.imap_unordered(_analyze_one_checkpoint, tasks):
+                    epoch = ckpt_result["epoch"]
+                    results = ckpt_result["results"]
+                    print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
+                    save_per_checkpoint_results(results, output_dir, epoch)
+                    plot_per_checkpoint(results, output_dir, epoch)
+                    plot_cosine_similarity(results, output_dir, epoch)
+                    all_checkpoint_results.append(ckpt_result)
+        else:
+            for task in tasks:
+                ckpt_result = _analyze_one_checkpoint(task)
                 epoch = ckpt_result["epoch"]
                 results = ckpt_result["results"]
                 print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
-                save_per_checkpoint_results(results, config.output_dir, epoch)
-                plot_per_checkpoint(results, config.output_dir, epoch)
-                plot_cosine_similarity(results, config.output_dir, epoch)
+                save_per_checkpoint_results(results, output_dir, epoch)
+                plot_per_checkpoint(results, output_dir, epoch)
+                plot_cosine_similarity(results, output_dir, epoch)
                 all_checkpoint_results.append(ckpt_result)
     else:
-        # Single GPU: run sequentially
-        for task in tasks:
-            ckpt_result = _analyze_one_checkpoint(task)
-            epoch = ckpt_result["epoch"]
-            results = ckpt_result["results"]
-            print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
-            save_per_checkpoint_results(results, config.output_dir, epoch)
-            plot_per_checkpoint(results, config.output_dir, epoch)
-            plot_cosine_similarity(results, config.output_dir, epoch)
-            all_checkpoint_results.append(ckpt_result)
+        print("All checkpoints already processed — skipping computation.")
 
     # Aggregate plots across all checkpoints
     all_checkpoint_results.sort(key=lambda x: x["epoch"])
