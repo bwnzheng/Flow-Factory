@@ -63,6 +63,7 @@ class AnalysisConfig:
     seed: int = 42
 
     num_analysis_timesteps: int = 20
+    max_prompts: int = 0       # 0 = all, >0 = only first N prompts
     max_epochs: int = 0        # 0 = no limit
     prompts_file: str = ""
     prompts: List[str] = field(default_factory=list)
@@ -93,6 +94,7 @@ def parse_config(path: str) -> AnalysisConfig:
         width=inference.get("width", 512),
         seed=inference.get("seed", 42),
         num_analysis_timesteps=analysis.get("num_analysis_timesteps", 20),
+        max_prompts=analysis.get("max_prompts", 0),
         max_epochs=analysis.get("max_epochs", 0),
         prompts_file=analysis.get("prompts_file", ""),
         prompts=analysis.get("prompts", []),
@@ -595,42 +597,36 @@ def save_per_checkpoint_results(results: List[Dict], output_dir: str, epoch: int
 
 
 def plot_per_checkpoint(results: List[Dict], output_dir: str, epoch: int):
-    """Single-checkpoint plot: gradient norms vs sigma for each reward."""
+    """Single-checkpoint plot: individual per-prompt lines, one subplot per reward."""
     if not HAS_MPL:
         return
     from collections import defaultdict
 
-    reward_data = defaultdict(lambda: defaultdict(list))
+    # Group by reward → prompt_idx → list of (sigma, grad_norm)
+    reward_prompt_data = defaultdict(lambda: defaultdict(list))
     for r in results:
         rname = r["reward"]
-        indices = sorted(r["grad_norms"].keys())
+        pidx = r["prompt_idx"]
         sigmas = r["sigmas"]
-        for t_idx in indices:
-            reward_data[rname][float(sigmas[t_idx])].append(r["grad_norms"][t_idx])
+        for t_idx, gn in sorted(r["grad_norms"].items()):
+            reward_prompt_data[rname][pidx].append((float(sigmas[t_idx]), gn))
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    n_rewards = len(reward_prompt_data)
+    fig, axes = plt.subplots(1, n_rewards, figsize=(7 * n_rewards, 5), squeeze=False)
+    axes = axes[0]
 
-    ax = axes[0]
-    for rname, t_data in reward_data.items():
-        svals = sorted(t_data.keys(), reverse=True)
-        means = [np.mean(t_data[s]) for s in svals]
-        stds = [np.std(t_data[s]) for s in svals]
-        ax.errorbar(svals, means, yerr=stds, marker="o", label=rname, capsize=3)
-    ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
-    ax.set_ylabel("||d(reward)/d(v_pred)||")
-    ax.set_title(f"Per-timestep Gradient Norm (epoch {epoch})")
-    ax.invert_xaxis(); ax.legend()
-
-    ax = axes[1]
-    for rname, t_data in reward_data.items():
-        svals = sorted(t_data.keys(), reverse=True)
-        means = np.array([np.mean(t_data[s]) for s in svals])
-        means = (means - means.min()) / (means.max() - means.min() + 1e-8)
-        ax.plot(svals, means, marker="o", label=rname)
-    ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
-    ax.set_ylabel("Normalized gradient norm")
-    ax.set_title(f"Normalized Sensitivity (epoch {epoch})")
-    ax.invert_xaxis(); ax.legend()
+    for ax, (rname, prompt_data) in zip(axes, sorted(reward_prompt_data.items())):
+        for pidx, points in sorted(prompt_data.items()):
+            svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+            gvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+            ax.plot(svals, gvals, marker=".", alpha=0.7, linewidth=0.8,
+                    label=f"prompt {pidx}")
+        ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
+        ax.set_ylabel("||d(reward)/d(v_pred)||")
+        ax.set_title(f"{rname} (epoch {epoch})")
+        ax.invert_xaxis()
+        if len(prompt_data) <= 10:
+            ax.legend(fontsize=7)
 
     fig.tight_layout()
     path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.png")
@@ -640,38 +636,42 @@ def plot_per_checkpoint(results: List[Dict], output_dir: str, epoch: int):
 
 
 def plot_cosine_similarity(results: List[Dict], output_dir: str, epoch: int):
-    """Per-checkpoint plot: cosine similarity vs sigma for each reward pair."""
+    """Per-checkpoint plot: cosine similarity per prompt, one line per prompt per pair."""
     if not HAS_MPL or not results:
         return
     from collections import defaultdict
 
-    # Collect pairwise cosine similarities across prompts
-    pair_sigma_data: Dict[str, Dict[float, List[float]]] = defaultdict(lambda: defaultdict(list))
+    # Group by pair_key → prompt_idx → list of (sigma, cos_sim)
+    pair_prompt_data = defaultdict(lambda: defaultdict(list))
     for r in results:
         cs = r.get("cosine_sim", {})
         sigmas = r["sigmas"]
+        pidx = r["prompt_idx"]
         for pair_key, idx_dict in cs.items():
-            for t_idx, cos_val in idx_dict.items():
-                pair_sigma_data[pair_key][float(sigmas[t_idx])].append(cos_val)
+            for t_idx, cos_val in sorted(idx_dict.items()):
+                pair_prompt_data[pair_key][pidx].append((float(sigmas[t_idx]), cos_val))
 
-    if not pair_sigma_data:
+    if not pair_prompt_data:
         return
 
-    n_pairs = len(pair_sigma_data)
+    n_pairs = len(pair_prompt_data)
     fig, axes = plt.subplots(1, n_pairs, figsize=(7 * n_pairs, 5), squeeze=False)
     axes = axes[0]
 
-    for ax, (pair_key, sigma_data) in zip(axes, sorted(pair_sigma_data.items())):
-        svals = sorted(sigma_data.keys(), reverse=True)
-        means = [np.mean(sigma_data[s]) for s in svals]
-        stds = [np.std(sigma_data[s]) for s in svals]
-        ax.errorbar(svals, means, yerr=stds, marker="o", capsize=3)
+    for ax, (pair_key, prompt_data) in zip(axes, sorted(pair_prompt_data.items())):
+        for pidx, points in sorted(prompt_data.items()):
+            svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+            cvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+            ax.plot(svals, cvals, marker=".", alpha=0.7, linewidth=0.8,
+                    label=f"prompt {pidx}")
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-        ax.set_xlabel("Sigma (1 = pure noise, 0 = clean)")
+        ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
         ax.set_ylabel("Cosine similarity")
         ax.set_title(f"Gradient cos-sim: {pair_key} (epoch {epoch})")
         ax.invert_xaxis()
         ax.set_ylim(-1.05, 1.05)
+        if len(prompt_data) <= 10:
+            ax.legend(fontsize=7)
 
     fig.tight_layout()
     path = os.path.join(output_dir, f"checkpoint-{epoch}_cosine_sim.png")
@@ -837,6 +837,9 @@ def main(config_path: str):
         with open(config.prompts_file, "r") as f:
             config.prompts = [line.strip() for line in f if line.strip()]
         print(f"Loaded {len(config.prompts)} prompts from {config.prompts_file}")
+    if config.max_prompts > 0 and len(config.prompts) > config.max_prompts:
+        config.prompts = config.prompts[:config.max_prompts]
+        print(f"Truncated to first {config.max_prompts} prompts")
     if not config.prompts:
         print("ERROR: No prompts specified (prompts_file or prompts)."); sys.exit(1)
     if not config.rewards:
@@ -867,6 +870,7 @@ def main(config_path: str):
         "guidance_scale": config.guidance_scale,
         "height": config.height, "width": config.width, "seed": config.seed,
         "num_analysis_timesteps": config.num_analysis_timesteps,
+        "max_prompts": config.max_prompts,
         "prompts": config.prompts,
         "rewards": config.rewards,
         "output_dir": config.output_dir,

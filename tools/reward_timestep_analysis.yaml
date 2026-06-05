@@ -23,6 +23,7 @@ inference:
 # --- Analysis ---
 analysis:
   max_epochs: 220            # Only checkpoints with epoch <= max_epochs
+  max_prompts: 5
   num_analysis_timesteps: 20
   # prompts_file: load prompts from a text file (one per line).
   # When set, the inline `prompts` list below is ignored.
