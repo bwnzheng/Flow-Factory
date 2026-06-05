@@ -1,5 +1,5 @@
-# Reward Per-Timestep Analysis Configuration
-# ===========================================
+# Latent Reward Per-Timestep Gradient Analysis Configuration
+# ==============================================
 # Specify a checkpoint directory — all checkpoint-N subdirectories
 # will be auto-discovered and analyzed in parallel across GPUs.
 
