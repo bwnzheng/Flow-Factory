@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Reward Per-Timestep Analysis Tool for NFT Checkpoints.
+Latent Reward Gradient Analysis Tool.
 
 Computes ||d(reward)/d(v_pred_t)|| — the gradient norm of each reward w.r.t.
 the velocity prediction at each timestep — by backpropagating through the
@@ -8,7 +8,7 @@ full ODE denoising trajectory. Supports batch analysis across multiple
 checkpoints with multiprocessing (one GPU per process).
 
 Usage:
-    python tools/reward_timestep_analysis.py -c tools/reward_timestep_analysis.yaml
+    python tools/latent_reward_per_timestep_gradient_analysis/analyze.py -c tools/latent_reward_per_timestep_gradient_analysis/config.yaml
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ def discover_checkpoints(checkpoint_dir: str) -> List[Tuple[int, str]]:
 def load_pipeline(base_model: str, dtype_str: str) -> StableDiffusion3Pipeline:
     dtype = resolve_dtype(dtype_str)
     pipe = StableDiffusion3Pipeline.from_pretrained(
-        base_model, torch_dtype=dtype, low_cpu_mem_usage=False,
+        base_model, torch_dtype=dtype, low_cpu_mem_usage=True,
     )
     scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
         pipe.scheduler.config, dynamics_type="ODE",
@@ -262,9 +262,8 @@ class GradientAnalyzer:
     @torch.no_grad()
     def pre_encode_all_prompts(self, prompts: List[str]) -> List[Dict[str, torch.Tensor]]:
         """Encode all prompts into SD3.5 text embeddings (batched), store on CPU.
-        Returns a list of per-prompt embedding dicts.
+        After encoding, frees T5 and CLIP text encoders (~10 GB saved).
         """
-        # Encode in chunks to avoid OOM on T5 (4.7B params × batch)
         chunk_size = 32
         all_embeds = []
         for start in range(0, len(prompts), chunk_size):
@@ -275,7 +274,6 @@ class GradientAnalyzer:
                 device=self.device, do_classifier_free_guidance=do_cfg,
             )
             prompt_embeds, neg_embeds, pooled, neg_pooled = result
-            # Split batch back into per-prompt tensors (on CPU)
             for b in range(len(chunk)):
                 info = {
                     "prompt_embeds": prompt_embeds[b:b + 1].cpu(),
@@ -286,6 +284,14 @@ class GradientAnalyzer:
                     info["negative_prompt_embeds"] = neg_embeds[b:b + 1].cpu()
                     info["negative_pooled_prompt_embeds"] = neg_pooled[b:b + 1].cpu()
                 all_embeds.append(info)
+
+        # Free text encoders — no longer needed, saves ~10 GB GPU memory
+        for attr in ("text_encoder", "text_encoder_2", "text_encoder_3"):
+            if hasattr(self.pipe, attr):
+                setattr(self.pipe, attr, None)
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[GPU {torch.cuda.current_device()}] Text encoders freed after pre-encoding")
         return all_embeds
 
     def run_trajectory(
@@ -359,7 +365,8 @@ class GradientAnalyzer:
         return v_preds, x_t, timesteps
 
     def compute_gradient_norms_batched(
-        self, prompts: List[str], batch_embeds: List[Dict[str, torch.Tensor]], reward_fn, reward_name: str,
+        self, prompts: List[str], batch_embeds: List[Dict[str, torch.Tensor]],
+        reward_fn, reward_name: str, text_features_cache: Dict[str, torch.Tensor],
     ) -> Tuple[List[Tuple[Dict[int, float], Dict[int, torch.Tensor], float]], torch.Tensor, torch.Tensor]:
         """Run a batched trajectory using pre-encoded embeddings, compute per-prompt results.
 
@@ -379,11 +386,10 @@ class GradientAnalyzer:
         latents = latents.to(self.dtype)
         decoded = self.pipe.vae.decode(latents, return_dict=False)[0]  # (B, C, H, W)
 
-        # Compute reward for each prompt in the batch
+        # Compute reward using pre-encoded text features
         rewards_list = []
         for b in range(batch_size):
-            text_features = reward_fn._encode_text(prompts[b])
-            rv = reward_fn(decoded[b:b + 1], text_features)
+            rv = reward_fn(decoded[b:b + 1], text_features_cache[prompts[b]])
             rewards_list.append(rv)
 
         # Per-sample gradient extraction via autograd.grad with grad_outputs
@@ -472,6 +478,7 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
         for reward_name, reward_fn in reward_fns:
             per_prompt_data, timesteps, sigmas = analyzer.compute_gradient_norms_batched(
                 batch_prompts, batch_embeds, reward_fn, reward_name,
+                prompt_embeds_cache[reward_name],
             )
             batch_grads[reward_name] = []
             for b, (grad_norms, grad_vectors, reward_value) in enumerate(per_prompt_data):
@@ -532,8 +539,34 @@ def _analyze_one_checkpoint(worker_args: Tuple) -> Dict:
 # Visualization
 # ============================================================================
 
+def _expected_files(output_dir: str, epoch: int, n_rewards: int) -> List[str]:
+    """Return list of expected output file paths for a checkpoint."""
+    files = [
+        os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.json"),
+        os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.png"),
+    ]
+    if n_rewards >= 2:
+        files.append(os.path.join(output_dir, f"checkpoint-{epoch}_cosine_sim.png"))
+    return files
+
+
+def _checkpoint_status(output_dir: str, epoch: int, n_rewards: int) -> str:
+    """Check which output files exist. Returns 'complete', 'plots_missing', or 'missing'."""
+    expected = _expected_files(output_dir, epoch, n_rewards)
+    json_path = expected[0]
+    png_paths = expected[1:]
+    json_ok = os.path.exists(json_path)
+    pngs_ok = all(os.path.exists(p) for p in png_paths)
+    if json_ok and pngs_ok:
+        return "complete"
+    elif json_ok:
+        return "plots_missing"
+    else:
+        return "missing"
+
+
 def load_per_checkpoint_results(output_dir: str, epoch: int) -> Optional[Dict]:
-    """Load previously saved checkpoint results, converting back to in-memory format."""
+    """Load previously saved checkpoint JSON, converting back to in-memory format."""
     path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.json")
     if not os.path.exists(path):
         return None
@@ -599,85 +632,102 @@ def save_per_checkpoint_results(results: List[Dict], output_dir: str, epoch: int
 def plot_per_checkpoint(results: List[Dict], output_dir: str, epoch: int):
     """Single-checkpoint plot: individual per-prompt lines, one subplot per reward."""
     if not HAS_MPL:
+        print("  [WARN] matplotlib not available, skipping gradient norm plot")
+        return
+    if not results:
+        print("  [WARN] No results to plot for gradient norms")
         return
     from collections import defaultdict
 
-    # Group by reward → prompt_idx → list of (sigma, grad_norm)
-    reward_prompt_data = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        rname = r["reward"]
-        pidx = r["prompt_idx"]
-        sigmas = r["sigmas"]
-        for t_idx, gn in sorted(r["grad_norms"].items()):
-            reward_prompt_data[rname][pidx].append((float(sigmas[t_idx]), gn))
+    try:
+        # Group by reward → prompt_idx → list of (sigma, grad_norm)
+        reward_prompt_data = defaultdict(lambda: defaultdict(list))
+        for r in results:
+            rname = r["reward"]
+            pidx = r["prompt_idx"]
+            sigmas = r["sigmas"]
+            for t_idx, gn in sorted(r["grad_norms"].items()):
+                reward_prompt_data[rname][pidx].append((float(sigmas[t_idx]), gn))
 
-    n_rewards = len(reward_prompt_data)
-    fig, axes = plt.subplots(1, n_rewards, figsize=(7 * n_rewards, 5), squeeze=False)
-    axes = axes[0]
+        n_rewards = len(reward_prompt_data)
+        fig, axes = plt.subplots(1, n_rewards, figsize=(7 * n_rewards, 5), squeeze=False)
+        axes = axes[0]
 
-    for ax, (rname, prompt_data) in zip(axes, sorted(reward_prompt_data.items())):
-        for pidx, points in sorted(prompt_data.items()):
-            svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
-            gvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
-            ax.plot(svals, gvals, marker=".", alpha=0.7, linewidth=0.8,
-                    label=f"prompt {pidx}")
-        ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
-        ax.set_ylabel("||d(reward)/d(v_pred)||")
-        ax.set_title(f"{rname} (epoch {epoch})")
-        ax.invert_xaxis()
-        if len(prompt_data) <= 10:
-            ax.legend(fontsize=7)
+        for ax, (rname, prompt_data) in zip(axes, sorted(reward_prompt_data.items())):
+            for pidx, points in sorted(prompt_data.items()):
+                svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+                gvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+                ax.plot(svals, gvals, marker=".", alpha=0.7, linewidth=0.8,
+                        label=f"prompt {pidx}")
+            ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
+            ax.set_ylabel("||d(reward)/d(v_pred)||")
+            ax.set_title(f"{rname} (epoch {epoch})")
+            ax.invert_xaxis()
+            if len(prompt_data) <= 10:
+                ax.legend(fontsize=7)
 
-    fig.tight_layout()
-    path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.png")
-    fig.savefig(path, dpi=150)
-    print(f"  Saved {path}")
-    plt.close(fig)
+        fig.tight_layout()
+        path = os.path.join(output_dir, f"checkpoint-{epoch}_gradient_norms.png")
+        fig.savefig(path, dpi=150)
+        print(f"  Saved {path}")
+        plt.close(fig)
+    except Exception as e:
+        print(f"  [ERROR] Failed to plot gradient norms: {e}")
 
 
 def plot_cosine_similarity(results: List[Dict], output_dir: str, epoch: int):
     """Per-checkpoint plot: cosine similarity per prompt, one line per prompt per pair."""
-    if not HAS_MPL or not results:
+    if not HAS_MPL:
+        print("  [WARN] matplotlib not available, skipping cosine similarity plot")
+        return
+    if not results:
+        print("  [WARN] No results to plot for cosine similarity")
         return
     from collections import defaultdict
 
-    # Group by pair_key → prompt_idx → list of (sigma, cos_sim)
-    pair_prompt_data = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        cs = r.get("cosine_sim", {})
-        sigmas = r["sigmas"]
-        pidx = r["prompt_idx"]
-        for pair_key, idx_dict in cs.items():
-            for t_idx, cos_val in sorted(idx_dict.items()):
-                pair_prompt_data[pair_key][pidx].append((float(sigmas[t_idx]), cos_val))
+    try:
+        # Group by pair_key → prompt_idx → list of (sigma, cos_sim)
+        pair_prompt_data = defaultdict(lambda: defaultdict(list))
+        for r in results:
+            cs = r.get("cosine_sim", {})
+            if not cs:
+                continue
+            sigmas = r["sigmas"]
+            pidx = r["prompt_idx"]
+            for pair_key, idx_dict in cs.items():
+                for t_idx, cos_val in sorted(idx_dict.items()):
+                    pair_prompt_data[pair_key][pidx].append((float(sigmas[t_idx]), cos_val))
 
-    if not pair_prompt_data:
-        return
+        if not pair_prompt_data:
+            print("  [WARN] No cosine similarity data to plot")
+            return
 
-    n_pairs = len(pair_prompt_data)
-    fig, axes = plt.subplots(1, n_pairs, figsize=(7 * n_pairs, 5), squeeze=False)
-    axes = axes[0]
+        n_pairs = len(pair_prompt_data)
+        fig, axes = plt.subplots(1, n_pairs, figsize=(7 * n_pairs, 5), squeeze=False)
+        axes = axes[0]
 
-    for ax, (pair_key, prompt_data) in zip(axes, sorted(pair_prompt_data.items())):
-        for pidx, points in sorted(prompt_data.items()):
-            svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
-            cvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
-            ax.plot(svals, cvals, marker=".", alpha=0.7, linewidth=0.8,
-                    label=f"prompt {pidx}")
-        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-        ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
-        ax.set_ylabel("Cosine similarity")
-        ax.set_title(f"Gradient cos-sim: {pair_key} (epoch {epoch})")
-        ax.invert_xaxis()
-        ax.set_ylim(-1.05, 1.05)
-        if len(prompt_data) <= 10:
-            ax.legend(fontsize=7)
+        for ax, (pair_key, prompt_data) in zip(axes, sorted(pair_prompt_data.items())):
+            for pidx, points in sorted(prompt_data.items()):
+                svals = [p[0] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+                cvals = [p[1] for p in sorted(points, key=lambda x: x[0], reverse=True)]
+                ax.plot(svals, cvals, marker=".", alpha=0.7, linewidth=0.8,
+                        label=f"prompt {pidx}")
+            ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+            ax.set_xlabel("Sigma (1 = noisy, 0 = clean)")
+            ax.set_ylabel("Cosine similarity")
+            ax.set_title(f"Gradient cos-sim: {pair_key} (epoch {epoch})")
+            ax.invert_xaxis()
+            ax.set_ylim(-1.05, 1.05)
+            if len(prompt_data) <= 10:
+                ax.legend(fontsize=7)
 
-    fig.tight_layout()
-    path = os.path.join(output_dir, f"checkpoint-{epoch}_cosine_sim.png")
-    fig.savefig(path, dpi=150)
-    print(f"  Saved {path}")
-    plt.close(fig)
+        fig.tight_layout()
+        path = os.path.join(output_dir, f"checkpoint-{epoch}_cosine_sim.png")
+        fig.savefig(path, dpi=150)
+        print(f"  Saved {path}")
+        plt.close(fig)
+    except Exception as e:
+        print(f"  [ERROR] Failed to plot cosine similarity: {e}")
 
 
 def plot_aggregate(all_checkpoint_results: List[Dict], output_dir: str):
@@ -826,7 +876,7 @@ def main(config_path: str):
     # Create output subfolder named after the run (parent dir of checkpoints/)
     ckpt_dir = config.checkpoint_dir.rstrip("/")
     run_name = os.path.basename(os.path.dirname(ckpt_dir))
-    output_dir = os.path.join(config.output_dir, run_name)
+    output_dir = os.path.join(config.output_dir, "latent_reward_per_timestep_gradient_analysis", run_name)
     config.output_dir = output_dir  # update so workers use the correct path
     print(f"Checkpoint dir : {config.checkpoint_dir}")
     print(f"Output dir     : {output_dir}")
@@ -876,18 +926,30 @@ def main(config_path: str):
         "output_dir": config.output_dir,
     }
 
-    # Resume: load already-completed checkpoints, skip them in task list
+    # Resume: check each checkpoint's files, load if possible, regenerate missing plots
+    n_rewards = len(config.rewards)
     all_checkpoint_results = []
     pending_checkpoints = []
     for epoch, ckpt_path in checkpoints:
-        existing = load_per_checkpoint_results(output_dir, epoch)
-        if existing is not None:
-            all_checkpoint_results.append(existing)
+        status = _checkpoint_status(output_dir, epoch, n_rewards)
+        if status == "complete":
+            existing = load_per_checkpoint_results(output_dir, epoch)
+            if existing is not None:
+                all_checkpoint_results.append(existing)
+        elif status == "plots_missing":
+            print(f"  checkpoint-{epoch}: JSON exists, regenerating missing plots")
+            existing = load_per_checkpoint_results(output_dir, epoch)
+            if existing is not None:
+                results = existing["results"]
+                print(f"  Regenerating plots for checkpoint-{epoch}...")
+                plot_per_checkpoint(results, output_dir, epoch)
+                plot_cosine_similarity(results, output_dir, epoch)
+                all_checkpoint_results.append(existing)
         else:
             pending_checkpoints.append((epoch, ckpt_path))
 
     if pending_checkpoints:
-        print(f"Pending: {len(pending_checkpoints)} checkpoints to process")
+        print(f"Pending: {len(pending_checkpoints)} checkpoints to compute")
         # Build worker tasks for pending checkpoints
         tasks = []
         for i, (epoch, ckpt_path) in enumerate(pending_checkpoints):
@@ -902,6 +964,7 @@ def main(config_path: str):
                     results = ckpt_result["results"]
                     print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
                     save_per_checkpoint_results(results, output_dir, epoch)
+                    print(f"  Generating plots for checkpoint-{epoch}...")
                     plot_per_checkpoint(results, output_dir, epoch)
                     plot_cosine_similarity(results, output_dir, epoch)
                     all_checkpoint_results.append(ckpt_result)
@@ -912,6 +975,7 @@ def main(config_path: str):
                 results = ckpt_result["results"]
                 print(f"\n=== Checkpoint epoch={epoch} complete: {len(results)} records ===")
                 save_per_checkpoint_results(results, output_dir, epoch)
+                print(f"  Generating plots for checkpoint-{epoch}...")
                 plot_per_checkpoint(results, output_dir, epoch)
                 plot_cosine_similarity(results, output_dir, epoch)
                 all_checkpoint_results.append(ckpt_result)
@@ -936,7 +1000,7 @@ def main(config_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reward Per-Timestep Analysis")
-    parser.add_argument("-c", "--config", default="tools/reward_timestep_analysis.yaml",
+    parser.add_argument("-c", "--config", default="tools/latent_reward_per_timestep_gradient_analysis/config.yaml",
                         help="Path to config YAML file")
     args = parser.parse_args()
     main(args.config)
