@@ -9,10 +9,13 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
+# Set backend before importing pyplot to avoid GUI dependency and circular
+# import issues with non-standard matplotlib installations.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
 
 
 def andrews_monotone_chain(points: np.ndarray) -> np.ndarray:
