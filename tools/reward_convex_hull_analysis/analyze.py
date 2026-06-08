@@ -63,7 +63,6 @@ class AnalysisConfig:
     base_model: str = "stabilityai/stable-diffusion-3.5-medium"
     dtype: str = "bfloat16"
     device: str = "cuda"
-    cache_dir: str = ""
 
     rewards: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -92,7 +91,6 @@ def _parse_config(path: str) -> AnalysisConfig:
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
         dtype=model.get("dtype", "bfloat16"),
         device=model.get("device", "cuda"),
-        cache_dir=model.get("cache_dir", ""),
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
     )
@@ -426,10 +424,6 @@ def main(config_path: str):
 
     # Load reward computer (shared between both sources)
     print(f"Loading reward models: {[r.get('name', r.get('reward_model', '?')) for r in config.rewards]}")
-    # Set HF_HOME so from_pretrained finds cached models at the right path
-    if config.cache_dir:
-        os.environ["HF_HOME"] = os.path.expanduser(config.cache_dir)
-        print(f"  HF_HOME set to: {os.environ['HF_HOME']}")
     # Check GPU memory if using cuda
     import torch as _torch
     device = config.device

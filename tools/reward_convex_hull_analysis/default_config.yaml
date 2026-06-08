@@ -31,7 +31,6 @@ model:
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
   device: "cuda"                   # "cuda" or "cpu"
-  cache_dir: "~/data/huggingface"  # HuggingFace home directory (HF_HOME)
 
 # ---- Reward models (2+ models recommended for meaningful convex hulls) ----
 rewards:
