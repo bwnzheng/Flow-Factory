@@ -389,7 +389,7 @@ def all_reduce_min_float(accelerator: Accelerator, local: float) -> float:
     Returns:
         float: The global minimum across all ranks.
     """
-    t = torch.tensor([local], device=accelerator.device, dtype=torch.float64)
+    t = torch.tensor([local], device=accelerator.device, dtype=torch.float32)
     if _is_distributed():
         dist.all_reduce(t, op=dist.ReduceOp.MIN)
     return float(t.item())
@@ -405,7 +405,7 @@ def all_reduce_max_float(accelerator: Accelerator, local: float) -> float:
     Returns:
         float: The global maximum across all ranks.
     """
-    t = torch.tensor([local], device=accelerator.device, dtype=torch.float64)
+    t = torch.tensor([local], device=accelerator.device, dtype=torch.float32)
     if _is_distributed():
         dist.all_reduce(t, op=dist.ReduceOp.MAX)
     return float(t.item())
@@ -431,13 +431,13 @@ def global_mean_std_numpy(
     n = float(len(x))
     if n == 0:
         t = torch.tensor(
-            [0.0, 0.0, 0.0], device=accelerator.device, dtype=torch.float64
+            [0.0, 0.0, 0.0], device=accelerator.device, dtype=torch.float32
         )
     else:
         t = torch.tensor(
             [n, float(np.sum(x)), float(np.sum(x * x))],
             device=accelerator.device,
-            dtype=torch.float64,
+            dtype=torch.float32,
         )
     t = accelerator.reduce(t, reduction="sum")
     n_t, s, ss = t[0].item(), t[1].item(), t[2].item()
@@ -475,7 +475,7 @@ def global_mean_stds_from_arrays(
             stats.extend([n, float(np.sum(x)), float(np.sum(x * x))])
     if not stats:
         return []
-    t = torch.tensor(stats, device=accelerator.device, dtype=torch.float64)
+    t = torch.tensor(stats, device=accelerator.device, dtype=torch.float32)
     t = accelerator.reduce(t, reduction="sum")
     out: List[Tuple[float, float]] = []
     for i in range(len(arrays)):
@@ -529,7 +529,7 @@ def global_mean_abs_numpy(accelerator: Accelerator, x: np.ndarray) -> float:
     x = np.asarray(x, dtype=np.float64)
     n = float(len(x))
     s = float(np.sum(np.abs(x))) if n else 0.0
-    t = torch.tensor([n, s], device=accelerator.device, dtype=torch.float64)
+    t = torch.tensor([n, s], device=accelerator.device, dtype=torch.float32)
     t = accelerator.reduce(t, reduction="sum")
     n_t, s_t = t[0].item(), t[1].item()
     if n_t < 1:
@@ -554,7 +554,7 @@ def global_mean_of_scalar_per_group(
     local_sum = float(g_stds.sum()) if len(g_stds) else 0.0
     local_count = float(len(g_stds))
     t = torch.tensor(
-        [local_sum, local_count], device=accelerator.device, dtype=torch.float64
+        [local_sum, local_count], device=accelerator.device, dtype=torch.float32
     )
     t = accelerator.reduce(t, reduction="sum")
     tot = t[1].item()
@@ -611,13 +611,13 @@ def global_std_of_group_means(
     n = float(len(g_means))
     if n == 0:
         t = torch.tensor(
-            [0.0, 0.0, 0.0], device=accelerator.device, dtype=torch.float64
+            [0.0, 0.0, 0.0], device=accelerator.device, dtype=torch.float32
         )
     else:
         t = torch.tensor(
             [n, float(np.sum(g_means)), float(np.sum(g_means * g_means))],
             device=accelerator.device,
-            dtype=torch.float64,
+            dtype=torch.float32,
         )
     t = accelerator.reduce(t, reduction="sum")
     n_g, s, ss = t[0].item(), t[1].item(), t[2].item()
@@ -655,7 +655,7 @@ def global_zero_std_ratio(
     t = torch.tensor(
         [float(zero_std_count), float(n_groups)],
         device=accelerator.device,
-        dtype=torch.float64,
+        dtype=torch.float32,
     )
     t = accelerator.reduce(t, reduction="sum")
     denom = t[1].item()
@@ -700,7 +700,7 @@ def global_tensor_stats(
         local_max = float(x.max())
 
     packed = torch.tensor(
-        [count, total, sum_sq], device=accelerator.device, dtype=torch.float64
+        [count, total, sum_sq], device=accelerator.device, dtype=torch.float32
     )
     packed = accelerator.reduce(packed, reduction="sum")
     global_count = packed[0].item()
@@ -768,16 +768,16 @@ def global_tensor_stats_batch(
     device = accelerator.device
 
     # SUM reduce for packed (count, sum, sum_sq) triples
-    packed_sum = torch.tensor(sum_triples, device=device, dtype=torch.float64)
+    packed_sum = torch.tensor(sum_triples, device=device, dtype=torch.float32)
     packed_sum = accelerator.reduce(packed_sum, reduction="sum")
 
     # MIN reduce for local minimums
-    packed_min = torch.tensor(local_mins, device=device, dtype=torch.float64)
+    packed_min = torch.tensor(local_mins, device=device, dtype=torch.float32)
     if _is_distributed():
         dist.all_reduce(packed_min, op=dist.ReduceOp.MIN)
 
     # MAX reduce for local maximums
-    packed_max = torch.tensor(local_maxes, device=device, dtype=torch.float64)
+    packed_max = torch.tensor(local_maxes, device=device, dtype=torch.float32)
     if _is_distributed():
         dist.all_reduce(packed_max, op=dist.ReduceOp.MAX)
 
@@ -838,9 +838,9 @@ def reduce_loss_info(
     # Classify by tensor dimensionality
     for k, v in loss_info.items():
         if v[0].dim() > 0:
-            per_sample[k] = torch.cat(v)
+            per_sample[k] = torch.cat(v).float()
         else:
-            scalars[k] = torch.stack(v).mean()
+            scalars[k] = torch.stack(v).mean().float()
 
     flat: Dict[str, Any] = {}
 
