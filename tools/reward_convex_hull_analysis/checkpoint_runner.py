@@ -68,11 +68,12 @@ def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
 
 
 def apply_lora(pipe, checkpoint_path: str, dtype: torch.dtype):
-    """Load LoRA weights onto ``pipe.transformer`` and merge."""
+    """Load LoRA weights onto ``pipe.transformer``, merge, and align dtype."""
     pipe.transformer = PeftModel.from_pretrained(
         pipe.transformer, checkpoint_path, torch_dtype=dtype,
     )
     pipe.transformer = pipe.transformer.merge_and_unload()
+    pipe.transformer = pipe.transformer.to(dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ class CheckpointRunner:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
+        self.dtype_str = dtype_str
         self.dtype = _resolve_dtype(dtype_str)
         self.base_model = base_model
         self._pipe = None
@@ -100,29 +102,26 @@ class CheckpointRunner:
     def pipe(self):
         """Lazy-load the base pipeline (model download is slow)."""
         if self._pipe is None:
-            self._pipe = load_base_pipeline(self.base_model, str(self.dtype), self.device)
+            self._pipe = load_base_pipeline(self.base_model, self.dtype_str, self.device)
         return self._pipe
 
+    @torch.no_grad()
     def generate_for_checkpoint(
         self,
         checkpoint_path: str,
         prompts: List[str],
+        output_dir: str,
+        epoch: int,
         num_samples: int = 4,
         gen_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[Image.Image]:
-        """Load LoRA for *checkpoint_path*, generate images, unload LoRA.
+    ) -> List[str]:
+        """Load LoRA, generate images, save each to disk immediately.
 
-        Args:
-            checkpoint_path: Path to a ``checkpoint-N`` directory.
-            prompts: List of prompt strings.
-            num_samples: Number of images to generate per prompt.
-            gen_kwargs: Extra kwargs for ``pipe(prompt, ...)``.
-                Defaults: ``num_inference_steps=50, guidance_scale=1.0,
-                height=512, width=512``.
+        Images are saved to ``{output_dir}/checkpoint_{epoch}/p{pi}_s{si}.png``.
+        Already-existing files are skipped (resume).
 
         Returns:
-            ``len(prompts) * num_samples`` PIL Images (prompts[0] * N,
-            prompts[1] * N, ...).
+            List of relative file paths.
         """
         if gen_kwargs is None:
             gen_kwargs = {}
@@ -134,29 +133,57 @@ class CheckpointRunner:
         }
         kw = {**defaults, **gen_kwargs}
 
+        ckpt_dir = os.path.join(output_dir, f"checkpoint_{epoch}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        # Check which images already exist on disk (resume)
+        paths: List[str] = []
+        existing: set = set()
+        for pi, _ in enumerate(prompts):
+            for si in range(num_samples):
+                rel = f"checkpoint_{epoch}/p{pi}_s{si}.png"
+                full = os.path.join(output_dir, rel)
+                if os.path.isfile(full):
+                    existing.add(rel)
+                paths.append(rel)
+
+        if len(existing) == len(paths):
+            print(f"      All {len(paths)} images already generated — skipping.")
+            return paths
+
         # Load LoRA onto the pipeline
         apply_lora(self.pipe, checkpoint_path, self.dtype)
 
-        images: List[Image.Image] = []
         base_seed = kw.get("seed", 42)
-
         pipe_kwargs = {k: v for k, v in kw.items() if k != "seed"}
         pipe_kwargs["output_type"] = "pil"
 
         sample_idx = 0
-        for prompt in prompts:
-            for _ in range(num_samples):
+        for pi, prompt in enumerate(prompts):
+            for si in range(num_samples):
+                rel = f"checkpoint_{epoch}/p{pi}_s{si}.png"
+                full = os.path.join(output_dir, rel)
+
+                if rel in existing:
+                    sample_idx += 1
+                    continue
+
                 seed = base_seed + sample_idx
                 generator = torch.Generator(device=self.device).manual_seed(seed)
                 pipe_kwargs["generator"] = generator
-                result = self.pipe(prompt, **pipe_kwargs)
-                images.append(result.images[0])
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    result = self.pipe(prompt, **pipe_kwargs)
+                img = result.images[0]
+                img.save(full, "PNG")
                 sample_idx += 1
 
-        # Unload LoRA by reloading fresh base pipeline
+                if (sample_idx) % 10 == 0:
+                    print(f"      Generated {sample_idx}/{len(paths)} images")
+
+        # Unload LoRA
         self._unload_lora()
 
-        return images
+        return paths
 
     def _unload_lora(self):
         """Reload the base pipeline to clear merged LoRA weights."""

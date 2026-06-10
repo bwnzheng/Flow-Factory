@@ -1,0 +1,50 @@
+# Reward Convex Hull Analysis Configuration
+# ==========================================
+# Extract rollout images from TensorBoard events, score them with reward
+# models (CLIP + PickScore), and plot convex hulls per training step.
+# Supports checkpoint inference for per-epoch analysis as well.
+#
+# Usage:
+#   python -m tools.reward_convex_hull_analysis.analyze -c tools/reward_convex_hull_analysis/reward_convex_hull_analysis_nft_0602.yaml
+
+# --- Run identity ---
+run_name: "sd3-5_lora_nft_20260602_100414"
+save_dir: "saves"
+
+# --- TensorBoard (training rollouts) ---
+tensorboard:
+  enabled: true
+  # max_images_per_step: 30       # 0 = all; cap to N images per step
+  datasets: ["train"]           # [] = all; ["eval"] or ["train"]
+  num_workers: 16                  # Parallel PNG decode workers
+
+# --- Checkpoint inference (test prompts) ---
+checkpoint:
+  enabled: true
+  # checkpoint_dir: ""            # Auto-resolved to {save_dir}/{run_name}/checkpoints
+  prompts_file: "dataset/pickscore/test.txt"
+  max_prompts: 10                 # Use first N prompts from file (0 = all)
+  num_samples: 4                  # Images per prompt per checkpoint
+  gen_kwargs:
+    num_inference_steps: 50
+    guidance_scale: 1.0
+    height: 512
+    width: 512
+    seed: 42
+
+# --- Model ---
+model:
+  base_model: "stabilityai/stable-diffusion-3.5-medium"
+  dtype: "bfloat16"
+  device: "cuda"
+
+# --- Reward models ---
+rewards:
+  - name: "clip_score"
+    reward_model: "CLIP"
+  - name: "pick_score"
+    reward_model: "PickScore"
+
+# --- Output ---
+output:
+  dir: "analysis_output"
