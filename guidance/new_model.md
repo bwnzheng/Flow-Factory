@@ -90,14 +90,14 @@ class MyModelSample(T2ISample):
 | `BaseSample` | Generic | `image`, `video`, `prompt`, `all_latents`, `log_probs`, ... |
 | `T2ISample` | Text-to-image | Alias of `BaseSample` |
 | `T2VSample` | Text-to-video | Alias of `BaseSample` |
-| `ImageConditionSample` | Image-conditioned generation | `condition_images: List[Tensor(C,H,W)]` — always `List`, never batched tensor |
-| `VideoConditionSample` | Video-conditioned generation | `condition_videos: List[Tensor(T,C,H,W)]` — always `List`, never batched tensor |
+| `ImageConditionSample` | Image-conditioned generation | `condition_images`: per-sample `List[Tensor(C,H,W)]` (or `List[PIL.Image]` when the subclass sets `condition_images_as_pil=True`); always `List`, never batched tensor |
+| `VideoConditionSample` | Video-conditioned generation | `condition_videos`: per-sample `List[Tensor(T,C,H,W)]` (or `List[List[PIL.Image]]` when `condition_videos_as_pil=True`); always `List`, never batched tensor |
 
 > See [`src/flow_factory/samples/samples.py`](src/flow_factory/samples/samples.py) for all available classes.
 
 > **Key**: The `_shared_fields` class variable declares fields that are identical across a batch (e.g., `height`, `width`, `latent_index_map`). During `BaseSample.stack()`, shared fields take the first element instead of stacking.
 
-> **Type determinism for `gather_samples`**: `ImageConditionSample.__post_init__` and `VideoConditionSample.__post_init__` always unbind batched tensors to `List[Tensor]`, ensuring `condition_images` / `condition_videos` have a deterministic type across all samples and ranks. When defining custom sample fields that will be gathered across ranks (via `gather_samples`), ensure each field has a **consistent type** on every sample — mixing `Tensor` on some samples and `List[Tensor]` on others will cause `gather_samples` to fall through to slow pickle-based `gather_object`. Prefer `List[Tensor]` for variable-length sequences.
+> **Type determinism for `gather_samples`**: `ImageConditionSample.__post_init__` and `VideoConditionSample.__post_init__` canonicalize to a deterministic per-sample type across all samples and ranks — `List[Tensor]` by default, or `List[PIL.Image]` / `List[List[PIL.Image]]` when the subclass sets `condition_images_as_pil` / `condition_videos_as_pil` (adapters that persist condition media as PIL via `pil_image_columns`, e.g. Bagel). When defining custom sample fields that will be gathered across ranks (via `gather_samples`), ensure each field has a **consistent type** on every sample — mixing `Tensor` on some samples and `List[Tensor]` on others will cause `gather_samples` to fall through to slow pickle-based `gather_object`. Prefer `List[Tensor]` for variable-length sequences.
 
 
 ### Step 2: Create Adapter Class
@@ -250,7 +250,7 @@ def encode_image(
     """
 ```
 
-> **Important**: The `images` input follows the **multi-image batch** convention: `List[List[Image.Image]]`. Each sample can have zero, one, or multiple condition images. See [Data Format Conventions](#data-format-conventions) for details.
+> **Important**: The `images` input follows the **multi-image batch** convention: `List[List[Image.Image]]`. Each sample can have zero, one, or multiple condition images. See [Data Format Conventions](#data-format-conventions) for details. Adapters that persist a returned image column as PIL (declare it in `pil_image_columns`, e.g. Bagel's `condition_images`) may keep it as PIL; the dataset stores those columns via the HF Image feature and reads them back as PIL.
 
 #### `encode_video`
 
@@ -727,9 +727,9 @@ For a detailed walkthrough of how `inference()` and `forward()` fit into the six
 > - Single condition image per sample with uniform shape (e.g. Flux1-Kontext): batched `Tensor(B, C, H, W)`. `condition_images[b]` yields `Tensor(C,H,W)`, which `ImageConditionSample.__post_init__` unbinds to `[Tensor(C,H,W)]`.
 > - Multiple condition images per sample, or variable shapes (e.g. Flux2, Qwen-Image-Edit): `List[List[Tensor(C,H,W)]]` of length `B`. `condition_images[b]` yields `List[Tensor(C,H,W)]` directly.
 >
-> In both cases the value stored on `sample.condition_images` after `inference()` is always `List[Tensor(C,H,W)]` (no batch dimension). `condition_videos` follows the same model-dependent pattern.
+> The value stored on `sample.condition_images` after `inference()` is per-sample (no batch dimension); its element type is set by `ImageConditionSample.condition_images_as_pil` — `List[Tensor(C,H,W)]` in `[0,1]` by default, or `List[PIL.Image]` when the adapter persists condition_images via the HF Image feature (declares them in `pil_image_columns` and sets `condition_images_as_pil=True` on its sample, e.g. Bagel). `condition_videos` follows the same model-dependent pattern.
 >
-> Fields stored on `BaseSample` (and subclass) instances are **per-sample** — the batch dimension is stripped. `sample.condition_images` is `List[Tensor(C,H,W)]` (one sample's images), not the full batch. This is enforced at construction time when `inference()` slices `condition_images[b]` for each `b` in `range(batch_size)`.
+> Fields stored on `BaseSample` (and subclass) instances are **per-sample** — the batch dimension is stripped. `sample.condition_images` is one sample's images (`List[Tensor(C,H,W)]`, or `List[PIL.Image]` when `condition_images_as_pil=True`), not the full batch. This is enforced at construction time when `inference()` slices `condition_images[b]` for each `b` in `range(batch_size)`.
 
 All encoding methods and `inference()`/`forward()` receive **batched** inputs. Here are the canonical formats:
 
@@ -746,7 +746,7 @@ All encoding methods and `inference()`/`forward()` receive **batched** inputs. H
 | Parameter | Format | Description |
 |---|---|---|
 | `images` | `List[List[Image.Image]]` | **Multi-image batch**: `images[i]` is a list of condition images for sample `i`. Each inner list can have 0, 1, or N images. |
-| `condition_images` | `List[List[Tensor(C,H,W)]]` | Resized/preprocessed version of above |
+| `condition_images` | `List[List[Tensor(C,H,W)]]` in `[0,1]` (or `List[List[PIL.Image]]` for `pil_image_columns` adapters, e.g. Bagel) | Resized/preprocessed version of above |
 | `image_latents` | `List[Tensor(seq,C)]` or `Tensor(B,seq,C)` | VAE-encoded latents. Use `List` for variable-length sequences, `Tensor` when all samples share the same sequence length. |
 
 > The multi-image batch convention (`List[List[...]]`) is critical for models that support varying numbers of condition images per sample. Always normalize your input to this format in `encode_image()`.
@@ -756,7 +756,7 @@ All encoding methods and `inference()`/`forward()` receive **batched** inputs. H
 | Parameter | Format | Description |
 |---|---|---|
 | `videos` | `List[List[List[Image.Image]]]` | **Multi-video batch**: `videos[i]` is a list of condition videos, each video is a list of frames. |
-| `condition_videos` | `List[List[Tensor(T,C,H,W)]]` | Preprocessed version |
+| `condition_videos` | `List[List[Tensor(T,C,H,W)]]` (or `List[List[List[PIL.Image]]]` frame-lists when the sample sets `condition_videos_as_pil`) | Preprocessed version |
 
 ### Audio
 

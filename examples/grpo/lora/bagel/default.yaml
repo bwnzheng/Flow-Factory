@@ -62,7 +62,15 @@ train:
   cfg_renorm_type: global
 
   # Batch and sampling
-  per_device_batch_size: 1  # Batch size per device
+  per_device_batch_size: 2  # Batch size per device (T2I and I2I both use NaViT-packed batching)
+  # Bagel is NOT batch-invariant: it uses NaViT-style sequence packing (all samples in a
+  # batch are concatenated into one block-diagonal-attention sequence), so a sample's
+  # linear-projection matmuls run over the whole pack's token length and its bf16 rounding
+  # depends on the pack composition (which samples are packed together). Disabling the
+  # optimize-time shuffle makes each training micro-batch pack the same samples as its
+  # rollout pack, so forward() is bit-identical between rollout and training (on-policy
+  # ratio == 1). Requires matched sampling/training per_device_batch_size.
+  shuffle_samples: false
   group_size: 16  # Group size for GRPO sampling
   global_std: true  # Use global std for advantage normalization
   unique_sample_num_per_epoch: 48  # Unique samples per group
@@ -98,7 +106,7 @@ scheduler:
 # Evaluation settings
 eval:
   resolution: 512  # Evaluation resolution
-  per_device_batch_size: 1  # Eval batch size
+  per_device_batch_size: 2  # Eval batch size
   guidance_scale: 4.0  # Guidance scale for sampling
   num_inference_steps: 50  # Number of eval timesteps
   eval_freq: 20  # Eval frequency in epochs (0 to disable)
