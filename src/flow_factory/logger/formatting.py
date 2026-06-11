@@ -153,6 +153,19 @@ def _to_video_list(
     
     return []
 
+def _to_json_safe(value):
+    """Recursively convert tensors/arrays to Python native types for JSON serialization."""
+    if isinstance(value, torch.Tensor):
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, np.ndarray):
+        return value.item() if value.size == 1 else value.tolist()
+    if isinstance(value, (list, tuple)):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _to_json_safe(v) for k, v in value.items()}
+    return value
+
+
 def _build_sample_caption(sample: BaseSample, max_length: Optional[int] = None):
     """Build caption and metadata from reward and prompt.
 
@@ -180,7 +193,7 @@ def _build_sample_caption(sample: BaseSample, max_length: Optional[int] = None):
 
     metadata = {}
     if rewards is not None:
-        metadata['reward'] = rewards
+        metadata['reward'] = _to_json_safe(rewards)
     if sample.prompt:
         metadata['prompt'] = sample.prompt
 
