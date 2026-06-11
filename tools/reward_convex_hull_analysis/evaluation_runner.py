@@ -81,7 +81,7 @@ def apply_lora(pipe, checkpoint_path: str, dtype: torch.dtype):
 # ---------------------------------------------------------------------------
 
 
-class CheckpointRunner:
+class EvaluationRunner:
     """Generates images from a base model + per-checkpoint LoRA weights."""
 
     def __init__(

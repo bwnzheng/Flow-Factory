@@ -11,15 +11,15 @@
 run_name: "sd3-5_lora_nft_20260602_100414"
 save_dir: "saves"
 
-# --- TensorBoard (training rollouts) ---
-tensorboard:
+# --- Training rollouts (from TensorBoard events) ---
+training:
   enabled: true
   # max_images_per_step: 30       # 0 = all; cap to N images per step
-  datasets: ["train"]           # [] = all; ["eval"] or ["train"]
-  num_workers: 16                  # Parallel PNG decode workers
+  datasets: ["train"]             # [] = all; ["eval"] or ["train"]
+  num_workers: 16                 # Parallel PNG decode workers
 
-# --- Checkpoint inference (test prompts) ---
-checkpoint:
+# --- Evaluation inference (from checkpoints on test prompts) ---
+evaluation:
   enabled: true
   # checkpoint_dir: ""            # Auto-resolved to {save_dir}/{run_name}/checkpoints
   prompts_file: "dataset/pickscore/test.txt"

@@ -8,18 +8,19 @@
 run_name: ""                       # Auto-resolved from checkpoint_dir if empty
 save_dir: "saves"                  # Parent of saves/tensorboard/ and saves/{run_name}/
 
-# ---- Data sources ----
-tensorboard:
+# ---- Training rollouts (from TensorBoard events) ----
+training:
   enabled: true
   # Path auto-resolved to {save_dir}/tensorboard/{run_name}/
   max_images_per_step: 0          # 0 = all; set to N to cap per-step images
   datasets: []                    # [] = all; ["eval"] or ["train"] to filter
   num_workers: 4                  # Parallel PNG decode workers
 
-checkpoint:
+# ---- Evaluation inference (from checkpoints on test prompts) ----
+evaluation:
   enabled: true
   checkpoint_dir: ""               # Auto-resolved to {save_dir}/{run_name}/checkpoints/
-  prompts_file: "dataset/pickscore/test.txt"                 # One prompt per line (e.g. dataset/pickscore/test.txt)
+  prompts_file: "dataset/pickscore/test.txt"  # One prompt per line
   prompts: []                      # Inline prompts (used if prompts_file is empty)
   max_prompts: 0                   # 0 = all; cap to first N prompts
   num_samples: 4                   # Images generated per prompt per checkpoint
