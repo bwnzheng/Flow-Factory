@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument("--tb-dir", default="saves/tensorboard", help="TensorBoard log directory")
     parser.add_argument("--output", default="saves/swanlog", help="SwanLab output directory")
     parser.add_argument("--project", default="Flow-Factory", help="SwanLab project name")
-    parser.add_argument("--run-name", default=None, help="Only migrate a specific run")
+    parser.add_argument("--run-name", nargs="+", default=None, help="Only migrate specific run(s)")
     parser.add_argument(
         "--types",
         default="scalar,image",
@@ -215,11 +215,11 @@ def main():
         sys.exit(1)
 
     if args.run_name:
-        if args.run_name in path_dict:
-            path_dict = {args.run_name: path_dict[args.run_name]}
-        else:
-            print(f"Run '{args.run_name}' not found. Available: {list(path_dict.keys())}")
+        missing = [n for n in args.run_name if n not in path_dict]
+        if missing:
+            print(f"Run(s) not found: {missing}. Available: {list(path_dict.keys())}")
             sys.exit(1)
+        path_dict = {n: path_dict[n] for n in args.run_name}
 
     output_dir = os.path.abspath(args.output)
 
