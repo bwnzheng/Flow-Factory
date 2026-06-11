@@ -13,8 +13,14 @@
 # limitations under the License.
 
 # src/flow_factory/logger/abc.py
+import json
+import os
+import imageio
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import Optional, Dict, Any, List
+
+from PIL import Image as PILImage
 
 from ..hparams import *
 from .formatting import LogFormatter, LogImage, LogVideo, LogTable
@@ -33,6 +39,111 @@ class Logger(ABC):
     def _init_platform(self):
         pass
 
+    # ---- local media / metrics helpers ----
+
+    @property
+    def _should_save_locally(self) -> bool:
+        return getattr(self.config.log_args, 'save_media_locally', False)
+
+    @property
+    def _should_log_jsonl(self) -> bool:
+        return getattr(self.config.log_args, 'log_metrics_jsonl', True)
+
+    @property
+    def _logs_dir(self) -> str:
+        if not hasattr(self, '_logs_dir_cache'):
+            path = os.path.join(
+                self.config.log_args.save_dir,
+                self.config.log_args.run_name,
+                'logs',
+            )
+            os.makedirs(path, exist_ok=True)
+            self._logs_dir_cache = path
+        return self._logs_dir_cache
+
+    @staticmethod
+    def _sanitize_key(key: str) -> str:
+        return key.replace('/', '_')
+
+    def _save_image_file(self, key: str, img_obj: LogImage, step: int) -> str:
+        """Save a LogImage as PNG, return relative path."""
+        sanitized = self._sanitize_key(key)
+        step_dir = os.path.join(self._logs_dir, 'images', f'step_{step:06d}')
+        os.makedirs(step_dir, exist_ok=True)
+        filepath = os.path.join(step_dir, f'{sanitized}.png')
+        img_obj.get_pil().save(filepath, format='PNG')
+        return os.path.relpath(filepath, self._logs_dir)
+
+    def _save_video_file(self, key: str, vid_obj: LogVideo, step: int) -> str:
+        """Save a LogVideo as MP4, return relative path."""
+        sanitized = self._sanitize_key(key)
+        step_dir = os.path.join(self._logs_dir, 'videos', f'step_{step:06d}')
+        os.makedirs(step_dir, exist_ok=True)
+        filepath = os.path.join(step_dir, f'{sanitized}.mp4')
+        arr = vid_obj.get_numpy()  # THWC uint8
+        imageio.mimwrite(filepath, [f for f in arr], fps=vid_obj.fps, format='FFMPEG',
+                         codec='libx264', pixelformat='yuv420p')
+        return os.path.relpath(filepath, self._logs_dir)
+
+    def _extract_and_save_media(self, data: Dict, step: int) -> List[Dict]:
+        """Walk formatted dict, save LogImage/LogVideo/LogTable locally, and remove them.
+
+        Returns a list of media.jsonl entries.
+        """
+        entries = []
+
+        def _walk(key: str, value: Any):
+            if isinstance(value, LogImage):
+                path = self._save_image_file(key, value, step)
+                entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
+                if value.metadata:
+                    entry.update(value.metadata)
+                entries.append(entry)
+                return None
+            elif isinstance(value, LogVideo):
+                path = self._save_video_file(key, value, step)
+                entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
+                if value.metadata:
+                    entry.update(value.metadata)
+                entries.append(entry)
+                return None
+            elif isinstance(value, LogTable):
+                for row_idx, row in enumerate(value.rows):
+                    for col_idx, item in enumerate(row):
+                        if item is not None:
+                            col_name = value.columns[col_idx] if col_idx < len(value.columns) else str(col_idx)
+                            _walk(f'{key}/{col_name}/{row_idx}', item)
+                return None
+            elif isinstance(value, list):
+                return [_walk(f'{key}/{i}', v) for i, v in enumerate(value)]
+            elif isinstance(value, dict):
+                return {k: _walk(f'{key}/{k}', v) for k, v in value.items()}
+            return value
+
+        for k in list(data.keys()):
+            data[k] = _walk(k, data[k])
+
+        return entries
+
+    def _write_media_jsonl(self, entries: List[Dict]):
+        filepath = os.path.join(self._logs_dir, 'media.jsonl')
+        with open(filepath, 'a') as f:
+            for entry in entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    def _write_metrics_jsonl(self, scalars: Dict[str, Any], step: int):
+        record = {'step': step}
+        for k, v in scalars.items():
+            scalar = LogFormatter.to_scalar(v)
+            if scalar is not None:
+                record[k] = scalar
+        if len(record) > 1:  # more than just 'step'
+            filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
+            with open(filepath, 'a') as f:
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    # ---- main log flow ----
+
     def log_data(
         self,
         data: Dict[str, Any],
@@ -41,42 +152,56 @@ class Logger(ABC):
     ):
         # 1. Process rules (Mean, Paths, wrappers) into IR
         formatted_dict = LogFormatter.format_dict(data)
-        
-        # 2. Filter keys if requested
+
+        # 2. [NEW] Save media locally and remove from dict before backend gets it
+        if self._should_save_locally:
+            media_entries = self._extract_and_save_media(formatted_dict, step)
+            if media_entries:
+                self._write_media_jsonl(media_entries)
+
+        # 3. [NEW] Write scalar metrics to local JSONL
+        if self._should_log_jsonl:
+            self._write_metrics_jsonl(formatted_dict, step)
+
+        # 4. Filter keys if requested
         if keys:
             valid_keys = keys.split(',')
             formatted_dict = {k: v for k, v in formatted_dict.items() if k in valid_keys}
 
-        # 3. Convert IR to Platform Objects
+        # 5. Convert IR to Platform Objects
         final_dict = {}
         for k, v in formatted_dict.items():
             converted = self._recursive_convert(v)
-            if isinstance(converted, dict):  # for LogTable conversion returning dict, e.g., SwanlabLogger
+            if isinstance(converted, dict):
                 final_dict.update(converted)
             else:
                 final_dict[k] = converted
 
-        # 4. Actual Logging
+        # 6. Actual Logging (filter out None from removed media)
+        final_dict = {k: v for k, v in final_dict.items() if v is not None}
         if final_dict:
             self._log_impl(final_dict, step)
-            
-        # 5. Cleanup temporary files periodically
-        if len(self._pending_cleanup) >= self.clean_up_freq:
-            first_data = self._pending_cleanup.pop(0)
-            self._cleanup_temp_files(first_data)
-        self._pending_cleanup.append(formatted_dict)
+
+        # 7. Cleanup temporary files periodically
+        if not self._should_save_locally:
+            if len(self._pending_cleanup) >= self.clean_up_freq:
+                first_data = self._pending_cleanup.pop(0)
+                self._cleanup_temp_files(first_data)
+            self._pending_cleanup.append(formatted_dict)
 
     def _recursive_convert(
-        self, 
-        value: Any, 
+        self,
+        value: Any,
         height: Optional[int] = None,
         width: Optional[int] = None
     ) -> Any:
         """Recursively convert IR objects to platform objects."""
+        if value is None:
+            return None
         if isinstance(value, (list, tuple)):
             return [self._recursive_convert(v, height, width) for v in value if v is not None]
         return self._convert_to_platform(value, height, width)
-    
+
     def _cleanup_temp_files(self, data: Dict):
         for value in data.values():
             if isinstance(value, (LogImage, LogVideo, LogTable)):
@@ -88,19 +213,19 @@ class Logger(ABC):
 
     @abstractmethod
     def _convert_to_platform(
-        self, 
-        value: Any, 
+        self,
+        value: Any,
         height: Optional[int] = None,
         width: Optional[int] = None
     ) -> Any:
         """
         Convert a single IR object to platform-specific object.
-        
+
         Args:
             value: IR object (LogImage, LogVideo, LogTable) or pass-through value.
             height: Optional target height for resize (aspect-ratio preserved if width is None).
             width: Optional target width for resize (aspect-ratio preserved if height is None).
-        
+
         Returns:
             Platform-specific object (e.g., wandb.Image, swanlab.Video).
         """

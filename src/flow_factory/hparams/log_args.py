@@ -52,6 +52,16 @@ class LogArguments(ArgABC):
         metadata={"help": "Whether to save the model only, or the complete training state (model and optimizer)."}
     )
 
+    save_media_locally: bool = field(
+        default=False,
+        metadata={"help": "Save images/videos to local files instead of uploading to logging backend."},
+    )
+
+    log_metrics_jsonl: bool = field(
+        default=True,
+        metadata={"help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."},
+    )
+
     verbose: bool = field(
         default=True,
         metadata={"help": "Whether to print detailed progress during training."},

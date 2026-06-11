@@ -153,9 +153,14 @@ def _to_video_list(
     
     return []
 
-def _build_sample_caption(sample : BaseSample, max_length: Optional[int] = None) -> str:
-    """Build caption from reward and prompt."""
+def _build_sample_caption(sample: BaseSample, max_length: Optional[int] = None):
+    """Build caption and metadata from reward and prompt.
+
+    Returns:
+        (caption_str, metadata_dict) where metadata_dict contains 'reward' and 'prompt' keys.
+    """
     parts = []
+    rewards = None
     if 'rewards' in sample.extra_kwargs:
         rewards = sample.extra_kwargs['rewards']
         if isinstance(rewards, float):
@@ -172,7 +177,14 @@ def _build_sample_caption(sample : BaseSample, max_length: Optional[int] = None)
                 parts.append(", ".join(f"{k}: {v:.2f}" for k, v in rewards.items()))
     if sample.prompt:
         parts.append(sample.prompt[:max_length] + "..." if (max_length is not None and len(sample.prompt) > max_length) else sample.prompt)
-    return " | ".join(parts)
+
+    metadata = {}
+    if rewards is not None:
+        metadata['reward'] = rewards
+    if sample.prompt:
+        metadata['prompt'] = sample.prompt
+
+    return " | ".join(parts), metadata
 
 def _compute_resize_dims(
     orig_h: int, 
@@ -231,6 +243,7 @@ class LogImage:
     _value: Union[str, Image.Image, np.ndarray, torch.Tensor] = field(repr=False)
     _img: Optional[Image.Image] = field(default=None, init=False, repr=False)
     caption: Optional[str] = None
+    metadata: Optional[Dict] = None
     compress: bool = True
     quality: int = 85
     _temp_paths: Dict[Tuple, str] = field(default_factory=dict, init=False, repr=False)
@@ -363,6 +376,7 @@ class LogVideo:
     """
     _value: Union[str, np.ndarray, torch.Tensor, List[Image.Image]] = field(repr=False)
     caption: Optional[str] = None
+    metadata: Optional[Dict] = None
     fps: int = 8
     audio: Optional[torch.Tensor] = field(default=None, repr=False)
     audio_sample_rate: Optional[int] = None
@@ -634,8 +648,8 @@ class LogTable:
                 continue
             conds = _to_pil_list(s.condition_images)[:n_conds]
             
-            caption = _build_sample_caption(s)
-            gen_video = LogVideo(s.video, caption=caption)
+            caption, metadata = _build_sample_caption(s)
+            gen_video = LogVideo(s.video, caption=caption, metadata=metadata)
             
             # Use first generation's height as target for unified display
             if target_height is None:
@@ -670,10 +684,10 @@ class LogTable:
                 continue
             conds = _to_pil_list(s.condition_images)[:n_conds]
 
-            caption = _build_sample_caption(s)
+            caption, metadata = _build_sample_caption(s)
             fps = getattr(s, 'frame_rate', None) or 24
             gen_video = LogVideo(
-                s.video, caption=caption, fps=int(fps),
+                s.video, caption=caption, metadata=metadata, fps=int(fps),
                 audio=s.audio, audio_sample_rate=s.audio_sample_rate,
             )
 
@@ -708,8 +722,8 @@ class LogTable:
                 continue
             conds = _to_video_list(s.condition_videos)[:n_conds]
             
-            caption = _build_sample_caption(s)
-            gen_video = LogVideo(s.video, caption=caption)
+            caption, metadata = _build_sample_caption(s)
+            gen_video = LogVideo(s.video, caption=caption, metadata=metadata)
             
             if target_height is None:
                 target_height, _ = gen_video.get_size()
@@ -791,9 +805,11 @@ class LogFormatter:
         """Handle basic sample with single generated image."""
         def _process_single_base_sample(s: BaseSample) -> Optional[Union[LogImage, LogVideo]]:
             if s.image is not None:
-                return LogImage(s.image, caption=_build_sample_caption(s))
+                caption, metadata = _build_sample_caption(s)
+                return LogImage(s.image, caption=caption, metadata=metadata)
             elif s.video is not None:
-                return LogVideo(s.video, caption=_build_sample_caption(s))
+                caption, metadata = _build_sample_caption(s)
+                return LogVideo(s.video, caption=caption, metadata=metadata)
             return None
         
         results = [_process_single_base_sample(s) for s in samples]
@@ -806,7 +822,8 @@ class LogFormatter:
         def _process_single_t2i_sample(sample: T2ISample) -> Optional[LogImage]:
             if sample.image is None:
                 return None
-            return LogImage(sample.image, caption=_build_sample_caption(sample))
+            caption, metadata = _build_sample_caption(sample)
+            return LogImage(sample.image, caption=caption, metadata=metadata)
 
         results = [_process_single_t2i_sample(s) for s in samples]
         return results
@@ -817,7 +834,8 @@ class LogFormatter:
         def _process_single_t2v_sample(sample: T2VSample) -> Optional[LogVideo]:
             if sample.video is None:
                 return None
-            return LogVideo(sample.video, caption=_build_sample_caption(sample))
+            caption, metadata = _build_sample_caption(sample)
+            return LogVideo(sample.video, caption=caption, metadata=metadata)
 
         results = [_process_single_t2v_sample(s) for s in samples]
         return results
@@ -829,9 +847,11 @@ class LogFormatter:
             if sample.video is None:
                 return None
             fps = getattr(sample, 'frame_rate', None) or 24
+            caption, metadata = _build_sample_caption(sample)
             return LogVideo(
                 sample.video,
-                caption=_build_sample_caption(sample),
+                caption=caption,
+                metadata=metadata,
                 fps=int(fps),
                 audio=sample.audio,
                 audio_sample_rate=sample.audio_sample_rate,
@@ -855,7 +875,8 @@ class LogFormatter:
                 return None
         
             grid = _concat_images_grid(all_imgs) if len(all_imgs) > 1 else all_imgs[0]
-            return LogImage(grid, caption=_build_sample_caption(sample))
+            caption, metadata = _build_sample_caption(sample)
+            return LogImage(grid, caption=caption, metadata=metadata)
         
         results = [_process_single_i2i_sample(s) for s in samples]
         return results
