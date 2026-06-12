@@ -18,9 +18,9 @@ Trainer loader factory for extensibility.
 Supports multiple RL algorithms via registry pattern.
 """
 import os
+import torch.distributed as dist
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed, ProjectConfiguration
-import logging
 
 from ..models.loader import load_model
 from .abc import BaseTrainer
@@ -72,6 +72,18 @@ def load_trainer(config: Arguments) -> BaseTrainer:
 
     # Reconcile config with runtime distributed state (before any consumer reads it)
     reconcile_config(config, accelerator)
+
+    # Sync the auto-generated run_name from rank 0 to all ranks.
+    # Each process calls datetime.now() independently during Arguments.__post_init__,
+    # so timestamps can differ by 1 second across ranks. Without this sync, different
+    # ranks would write checkpoints to different directories.
+    if dist.is_initialized():
+        obj_list = [config.log_args.run_name]
+        dist.broadcast_object_list(obj_list, src=0)
+        config.log_args.run_name = obj_list[0]
+        accelerator.project_configuration.project_dir = os.path.join(
+            config.log_args.save_dir, config.log_args.run_name,
+        )
 
     # Initialize model adapter
     adapter = load_model(config=config, accelerator=accelerator)
