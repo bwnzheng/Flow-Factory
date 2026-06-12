@@ -363,7 +363,7 @@ def plot_convex_hulls_faceted(
         selected = steps
 
     n = len(selected)
-    rows = (n + cols - 1) // cols
+    rows = max(1, (n + cols - 1) // cols)
     di, dj = dim_pair
 
     # Compute global axis limits across all selected steps

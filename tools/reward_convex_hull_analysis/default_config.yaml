@@ -11,10 +11,9 @@ save_dir: "saves"                  # Parent of saves/tensorboard/ and saves/{run
 # ---- Training rollouts (from TensorBoard events) ----
 training:
   enabled: true
-  # Path auto-resolved to {save_dir}/tensorboard/{run_name}/
+  # Reads {save_dir}/{run_name}/logs/media.jsonl
   max_images_per_step: 0          # 0 = all; set to N to cap per-step images
   datasets: []                    # [] = all; ["eval"] or ["train"] to filter
-  num_workers: 4                  # Parallel PNG decode workers
 
 # ---- Evaluation inference (from checkpoints on test prompts) ----
 evaluation:

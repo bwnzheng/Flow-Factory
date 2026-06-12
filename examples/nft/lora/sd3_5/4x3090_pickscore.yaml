@@ -37,6 +37,7 @@ log:
   run_name: null  # Run name (auto: {model_type}_{finetune_type}_{timestamp})
   project: "Flow-Factory"  # Project name for logging
   logging_backend: "tensorboard"  # Options: wandb, swanlab, none
+  save_media_locally: true
   save_dir: "saves/"  # Directory to save model checkpoints and logs
   save_freq: 20  # Save frequency in epochs (0 to disable)
   save_model_only: true  # Save only the model weights (not optimizer, scheduler, etc.)
@@ -92,6 +93,9 @@ train:
 
   # Seed
   seed: 42 # Random seed
+
+  # Stopping
+  max_epochs: 101
 
 # Scheduler Configuration
 scheduler:

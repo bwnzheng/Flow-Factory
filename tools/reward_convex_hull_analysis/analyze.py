@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
 import yaml
 from PIL import Image
 from tqdm import tqdm
@@ -47,9 +46,8 @@ from tools.reward_convex_hull_analysis.evaluation_runner import (
     discover_checkpoints,
 )
 from tools.reward_convex_hull_analysis.reward_computer import StandaloneRewardComputer
-from tools.reward_convex_hull_analysis.tensorboard_extractor import (
-    decode_images_to_disk,
-    load_decoded_images,
+from tools.reward_convex_hull_analysis.log_reader import (
+    load_training_samples,
 )
 
 
@@ -66,7 +64,6 @@ class AnalysisConfig:
     training_enabled: bool = True
     tr_max_images_per_step: int = 0
     tr_datasets: List[str] = field(default_factory=list)
-    tr_num_workers: int = 4
     evaluation_enabled: bool = True
     eval_checkpoint_dir: str = ""
     prompts_file: str = ""
@@ -99,7 +96,6 @@ def _parse_config(path: str) -> AnalysisConfig:
         training_enabled=tr.get("enabled", True),
         tr_max_images_per_step=tr.get("max_images_per_step", 0),
         tr_datasets=tr.get("datasets", []),
-        tr_num_workers=tr.get("num_workers", 4),
         evaluation_enabled=ev.get("enabled", True),
         eval_checkpoint_dir=ev.get("checkpoint_dir", ""),
         prompts_file=ev.get("prompts_file", ""),
@@ -131,11 +127,10 @@ def _resolve_run_name(config: AnalysisConfig) -> str:
         if os.path.basename(ckpt) == "checkpoints":
             return os.path.basename(parent)
         return os.path.basename(ckpt)
-    tb_root = os.path.join(config.save_dir, "tensorboard")
-    if os.path.isdir(tb_root):
-        runs = sorted(os.listdir(tb_root))
-        if runs:
-            return runs[-1]
+    # Try scanning saves/ for run directories that have logs/
+    for name in sorted(os.listdir(config.save_dir), reverse=True):
+        if os.path.isdir(os.path.join(config.save_dir, name, "logs")):
+            return name
     raise ValueError(
         "Cannot resolve run_name. Set run_name in config or provide checkpoint_dir."
     )
@@ -161,47 +156,6 @@ def _load_prompts(config: AnalysisConfig) -> List[str]:
                 return [line.strip() for line in f if line.strip()]
         print(f"  [WARN] prompts_file not found: {config.prompts_file}")
     return []
-
-
-# ---------------------------------------------------------------------------
-# Prompt reconstruction from training sampler (GroupContiguousSampler)
-# ---------------------------------------------------------------------------
-
-
-def _reconstruct_training_prompts(
-    prompts_file: str,
-    steps: List[int],
-    seed: int = 42,
-    group_size: int = 16,
-    unique_sample_num: int = 48,
-    world_size: int = 4,
-    per_device_batch_size: int = 1,
-    dataset_size: Optional[int] = None,
-) -> Dict[int, List[str]]:
-    """Reconstruct training prompts using the exact ``GroupContiguousSampler`` logic."""
-    path = prompts_file
-    if not os.path.isabs(path):
-        if not os.path.isfile(path):
-            path = os.path.join(os.getcwd(), path)
-    with open(path, "r") as f:
-        all_prompts = [line.strip() for line in f if line.strip()]
-
-    D = dataset_size if dataset_size else len(all_prompts)
-    M = unique_sample_num
-    K = group_size
-    G = M // world_size
-
-    result: Dict[int, List[str]] = {}
-    for epoch in steps:
-        g = torch.Generator()
-        g.manual_seed(seed + epoch)
-        indices = torch.randperm(D, generator=g)[:M].tolist()
-        group_perm = torch.randperm(M, generator=g).tolist()
-        shuffled_groups = [indices[i] for i in group_perm]
-        my_groups = shuffled_groups[:G]
-        result[epoch] = [all_prompts[my_groups[0]], all_prompts[my_groups[1]]]
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -258,40 +212,39 @@ def _run_training(
     output_dir: str,
     reward_names: List[str],
 ) -> Optional[Dict[int, Dict[str, Any]]]:
-    """Decode images from TensorBoard, score them, return step→data dict."""
-    tb_dir = os.path.join(config.save_dir, "tensorboard", run_name)
-    if not os.path.isdir(tb_dir):
-        print(f"[Training] TensorBoard directory not found: {tb_dir} — skipping")
+    """Read rollout images from JSONL logs, score them, return step→data dict."""
+    log_dir = os.path.join(config.save_dir, run_name, "logs")
+    if not os.path.isdir(log_dir):
+        print(f"[Training] Logs directory not found: {log_dir} — skipping")
         return None
 
     datasets_filter = config.tr_datasets if config.tr_datasets else None
 
-    decoded_dir = os.path.join(output_dir, "decoded_images")
-    print(f"[Training] Decoding images to {decoded_dir} ...")
+    print(f"[Training] Loading samples from {log_dir}/media.jsonl ...")
     try:
-        image_index = decode_images_to_disk(
-            tb_dir, decoded_dir,
-            datasets=datasets_filter,
+        images_by_step = load_training_samples(
+            log_dir, datasets=datasets_filter,
             max_per_step=config.tr_max_images_per_step,
-            num_workers=config.tr_num_workers,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"  [ERROR] {exc}")
         return None
 
-    if not image_index:
-        print("  No rollout images found in TensorBoard events.")
+    if not images_by_step:
+        print("  No rollout images found in media.jsonl.")
         return None
 
-    step_img_counts = Counter(e["step"] for e in image_index)
-    steps = sorted(step_img_counts.keys())
-    datasets = sorted(set(e["dataset"] for e in image_index))
-    total_imgs = sum(step_img_counts.values())
+    steps = sorted(images_by_step.keys())
+    total_imgs = sum(len(v) for v in images_by_step.values())
+    datasets = sorted(set(e["dataset"] for entries in images_by_step.values() for e in entries))
     print(f"  Found {len(steps)} steps with images across datasets: {datasets}")
     print(f"  Total images: {total_imgs}")
 
     tr_out = os.path.join(output_dir, "training")
     os.makedirs(tr_out, exist_ok=True)
+
+    # Build per-step image counts from grouped data (no manifest needed)
+    step_img_counts = {s: len(entries) for s, entries in images_by_step.items()}
 
     cached = _load_reward_cache(tr_out, steps, reward_names)
     cache_valid = cached is not None
@@ -309,40 +262,22 @@ def _run_training(
         all_step_data = cached
     else:
         assert computer is not None, "Reward model needed but not loaded"
-        print(f"[Training] Loading decoded images ({len(image_index)} total) ...")
-        images_by_step = load_decoded_images(
-            decoded_dir, image_index,
-            max_per_step=config.tr_max_images_per_step,
-        )
         print(f"  [Reward] Scoring images with {reward_names} ...")
-
-        step_prompts: Dict[int, List[str]] = {}
-        train_prompts_file = "dataset/pickscore/train.txt"
-        if os.path.isfile(train_prompts_file):
-            print(f"  [Reward] Reconstructing training prompts from {train_prompts_file} ...")
-            step_prompts = _reconstruct_training_prompts(
-                train_prompts_file, steps,
-                seed=42, group_size=16, unique_sample_num=48,
-                world_size=4, per_device_batch_size=1, dataset_size=1024,
-            )
 
         t0 = time.time()
         all_step_data = {}
         for step in tqdm(steps, desc="  Scoring", unit="step"):
             entries = images_by_step.get(step, [])
-            images = [e["image"] for e in entries]
-            prompts = step_prompts.get(step, [])
+            # Load images from disk (PNG files already saved by training)
+            images = []
             prompt_per_img = []
             for e in entries:
-                ti = e.get("tag_idx", 0)
-                if ti < 16 and len(prompts) > 0:
-                    prompt_per_img.append(prompts[0])
-                elif ti >= 16 and len(prompts) > 1:
-                    prompt_per_img.append(prompts[1])
-                elif ti < len(all_prompts):
-                    prompt_per_img.append(all_prompts[ti])
-                else:
-                    prompt_per_img.append("a photo")
+                img_path = e["image_path"]
+                if os.path.isfile(img_path):
+                    images.append(Image.open(img_path))
+                    prompt_per_img.append(e.get("prompt", "a photo"))
+            if not images:
+                continue
             rewards = _score_images(computer, images, prompt_per_img)
             all_step_data[step] = _build_step_data(step, rewards, reward_names,
                                                     prompt_per_img)
@@ -513,15 +448,6 @@ def _run_evaluation(
 # ---------------------------------------------------------------------------
 
 
-def _load_manifest_quiet(decoded_dir: str) -> Optional[List[Dict[str, Any]]]:
-    path = os.path.join(decoded_dir, "manifest.json")
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r") as f:
-        m = json.load(f)
-    return m.get("images", None)
-
-
 def _reward_cache_path(source_dir: str) -> str:
     return os.path.join(source_dir, "reward_cache.json")
 
@@ -645,23 +571,26 @@ def main(config_path: str):
 
     if config.training_enabled:
         tr_out = os.path.join(output_dir, "training")
-        decoded_dir = os.path.join(output_dir, "decoded_images")
-        image_index = _load_manifest_quiet(decoded_dir)
-        if image_index:
-            if config.tr_datasets:
-                image_index = [e for e in image_index
-                               if e.get("dataset", "") in config.tr_datasets]
-            steps = sorted(set(e["step"] for e in image_index))
-            cached_all = _load_reward_cache(tr_out, steps, reward_names)
-            if cached_all is not None:
-                manifest_counts = Counter(e["step"] for e in image_index)
-                tr_cached = True
-                for step in steps:
-                    expected = manifest_counts.get(step, 0)
-                    actual = cached_all[step].get("n_total", 0)
-                    if expected != actual:
-                        tr_cached = False
-                        break
+        log_dir = os.path.join(config.save_dir, run_name, "logs")
+        if os.path.isdir(log_dir):
+            try:
+                images_by_step = load_training_samples(
+                    log_dir, datasets=config.tr_datasets if config.tr_datasets else None,
+                    max_per_step=config.tr_max_images_per_step,
+                )
+                steps = sorted(images_by_step.keys())
+                if steps:
+                    cached_all = _load_reward_cache(tr_out, steps, reward_names)
+                    if cached_all is not None:
+                        tr_cached = True
+                        for step in steps:
+                            expected = len(images_by_step.get(step, []))
+                            actual = cached_all[step].get("n_total", 0)
+                            if expected != actual:
+                                tr_cached = False
+                                break
+            except (FileNotFoundError, ValueError):
+                pass
 
     if config.evaluation_enabled:
         ev_out = os.path.join(output_dir, "evaluation")
