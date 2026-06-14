@@ -136,6 +136,8 @@ class Logger(ABC):
             scalar = LogFormatter.to_scalar(v)
             if scalar is not None:
                 record[k] = scalar
+            elif isinstance(v, (list, dict)):
+                record[k] = v
         if len(record) > 1:  # more than just 'step'
             filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
             with open(filepath, 'a') as f:
@@ -160,12 +162,15 @@ class Logger(ABC):
         if self._should_log_jsonl:
             self._write_metrics_jsonl(formatted_dict, step)
 
-        # 4. Filter keys if requested
+        # 4. Remove non-scalar values (nested structures only meaningful for local JSONL)
+        formatted_dict = {k: v for k, v in formatted_dict.items() if not isinstance(v, (list, dict))}
+
+        # 5. Filter keys if requested
         if keys:
             valid_keys = keys.split(',')
             formatted_dict = {k: v for k, v in formatted_dict.items() if k in valid_keys}
 
-        # 5. Convert IR to Platform Objects
+        # 6. Convert IR to Platform Objects
         final_dict = {}
         for k, v in formatted_dict.items():
             converted = self._recursive_convert(v)
@@ -174,12 +179,12 @@ class Logger(ABC):
             else:
                 final_dict[k] = converted
 
-        # 6. Actual Logging (filter out None from removed media)
+        # 7. Actual Logging (filter out None from removed media)
         final_dict = {k: v for k, v in final_dict.items() if v is not None}
         if final_dict:
             self._log_impl(final_dict, step)
 
-        # 7. Cleanup temporary files periodically
+        # 8. Cleanup temporary files periodically
         if not self._should_save_locally:
             if len(self._pending_cleanup) >= self.clean_up_freq:
                 first_data = self._pending_cleanup.pop(0)

@@ -722,6 +722,12 @@ class AdvantageProcessor:
         _log_data["train/adv_max"] = adv_stats["max"]
         _log_data["train/adv_abs_mean"] = all_stats["adv_abs"]["mean"]
 
+        for name in gathered_rewards:
+            arr = gathered_rewards[name]
+            for q in [0, 25, 50, 75, 100]:
+                _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
+
+        _log_data["train/rewards"] = self._group_rewards_by_prompt(samples, group_indices, gathered_rewards)
         _log_data["train_samples"] = samples[:self.max_log_samples]
         return _log_data
 
@@ -763,4 +769,29 @@ class AdvantageProcessor:
             "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
             "train_samples": samples[:self.max_log_samples],
         })
+        for name in gathered_rewards:
+            arr = gathered_rewards[name]
+            for q in [0, 25, 50, 75, 100]:
+                _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
+
+        _log_data["train/rewards"] = self._group_rewards_by_prompt(samples, group_indices, gathered_rewards)
         return _log_data
+
+    def _group_rewards_by_prompt(
+        self,
+        samples: List,
+        group_indices: np.ndarray,
+        gathered_rewards: Dict[str, np.ndarray],
+    ) -> list:
+        """Return per-prompt reward groups for offline analysis."""
+        groups = {}
+        for i, sample in enumerate(samples):
+            gid = int(group_indices[i])
+            if gid not in groups:
+                groups[gid] = {
+                    'prompt': sample.prompt,
+                    'rewards': {name: [] for name in gathered_rewards},
+                }
+            for name in gathered_rewards:
+                groups[gid]['rewards'][name].append(float(gathered_rewards[name][i]))
+        return list(groups.values())
