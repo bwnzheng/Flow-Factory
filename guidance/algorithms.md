@@ -13,6 +13,8 @@
      - [KL-loss](#kl-loss)
      - [GRPO-Guard](#grpo-guard)
 
+- [DPPO](#dppo)
+
 - [DPO](#dpo)
 
 - [DGPO](#dgpo)
@@ -158,6 +160,24 @@ train:
     dynamics_type: 'Flow-SDE'
 ```
 > ‼️ **Note**: Currently, `grpo-guard` reweighting is only compatible with `Flow-GRPO` dynamics. Therefore, dynamics_type must be explicitly set to `Flow-SDE`.
+
+## DPPO
+
+Flow-DPPO (Divergence Proximal Policy Optimization) [[15]](#ref15) is a strict Flow-GRPO variant that keeps GRPO's group advantages and the optional KL-vs-reference penalty, but **replaces the PPO ratio-clip with a divergence proximal constraint**. The argument is that the single-sample probability ratio is a noisy estimate of the true policy divergence, so ratio clipping over-constrains some steps and under-constrains others. Because the per-step policy in a flow model is Gaussian, the KL between the old and new policies is exact and cheap to compute. DPPO uses this in an **asymmetric divergence mask**: it zeroes the gradient for any sample whose per-step KL(current ‖ rollout-old) exceeds `kl_mask_threshold` *and* whose update would push the action further in the wrong direction (`ratio > 1 & adv > 0`, or `ratio < 1 & adv < 0`).
+
+The two KL computations are **decoupled**: `kl_mask_type` selects the space of the trust-region mask's KL(current ‖ old), while `kl_type` selects the space of the optional KL(current ‖ reference) penalty.
+
+```yaml
+train:
+    trainer_type: 'dppo'
+    kl_mask_type: 'x-based'    # Trust-region mask KL(current||old) space: 'x-based' (next_latents_mean) or 'v-based' (noise_pred)
+    kl_mask_threshold: 1.0e-6  # Per-step KL trust-region; larger keeps more samples
+    kl_type: 'x-based'         # KL(current||reference) penalty space: 'x-based' or 'v-based'
+    kl_beta: 1.0e-3            # Optional KL(current||reference) penalty (0 disables)
+    kl_guidance_scale: 4.5     # CFG for the KL-vs-reference forward (Null = training guidance_scale)
+```
+
+Like GRPO, DPPO is **coupled** and must use SDE dynamics (`Flow-SDE`, `Dance-SDE`, `CPS`). `DPPOTrainingArguments` does not inherit `GRPOTrainingArguments` (no `clip_range`) — its field set is intentionally minimal. When `kl_beta > 0`, the KL-vs-reference term is evaluated at `kl_guidance_scale`; this is reflected in `DPPOTrainingArguments.get_preprocess_guidance_scale()` so negative prompts are encoded at preprocessing whenever `kl_guidance_scale > 1.0`. Example configs: `examples/dppo/lora/{flux2_klein_base,sd3_5}/geneval2_{single,multi}.yaml`.
 
 ## DPO
 
@@ -563,3 +583,4 @@ Each teacher's `applicable_datasets` must reference declared `data.datasets[*].n
 * <a name="ref12"></a>[12] [**TDM-R1**: Reinforcing Few-Step Diffusion Models with Non-Differentiable Reward](https://arxiv.org/abs/2510.08425)
 * <a name="ref13"></a>[13] [**CRD**: Diffusion Reinforcement Learning via Centered Reward Distillation](https://arxiv.org/abs/2603.14128)
 * <a name="ref14"></a>[14] [**DiffusionOPD**: A Unified Perspective of On-Policy Distillation in Diffusion Models](https://arxiv.org/abs/2605.15055)
+* <a name="ref15"></a>[15] [**Flow-DPPO**: Divergence Proximal Policy Optimization for Flow Matching Models](https://arxiv.org/abs/2606.11025) ([Code](https://github.com/Tencent-Hunyuan/UniRL/tree/main/FlowDPPO#readme))
