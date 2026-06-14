@@ -24,7 +24,6 @@ import json
 import os
 import sys
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +39,8 @@ from tools.reward_convex_hull_analysis.convex_hull import (
     plot_convex_hulls_windows,
     plot_distribution_1d,
     plot_hull_area_curve,
+    plot_pareto_front_evolution,
+    plot_reward_quantiles,
 )
 from tools.reward_convex_hull_analysis.evaluation_runner import (
     EvaluationRunner,
@@ -325,6 +326,20 @@ def _run_training(
             all_step_data, reward_names,
             os.path.join(tr_out, "convex_hulls_windows.png"),
             title="Training Convex Hull Trend (Window-Averaged)",
+            label_name="Step",
+        )
+        print(f"  [Plot] Generating reward quantile trends ...")
+        plot_reward_quantiles(
+            all_step_data, reward_names,
+            os.path.join(tr_out, "reward_quantiles.png"),
+            title="Training Reward Quantile Trends",
+            label_name="Step",
+        )
+        print(f"  [Plot] Generating Pareto front evolution ...")
+        plot_pareto_front_evolution(
+            all_step_data, reward_names,
+            os.path.join(tr_out, "pareto_front_evolution.png"),
+            title="Training Pareto Front Evolution",
             label_name="Step",
         )
     else:

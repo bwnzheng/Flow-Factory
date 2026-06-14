@@ -66,12 +66,20 @@ class Logger(ABC):
         return key.replace('/', '_')
 
     def _save_image_file(self, key: str, img_obj: LogImage, step: int) -> str:
-        """Save a LogImage as PNG, return relative path."""
+        """Save a LogImage locally, return relative path."""
+        fmt = getattr(self.config.log_args, 'image_save_format', 'png').lower()
+        quality = getattr(self.config.log_args, 'image_save_quality', 90)
+        ext = 'jpg' if fmt == 'jpg' else 'png'
         sanitized = self._sanitize_key(key)
         step_dir = os.path.join(self._logs_dir, 'images', f'step_{step:06d}')
         os.makedirs(step_dir, exist_ok=True)
-        filepath = os.path.join(step_dir, f'{sanitized}.png')
-        img_obj.get_pil().save(filepath, format='PNG')
+        filepath = os.path.join(step_dir, f'{sanitized}.{ext}')
+
+        img = img_obj.get_pil().convert('RGB')
+        if fmt == 'jpg':
+            img.save(filepath, format='JPEG', quality=quality)
+        else:
+            img.save(filepath, format='PNG')
         return os.path.relpath(filepath, self._logs_dir)
 
     def _save_video_file(self, key: str, vid_obj: LogVideo, step: int) -> str:
@@ -85,23 +93,16 @@ class Logger(ABC):
                          codec='libx264', pixelformat='yuv420p')
         return os.path.relpath(filepath, self._logs_dir)
 
-    def _extract_and_save_media(self, data: Dict, step: int) -> List[Dict]:
-        """Walk formatted dict, save LogImage/LogVideo/LogTable locally, and remove them.
-
-        Returns a list of media.jsonl entries.
-        """
+    def _extract_and_save_media(self, data: Dict, step: int):
+        """Walk dict, save media to local files, and remove from dict."""
         entries = []
 
         def _walk(key: str, value: Any):
-            if isinstance(value, LogImage):
-                path = self._save_image_file(key, value, step)
-                entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
-                if value.metadata:
-                    entry.update(value.metadata)
-                entries.append(entry)
-                return None
-            elif isinstance(value, LogVideo):
-                path = self._save_video_file(key, value, step)
+            if isinstance(value, (LogImage, LogVideo)):
+                if isinstance(value, LogImage):
+                    path = self._save_image_file(key, value, step)
+                else:
+                    path = self._save_video_file(key, value, step)
                 entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
                 if value.metadata:
                     entry.update(value.metadata)
@@ -123,13 +124,11 @@ class Logger(ABC):
         for k in list(data.keys()):
             data[k] = _walk(k, data[k])
 
-        return entries
-
-    def _write_media_jsonl(self, entries: List[Dict]):
-        filepath = os.path.join(self._logs_dir, 'media.jsonl')
-        with open(filepath, 'a') as f:
-            for entry in entries:
-                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        if entries:
+            filepath = os.path.join(self._logs_dir, 'media.jsonl')
+            with open(filepath, 'a') as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
     def _write_metrics_jsonl(self, scalars: Dict[str, Any], step: int):
         record = {'step': step}
@@ -153,11 +152,9 @@ class Logger(ABC):
         # 1. Process rules (Mean, Paths, wrappers) into IR
         formatted_dict = LogFormatter.format_dict(data)
 
-        # 2. [NEW] Save media locally and remove from dict before backend gets it
+        # 2. [NEW] Save media locally if configured (also removes media from dict)
         if self._should_save_locally:
-            media_entries = self._extract_and_save_media(formatted_dict, step)
-            if media_entries:
-                self._write_media_jsonl(media_entries)
+            self._extract_and_save_media(formatted_dict, step)
 
         # 3. [NEW] Write scalar metrics to local JSONL
         if self._should_log_jsonl:

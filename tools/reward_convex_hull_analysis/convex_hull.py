@@ -613,8 +613,243 @@ def plot_convex_hulls_windows(
         fontsize = 6 if nw <= 20 else 5
         ax.legend(fontsize=fontsize, loc="best", title="Window", title_fontsize=7)
 
+        # --- Draw centroid drift lines ---
+        centroids = []
+        for wi, (mid, w_steps) in enumerate(windows):
+            pool = []
+            for s in w_steps:
+                pts = all_steps.get(s, {}).get("points")
+                if pts is not None and pts.shape[1] > max(di, dj) and len(pts) > 0:
+                    pool.append(pts)
+            if not pool:
+                centroids.append((None, None))
+                continue
+            combined = np.vstack(pool)
+            cx = np.mean(combined[:, di])
+            cy = np.mean(combined[:, dj])
+            centroids.append((cx, cy))
+            # Mark centroid with a small dot
+            c = colors[wi]
+            ax.plot(cx, cy, "o", color=c, markersize=6, markeredgecolor="white",
+                    markeredgewidth=0.5)
+
+        # Connect consecutive valid centroids with dashed lines
+        valid = [(cx, cy) for cx, cy in centroids if cx is not None]
+        if len(valid) >= 2:
+            cxs, cys = zip(*valid)
+            ax.plot(cxs, cys, "k--", linewidth=1.0, alpha=0.5)
+
     for pi in range(n_pairs, rows * cols):
         axes[pi // cols][pi % cols].set_visible(False)
+
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Reward quantile trends — how reward distribution evolves per step
+# ---------------------------------------------------------------------------
+
+
+def plot_reward_quantiles(
+    all_steps: Dict[int, Dict[str, Any]],
+    reward_names: List[str],
+    output_path: str,
+    window_size: int = 20,
+    title: str = "Reward Quantile Trends",
+    label_name: str = "Step",
+) -> None:
+    """Plot quantiles of each reward dimension, pooled in windows.
+
+    Pools reward points across *window_size* consecutive steps (same as the
+    window-averaged hull plot) to suppress per-step noise.  Shows median,
+    mean, IQR band, and min/max per window.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    steps = sorted(all_steps.keys())
+
+    # Build windows (same logic as plot_convex_hulls_windows)
+    windows: List[Tuple[float, List[int]]] = []
+    lo = 0
+    while lo + window_size <= len(steps):
+        hi = lo + window_size
+        w_steps = steps[lo:hi]
+        mid = sum(w_steps) / len(w_steps)
+        windows.append((mid, w_steps))
+        lo = hi
+
+    n_rewards = len(reward_names)
+    fig, axes = plt.subplots(n_rewards, 1, figsize=(10, 3.5 * n_rewards),
+                             squeeze=False)
+
+    for ri, rname in enumerate(reward_names):
+        ax = axes[ri][0]
+        xs, medians, q25s, q75s, mins, maxs, means = [], [], [], [], [], [], []
+
+        for mid, w_steps in windows:
+            pool = []
+            for s in w_steps:
+                pts = all_steps.get(s, {}).get("points")
+                if pts is not None and pts.shape[1] > ri and len(pts) > 0:
+                    pool.append(pts[:, ri])
+            if not pool:
+                continue
+            vals = np.concatenate(pool)
+            xs.append(mid)
+            q25s.append(np.percentile(vals, 25))
+            medians.append(np.percentile(vals, 50))
+            q75s.append(np.percentile(vals, 75))
+            mins.append(np.min(vals))
+            maxs.append(np.max(vals))
+            means.append(np.mean(vals))
+
+        ax.fill_between(xs, q25s, q75s, alpha=0.25, color="#2196F3",
+                         label="25%-75%")
+        ax.plot(xs, medians, "o-", color="#1565C0", linewidth=1.5,
+                markersize=4, label="Median")
+        ax.plot(xs, means, "s-", color="#0D47A1", linewidth=1.2,
+                markersize=4, label="Mean")
+        ax.plot(xs, mins, "--", color="#90CAF9", linewidth=0.7, label="Min")
+        ax.plot(xs, maxs, "--", color="#90CAF9", linewidth=0.7, label="Max")
+
+        ax.set_ylabel(rname)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, loc="best")
+
+    axes[-1][0].set_xlabel(label_name)
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Pareto front evolution — cumulative Pareto-optimal set over training
+# ---------------------------------------------------------------------------
+
+
+def _compute_pareto_front(points: np.ndarray) -> np.ndarray:
+    """Return the Pareto-optimal subset of *points* (maximization in all dims)."""
+    if len(points) == 0:
+        return np.empty((0, points.shape[1]))
+    # Sort by first dim descending
+    idx = np.argsort(-points[:, 0])
+    sorted_pts = points[idx]
+    is_pareto = np.ones(len(sorted_pts), dtype=bool)
+    for i in range(len(sorted_pts)):
+        if not is_pareto[i]:
+            continue
+        # This point dominates any later point that is <= in all dims
+        for j in range(i + 1, len(sorted_pts)):
+            if not is_pareto[j]:
+                continue
+            if all(sorted_pts[i] >= sorted_pts[j]):
+                is_pareto[j] = False
+    return sorted_pts[is_pareto]
+
+
+def _hypervolume(pareto: np.ndarray, ref: np.ndarray) -> float:
+    """Exact hypervolume via recursive dimension reduction.
+
+    For 2D: sort by x desc, sum rectangular slices.
+    For N>2: sort by first dim desc, for each point recurse on remaining
+    dims with the set of points above it.
+    """
+    if len(pareto) == 0:
+        return 0.0
+    dim = pareto.shape[1]
+
+    if dim == 1:
+        return max(pareto[:, 0].max() - ref[0], 0.0)
+
+    # Sort by first dimension descending
+    pts = pareto[np.argsort(-pareto[:, 0])]
+    hv = 0.0
+    prev_x = ref[0]
+
+    for i, pt in enumerate(pts):
+        x = pt[0]
+        if x <= prev_x:
+            continue
+        # Slice: points above this one in remaining dims
+        remaining = pts[:i + 1, 1:]  # include current point
+        # Filter: only points that dominate ref in remaining dims
+        mask = np.all(remaining >= ref[1:], axis=1)
+        if mask.sum() > 0:
+            hv_slice = _hypervolume(remaining[mask], ref[1:])
+            hv += (x - prev_x) * hv_slice
+        prev_x = x
+
+    return hv
+
+
+def plot_pareto_front_evolution(
+    all_steps: Dict[int, Dict[str, Any]],
+    reward_names: List[str],
+    output_path: str,
+    title: str = "Pareto Front Evolution",
+    label_name: str = "Step",
+) -> None:
+    """Track cumulative Pareto front size and hypervolume over training steps.
+
+    Works with any number of reward dimensions (≥2).  At each step, all
+    reward vectors seen so far are pooled, and the N-dimensional Pareto front
+    is computed.  Plots the number of Pareto-optimal points and an estimated
+    hypervolume over steps.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    steps = sorted(all_steps.keys())
+    dim = len(reward_names)
+    if dim < 2 or len(steps) == 0:
+        return
+
+    cumulative = []  # list of (N, D) arrays
+    pareto_counts = []
+    hypervolumes = []
+
+    for step in steps:
+        pts = all_steps.get(step, {}).get("points")
+        if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
+            cumulative.append(pts[:, :dim])
+
+        if cumulative:
+            all_pts = np.vstack(cumulative)
+        else:
+            all_pts = np.empty((0, dim))
+
+        pareto = _compute_pareto_front(all_pts)
+        pareto_counts.append(len(pareto))
+
+        if len(pareto) > 0:
+            ref = all_pts.min(axis=0) - 0.01
+            hv = _hypervolume(pareto, ref)
+        else:
+            hv = 0.0
+        hypervolumes.append(hv)
+
+    fig, ax_count = plt.subplots(figsize=(10, 5))
+    ax_hv = ax_count.twinx()
+
+    ax_count.plot(steps, pareto_counts, "-", color="#2E7D32", linewidth=1.5,
+                   label="Pareto Size")
+    ax_hv.plot(steps, hypervolumes, "-", color="#C62828", linewidth=1.5,
+               label="Hypervolume")
+
+    ax_count.set_ylabel("Pareto Front Size", color="#2E7D32")
+    ax_hv.set_ylabel("Hypervolume", color="#C62828")
+    ax_count.set_xlabel(label_name)
+    ax_count.tick_params(axis="y", labelcolor="#2E7D32")
+    ax_hv.tick_params(axis="y", labelcolor="#C62828")
+    ax_count.grid(True, alpha=0.3)
+
+    # Combined legend
+    lines1, labels1 = ax_count.get_legend_handles_labels()
+    lines2, labels2 = ax_hv.get_legend_handles_labels()
+    ax_count.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc="best")
 
     fig.suptitle(title, fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])

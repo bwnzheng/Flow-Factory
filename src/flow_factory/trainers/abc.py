@@ -216,6 +216,7 @@ class BaseTrainer(ABC):
             global_std=getattr(self.training_args, 'global_std', True),
             sampler_type=self.config.data_args.sampler_type,
             verbose=self.log_args.verbose,
+            max_log_samples=self.log_args.max_log_samples,
             source_id_to_name=self.config.data_args.source_id_to_name,
         )
 

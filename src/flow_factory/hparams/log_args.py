@@ -62,6 +62,21 @@ class LogArguments(ArgABC):
         metadata={"help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."},
     )
 
+    max_log_samples: int = field(
+        default=30,
+        metadata={"help": "Max samples (images) to log per step."},
+    )
+
+    image_save_format: str = field(
+        default="png",
+        metadata={"help": "Image save format for local storage: 'png' (lossless) or 'jpg' (smaller)."},
+    )
+
+    image_save_quality: int = field(
+        default=90,
+        metadata={"help": "JPEG quality (1-100), only used when image_save_format='jpg'."},
+    )
+
     verbose: bool = field(
         default=True,
         metadata={"help": "Whether to print detailed progress during training."},

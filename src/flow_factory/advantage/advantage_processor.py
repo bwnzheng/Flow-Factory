@@ -80,6 +80,7 @@ class AdvantageProcessor:
         sampler_type: str = "distributed_k_repeat",
         verbose: bool = True,
         source_id_to_name: Optional[List[str]] = None,
+        max_log_samples: int = 30,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -87,6 +88,7 @@ class AdvantageProcessor:
         self.global_std = global_std
         self.sampler_type = sampler_type
         self.verbose = verbose
+        self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
 
         self.group_on_same_rank = sampler_type == "group_contiguous"
@@ -720,7 +722,7 @@ class AdvantageProcessor:
         _log_data["train/adv_max"] = adv_stats["max"]
         _log_data["train/adv_abs_mean"] = all_stats["adv_abs"]["mean"]
 
-        _log_data["train_samples"] = samples[:30]
+        _log_data["train_samples"] = samples[:self.max_log_samples]
         return _log_data
 
     def _build_gdpo_log_data(
@@ -759,6 +761,6 @@ class AdvantageProcessor:
             "train/adv_min": adv_stats["min"],
             "train/adv_max": adv_stats["max"],
             "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
-            "train_samples": samples[:30],
+            "train_samples": samples[:self.max_log_samples],
         })
         return _log_data
