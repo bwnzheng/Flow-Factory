@@ -607,6 +607,7 @@ class AdvantageProcessor:
         self._pending_advantage_metrics = self._build_gdpo_log_data(
             gathered_rewards, group_indices, advantages, bn_mean, bn_std, samples,
             applicable=applicable, reward_keys=reward_keys,
+            all_reward_advantages=all_reward_advantages,
         )
 
         # Scatter & store
@@ -722,6 +723,13 @@ class AdvantageProcessor:
         _log_data["train/adv_max"] = adv_stats["max"]
         _log_data["train/adv_abs_mean"] = all_stats["adv_abs"]["mean"]
 
+        pos = advantages > 0; neg = advantages < 0; zero = advantages == 0
+        n = len(advantages)
+        _log_data["train/adv_pos_ratio"] = float(pos.sum() / n)
+        _log_data["train/adv_neg_ratio"] = float(neg.sum() / n)
+        _log_data["train/adv_zero_ratio"] = float(zero.sum() / n)
+        _log_data["train/adv_pos_sum"] = float(advantages[pos].sum())
+
         for name in gathered_rewards:
             arr = gathered_rewards[name]
             for q in [0, 25, 50, 75, 100]:
@@ -741,6 +749,7 @@ class AdvantageProcessor:
         samples: List[BaseSample],
         applicable: Optional[np.ndarray] = None,
         reward_keys: Optional[List[str]] = None,
+        all_reward_advantages: Optional[List[np.ndarray]] = None,
     ) -> Dict[str, Any]:
         stat_arrays, r_applicable = self._build_base_log_stats(
             gathered_rewards, group_indices, applicable, reward_keys
@@ -769,6 +778,16 @@ class AdvantageProcessor:
             "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
             "train_samples": samples[:self.max_log_samples],
         })
+        if all_reward_advantages is not None and reward_keys is not None:
+            for r_idx, name in enumerate(reward_keys):
+                adv = all_reward_advantages[r_idx]
+                pos = adv > 0; neg = adv < 0; zero = adv == 0
+                n = len(adv)
+                _log_data[f"train/reward_{name}_adv_pos_ratio"] = float(pos.sum() / n)
+                _log_data[f"train/reward_{name}_adv_neg_ratio"] = float(neg.sum() / n)
+                _log_data[f"train/reward_{name}_adv_zero_ratio"] = float(zero.sum() / n)
+                _log_data[f"train/reward_{name}_adv_pos_sum"] = float(adv[pos].sum())
+
         for name in gathered_rewards:
             arr = gathered_rewards[name]
             for q in [0, 25, 50, 75, 100]:
