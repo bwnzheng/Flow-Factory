@@ -804,7 +804,9 @@ class AdvantageProcessor:
                 _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
 
         _log_data["train_samples"] = samples[:self.max_log_samples]
-        _log_data["train/rewards"] = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
+        groups = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
+        _log_data["train/prompts"] = [g["prompt"] for g in groups]
+        _log_data["train/rewards"] = groups
         return _log_data
 
     def _build_gdpo_log_data(
@@ -862,7 +864,9 @@ class AdvantageProcessor:
             for q in [0, 25, 50, 75, 100]:
                 _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
 
-        _log_data["train/rewards"] = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
+        groups = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
+        _log_data["train/prompts"] = [g["prompt"] for g in groups]
+        _log_data["train/rewards"] = groups
         return _log_data
 
     def _group_rewards_by_prompt(

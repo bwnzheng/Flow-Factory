@@ -15,7 +15,9 @@
 # src/flow_factory/logger/abc.py
 import json
 import os
+import pickle
 import imageio
+import numpy as np
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Optional, Dict, Any, List
@@ -135,6 +137,32 @@ class Logger(ABC):
                 for entry in entries:
                     f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
+    def _save_rewards_pkl(self, data: Dict, step: int):
+        """Save train/eval reward arrays to pickle files, remove keys from dict."""
+        out_dir = os.path.join(self._logs_dir, 'rewards')
+        for k in list(data.keys()):
+            if k == 'train/rewards':
+                groups = data.pop(k)
+                out = {
+                    'step': step,
+                    'prompts': [g['prompt'] for g in groups],
+                }
+                for name in groups[0]['rewards'].keys():
+                    out[name] = [np.array(g['rewards'][name], dtype=np.float32) for g in groups]
+                os.makedirs(out_dir, exist_ok=True)
+                with open(os.path.join(out_dir, f'train_step_{step:06d}.pkl'), 'wb') as f:
+                    pickle.dump(out, f)
+            elif k.endswith('/rewards_all'):
+                ds_key = k[:-len('/rewards_all')]
+                ds_slug = ds_key.replace('/', '_')
+                rwd = data.pop(k)
+                out = {'step': step}
+                for name, vals in rwd.items():
+                    out[name] = np.array(vals, dtype=np.float32)
+                os.makedirs(out_dir, exist_ok=True)
+                with open(os.path.join(out_dir, f'{ds_slug}_step_{step:06d}.pkl'), 'wb') as f:
+                    pickle.dump(out, f)
+
     def _write_metrics_jsonl(self, scalars: Dict[str, Any], step: int):
         record = {'step': step}
         for k, v in scalars.items():
@@ -143,7 +171,7 @@ class Logger(ABC):
                 record[k] = scalar
             elif isinstance(v, (list, dict)):
                 record[k] = v
-        if len(record) > 1:  # more than just 'step'
+        if len(record) > 1:
             filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
             with open(filepath, 'a') as f:
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -163,14 +191,17 @@ class Logger(ABC):
         if self._should_save_locally:
             self._extract_and_save_media(formatted_dict, step)
 
-        # 3. [NEW] Write scalar metrics to local JSONL
+        # 3. [NEW] Save reward arrays to pickle
+        self._save_rewards_pkl(formatted_dict, step)
+
+        # 4. [NEW] Write scalar metrics to local JSONL
         if self._should_log_jsonl:
             self._write_metrics_jsonl(formatted_dict, step)
 
-        # 4. Remove non-scalar values (nested structures only meaningful for local JSONL)
+        # 5. Remove non-scalar values (nested structures only meaningful for local JSONL)
         formatted_dict = {k: v for k, v in formatted_dict.items() if not isinstance(v, (list, dict))}
 
-        # 5. Filter keys if requested
+        # 6. Filter keys if requested
         if keys:
             valid_keys = keys.split(',')
             formatted_dict = {k: v for k, v in formatted_dict.items() if k in valid_keys}
