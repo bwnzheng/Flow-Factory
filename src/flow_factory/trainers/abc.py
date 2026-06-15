@@ -787,6 +787,9 @@ class BaseTrainer(ABC):
                     for k, v in gathered_rewards.items():
                         log_data[f'eval/{dataset_name}/reward_{k}_mean'] = np.mean(v)
                         log_data[f'eval/{dataset_name}/reward_{k}_std'] = np.std(v)
+                        for q in [0, 25, 50, 75, 100]:
+                            log_data[f'eval/{dataset_name}/reward_{k}_p{q}'] = float(np.percentile(v, q))
+                    log_data[f'eval/{dataset_name}/rewards_all'] = {k: v.tolist() for k, v in gathered_rewards.items()}
                     log_data[f'eval/{dataset_name}/samples'] = all_samples
                     self.log_data(log_data, step=self.step)
 

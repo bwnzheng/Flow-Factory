@@ -508,8 +508,10 @@ class AdvantageProcessor:
         else:
             advantages = self._group_normalize(aggregated_rewards, group_indices)
 
+        all_prompts = self.accelerator.gather_object([s.prompt for s in samples])
+
         self._pending_advantage_metrics = self._build_weighted_sum_log_data(
-            gathered_rewards, group_indices, aggregated_rewards, advantages, samples,
+            gathered_rewards, group_indices, aggregated_rewards, advantages, samples, all_prompts,
             applicable=applicable, reward_keys=reward_keys,
         )
 
@@ -604,8 +606,10 @@ class AdvantageProcessor:
         bn_mean, bn_std = self._global_mean_std(combined_advantages)
         advantages = (combined_advantages - bn_mean) / bn_std
 
+        all_prompts = self.accelerator.gather_object([s.prompt for s in samples])
+
         self._pending_advantage_metrics = self._build_gdpo_log_data(
-            gathered_rewards, group_indices, advantages, bn_mean, bn_std, samples,
+            gathered_rewards, group_indices, advantages, bn_mean, bn_std, samples, all_prompts,
             applicable=applicable, reward_keys=reward_keys,
             all_reward_advantages=all_reward_advantages,
         )
@@ -684,6 +688,7 @@ class AdvantageProcessor:
         aggregated_rewards: np.ndarray,
         advantages: np.ndarray,
         samples: List[BaseSample],
+        all_prompts: List[str],
         applicable: Optional[np.ndarray] = None,
         reward_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
@@ -735,8 +740,8 @@ class AdvantageProcessor:
             for q in [0, 25, 50, 75, 100]:
                 _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
 
-        _log_data["train/rewards"] = self._group_rewards_by_prompt(samples, group_indices, gathered_rewards)
         _log_data["train_samples"] = samples[:self.max_log_samples]
+        _log_data["train/rewards"] = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
         return _log_data
 
     def _build_gdpo_log_data(
@@ -747,6 +752,7 @@ class AdvantageProcessor:
         bn_mean: float,
         bn_std: float,
         samples: List[BaseSample],
+        all_prompts: List[str],
         applicable: Optional[np.ndarray] = None,
         reward_keys: Optional[List[str]] = None,
         all_reward_advantages: Optional[List[np.ndarray]] = None,
@@ -793,22 +799,22 @@ class AdvantageProcessor:
             for q in [0, 25, 50, 75, 100]:
                 _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
 
-        _log_data["train/rewards"] = self._group_rewards_by_prompt(samples, group_indices, gathered_rewards)
+        _log_data["train/rewards"] = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
         return _log_data
 
     def _group_rewards_by_prompt(
         self,
-        samples: List,
+        prompts: List[str],
         group_indices: np.ndarray,
         gathered_rewards: Dict[str, np.ndarray],
     ) -> list:
         """Return per-prompt reward groups for offline analysis."""
         groups = {}
-        for i, sample in enumerate(samples):
+        for i, prompt in enumerate(prompts):
             gid = int(group_indices[i])
             if gid not in groups:
                 groups[gid] = {
-                    'prompt': sample.prompt,
+                    'prompt': prompt,
                     'rewards': {name: [] for name in gathered_rewards},
                 }
             for name in gathered_rewards:
