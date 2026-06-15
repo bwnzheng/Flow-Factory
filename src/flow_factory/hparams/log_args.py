@@ -62,9 +62,9 @@ class LogArguments(ArgABC):
         metadata={"help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."},
     )
 
-    max_log_samples: int = field(
+    max_log_samples: Optional[int] = field(
         default=30,
-        metadata={"help": "Max samples (images) to log per step."},
+        metadata={"help": "Max samples (images) to log per step. None = unlimited."},
     )
 
     image_save_format: str = field(

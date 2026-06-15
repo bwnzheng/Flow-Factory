@@ -80,7 +80,7 @@ class AdvantageProcessor:
         sampler_type: str = "distributed_k_repeat",
         verbose: bool = True,
         source_id_to_name: Optional[List[str]] = None,
-        max_log_samples: int = 30,
+        max_log_samples: Optional[int] = None,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights

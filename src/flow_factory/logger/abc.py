@@ -124,6 +124,11 @@ class Logger(ABC):
         for k in list(data.keys()):
             data[k] = _walk(k, data[k])
 
+        # Remove sample-list keys (now all-None after media extraction)
+        for k in list(data.keys()):
+            if k == 'train_samples' or k.startswith('eval/') and k.endswith('/samples'):
+                del data[k]
+
         if entries:
             filepath = os.path.join(self._logs_dir, 'media.jsonl')
             with open(filepath, 'a') as f:
