@@ -162,7 +162,7 @@ class AdvantageProcessor:
         samples: List[BaseSample],
         rewards: Dict[str, torch.Tensor],
     ) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]:
-        """Collect rewards, group indices, and source IDs in one gather.
+        """Collect rewards, group indices, and source IDs.
 
         ``group_contiguous``: no communication; arrays are local ``(B,)``.
         ``distributed_k_repeat``: rewards + ``unique_id`` + ``source_id``
@@ -214,6 +214,65 @@ class AdvantageProcessor:
             _unique_ids, group_indices = np.unique(gathered_ids, return_inverse=True)
             source_ids = gathered[:, -1].astype(np.int64)
             return collected_rewards, group_indices, source_ids
+
+    def _gather_for_logging(
+        self,
+        samples: List[BaseSample],
+        gathered_rewards: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+        advantages: Optional[np.ndarray] = None,
+        applicable: Optional[np.ndarray] = None,
+    ) -> Tuple[List[str], Dict[str, np.ndarray], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+        """Gather prompts, rewards, group_indices, advantages, and applicable for logging."""
+        device = self.accelerator.device
+        reward_keys = list(gathered_rewards.keys())
+        R = len(reward_keys)
+
+        # Gather prompts
+        prompts_bytes = [s.prompt.encode('utf-8') for s in samples]
+        max_len = max((len(b) for b in prompts_bytes), default=0)
+        max_len_t = torch.tensor([max_len], dtype=torch.long, device=device)
+        synced = self.accelerator.gather(max_len_t)
+        global_max_len = int(synced.max().item()) if synced.numel() > 0 else 0
+        if global_max_len > 0:
+            padded = torch.tensor(
+                [b + b'\x00' * (global_max_len - len(b)) for b in prompts_bytes],
+                dtype=torch.uint8, device=device,
+            )
+            gathered_p = self.accelerator.gather(padded).cpu().numpy()
+            all_prompts = [bytes(row).rstrip(b'\x00').decode('utf-8') for row in gathered_p]
+        else:
+            all_prompts = [''] * len(samples)
+
+        if self.group_on_same_rank:
+            # Use unique_id (globally unique) for grouping, not group_indices (local)
+            unique_ids = torch.tensor([s.unique_id for s in samples], dtype=torch.float32, device=device)
+
+            columns = [torch.tensor(gathered_rewards[k], dtype=torch.float32, device=device) for k in reward_keys]
+            columns.append(unique_ids)
+            if advantages is not None:
+                columns.append(torch.tensor(advantages, dtype=torch.float32, device=device))
+            if applicable is not None:
+                for r in range(R):
+                    columns.append(torch.tensor(applicable[r], dtype=torch.float32, device=device))
+            packed = torch.stack(columns, dim=1)
+            gathered = self.accelerator.gather(packed).cpu().numpy()
+            all_rewards = {k: gathered[:, i] for i, k in enumerate(reward_keys)}
+            all_gids = gathered[:, len(reward_keys)].astype(np.int64)
+            col = len(reward_keys) + 1
+            all_advantages = gathered[:, col].astype(np.float64) if advantages is not None else None
+            if applicable is not None:
+                col += 1
+                all_applicable = gathered[:, col:col + R].astype(bool).T
+            else:
+                all_applicable = None
+        else:
+            all_rewards = gathered_rewards
+            all_gids = group_indices
+            all_advantages = advantages
+            all_applicable = applicable
+
+        return all_prompts, all_rewards, all_gids, all_advantages, all_applicable
 
     def build_source_aware_matrices(
         self,
@@ -508,11 +567,13 @@ class AdvantageProcessor:
         else:
             advantages = self._group_normalize(aggregated_rewards, group_indices)
 
-        all_prompts = self.accelerator.gather_object([s.prompt for s in samples])
+        all_prompts, all_rewards, all_gids, all_advantages, all_applicable = self._gather_for_logging(
+            samples, gathered_rewards, group_indices, advantages=advantages, applicable=applicable,
+        )
 
         self._pending_advantage_metrics = self._build_weighted_sum_log_data(
-            gathered_rewards, group_indices, aggregated_rewards, advantages, samples, all_prompts,
-            applicable=applicable, reward_keys=reward_keys,
+            all_rewards, all_gids, aggregated_rewards, all_advantages, samples, all_prompts,
+            applicable=all_applicable, reward_keys=reward_keys,
         )
 
         # Scatter & store
@@ -606,11 +667,13 @@ class AdvantageProcessor:
         bn_mean, bn_std = self._global_mean_std(combined_advantages)
         advantages = (combined_advantages - bn_mean) / bn_std
 
-        all_prompts = self.accelerator.gather_object([s.prompt for s in samples])
+        all_prompts, all_rewards, all_gids, all_advantages, all_applicable = self._gather_for_logging(
+            samples, gathered_rewards, group_indices, advantages=advantages, applicable=applicable,
+        )
 
         self._pending_advantage_metrics = self._build_gdpo_log_data(
-            gathered_rewards, group_indices, advantages, bn_mean, bn_std, samples, all_prompts,
-            applicable=applicable, reward_keys=reward_keys,
+            all_rewards, all_gids, all_advantages, bn_mean, bn_std, samples, all_prompts,
+            applicable=all_applicable, reward_keys=reward_keys,
             all_reward_advantages=all_reward_advantages,
         )
 
