@@ -701,26 +701,21 @@ def plot_convex_hulls_windows(
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Reward quantile trends — how reward distribution evolves per step
-# ---------------------------------------------------------------------------
-
-
-def plot_reward_quantiles(
+def plot_convex_hulls_windows_cumulative(
     all_steps: Dict[int, Dict[str, Any]],
     reward_names: List[str],
-    output_path: str,
+    output_dir: str,
     window_size: int = 20,
-    title: str = "Reward Quantile Trends",
+    title: str = "Convex Hull — Cumulative Windows",
     label_name: str = "Step",
 ) -> None:
-    """Plot quantiles of each reward dimension, pooled in windows.
+    """Generate cumulative window plots — one PNG per window, each pooling all
+    data from windows 0..*i*, saved under *output_dir*/.
 
-    Pools reward points across *window_size* consecutive steps (same as the
-    window-averaged hull plot) to suppress per-step noise.  Shows median,
-    mean, IQR band, and min/max per window.
+    This creates a frame-by-frame progression showing how the reward convex hull
+    grows as more training steps are included.
     """
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     steps = sorted(all_steps.keys())
 
@@ -730,9 +725,160 @@ def plot_reward_quantiles(
     while lo + window_size <= len(steps):
         hi = lo + window_size
         w_steps = steps[lo:hi]
-        mid = sum(w_steps) / len(w_steps)
+        mid = sum(w_steps) / len(w_steps) if w_steps else 0
         windows.append((mid, w_steps))
         lo = hi
+
+    if not windows:
+        return
+
+    dim = len(reward_names)
+    pairs = [(i, j) for i in range(dim) for j in range(i + 1, dim)]
+    n_pairs = len(pairs)
+
+    cols = min(n_pairs, 2)
+    rows = (n_pairs + cols - 1) // cols
+
+    # Fixed axis limits
+    _DEFAULT_LIMITS: Dict[str, Tuple[float, float]] = {
+        "clip_score": (0.05, 0.5),
+        "pick_score": (0.4, 1.2),
+        "CLIP": (0.05, 0.5),
+        "PickScore": (0.4, 1.2),
+    }
+
+    # Pre-compute global limits from ALL cumulative points so axes stay fixed across frames
+    global_limits: Dict[Tuple[int, int], Tuple[float, float, float, float]] = {}
+    all_pts_global = []
+    for step in steps:
+        pts = all_steps.get(step, {}).get("points")
+        if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
+            all_pts_global.append(pts[:, :dim])
+    if all_pts_global:
+        global_combined = np.vstack(all_pts_global)
+        for di, dj in pairs:
+            dx = global_combined[:, di]
+            dy = global_combined[:, dj]
+            margin = 0.05
+            x0, x1 = dx.min() - margin, dx.max() + margin
+            y0, y1 = dy.min() - margin, dy.max() + margin
+            lx = _DEFAULT_LIMITS.get(reward_names[di])
+            ly = _DEFAULT_LIMITS.get(reward_names[dj])
+            if lx is not None:
+                x0, x1 = lx[0], lx[1]
+            if ly is not None:
+                y0, y1 = ly[0], ly[1]
+            global_limits[(di, dj)] = (x0, x1, y0, y1)
+
+    for wi in range(len(windows)):
+        # Pool ALL points from windows 0..wi
+        pool = []
+        for wj in range(wi + 1):
+            _, w_steps = windows[wj]
+            for s in w_steps:
+                pts = all_steps.get(s, {}).get("points")
+                if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
+                    pool.append(pts[:, :dim])
+
+        if not pool:
+            continue
+
+        cumulative = np.vstack(pool)
+        mid, w_steps = windows[wi]
+
+        fig, axes = plt.subplots(rows, cols, figsize=(10 * cols, 7 * rows), squeeze=False)
+
+        for pair_idx, (di, dj) in enumerate(pairs):
+            ax = axes[pair_idx // cols][pair_idx % cols]
+            ax.set_xlabel(reward_names[di])
+            ax.set_ylabel(reward_names[dj])
+
+            if (di, dj) in global_limits:
+                x0, x1, y0, y1 = global_limits[(di, dj)]
+                ax.set_xlim(x0, x1)
+                ax.set_ylim(y0, y1)
+
+            xy = np.column_stack([cumulative[:, di], cumulative[:, dj]])
+
+            # Scatter
+            ax.scatter(xy[:, 0], xy[:, 1], color="#2196F3", alpha=0.35, s=4, edgecolors="none")
+
+            # Hull
+            if len(xy) >= 3:
+                hull_xy = andrews_monotone_chain(xy)
+                if len(hull_xy) >= 2:
+                    ax.fill(hull_xy[:, 0], hull_xy[:, 1], color="#2196F3", alpha=0.10)
+                    ax.plot(
+                        np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                        color="#1565C0",
+                        linewidth=2.0,
+                        alpha=0.9,
+                    )
+
+            # Info text
+            n_points = len(xy)
+            n_steps_covered = len(pool)
+            ax.text(
+                0.02, 0.98,
+                f"Window {wi + 1}/{len(windows)} | {label_name}s {w_steps[0]}–{w_steps[-1]} | {n_points} pts | {n_steps_covered} steps",
+                transform=ax.transAxes, fontsize=8, verticalalignment="top",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
+            )
+
+        for pi in range(n_pairs, rows * cols):
+            axes[pi // cols][pi % cols].set_visible(False)
+
+        fig.suptitle(
+            f"{title} — Cumulative up to Window {wi + 1}/{len(windows)} ({label_name} ≈{mid:.0f})",
+            fontsize=12, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        frame_path = os.path.join(output_dir, f"frame_{wi:04d}.png")
+        fig.savefig(frame_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"  [Plot] Saved {len(windows)} cumulative frames → {output_dir}/")
+
+
+# ---------------------------------------------------------------------------
+# Reward percentile trends — how reward distribution evolves per step
+# ---------------------------------------------------------------------------
+
+
+def plot_reward_percentiles(
+    all_steps: Dict[int, Dict[str, Any]],
+    reward_names: List[str],
+    output_path: str,
+    window_size: int = 20,
+    title: str = "Reward Percentile Trends",
+    label_name: str = "Step",
+    force_per_step: bool = False,
+) -> None:
+    """Plot percentiles of each reward dimension.
+
+    When *force_per_step* is False and ``len(steps) >= window_size``, pools
+    reward points across consecutive windows to suppress per-step noise.
+    When *force_per_step* is True (e.g. eval datasets with sparse data),
+    always uses one data point per step.  Shows median, mean, IQR band,
+    and min/max.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    steps = sorted(all_steps.keys())
+
+    # Build windows — or fall back to per-step when forced or too few steps
+    windows: List[Tuple[float, List[int]]] = []
+    if force_per_step or len(steps) < window_size:
+        for s in steps:
+            windows.append((float(s), [s]))
+    else:
+        lo = 0
+        while lo + window_size <= len(steps):
+            w_steps = steps[lo:lo + window_size]
+            mid = sum(w_steps) / len(w_steps)
+            windows.append((mid, w_steps))
+            lo += window_size
 
     n_rewards = len(reward_names)
     fig, axes = plt.subplots(n_rewards, 1, figsize=(10, 3.5 * n_rewards), squeeze=False)

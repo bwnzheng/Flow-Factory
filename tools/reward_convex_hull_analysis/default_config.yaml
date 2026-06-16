@@ -13,7 +13,6 @@ images_analysis:
   enabled: true
   # Reads {save_dir}/{run_name}/logs/media.jsonl
   max_images_per_step: 0          # 0 = all; set to N to cap per-step images
-  datasets: []                    # [] = all; ["eval"] or ["train"] to filter
 
 # ---- Evaluation inference (from checkpoints on test prompts) ----
 evaluation:

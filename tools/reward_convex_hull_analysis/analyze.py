@@ -7,7 +7,7 @@ Three independent data sources:
      convex hulls.  Supports train / eval dataset split.
   2. **Rewards analysis** — reads pre-computed scores from ``logs/rewards/*.pkl``
      directly (no image loading, no reward model), and generates distribution,
-     quantile, and Pareto front plots.  Also supports train / eval split.
+     percentile, and Pareto front plots.  Also supports train / eval split.
   3. **Evaluation inference** — loads LoRA weights from each checkpoint, generates
      fresh images on test prompts, scores them, and plots per-checkpoint hulls.
 
@@ -36,10 +36,11 @@ from tools.reward_convex_hull_analysis.convex_hull import (
     plot_convex_hulls_2d,
     plot_convex_hulls_faceted,
     plot_convex_hulls_windows,
+    plot_convex_hulls_windows_cumulative,
     plot_distribution_1d,
     plot_hull_area_curve,
     plot_pareto_front_evolution,
-    plot_reward_quantiles,
+    plot_reward_percentiles,
 )
 from tools.reward_convex_hull_analysis.evaluation_runner import (
     EvaluationRunner,
@@ -48,7 +49,10 @@ from tools.reward_convex_hull_analysis.evaluation_runner import (
 from tools.reward_convex_hull_analysis.log_reader import (
     load_media_samples,
 )
-from tools.reward_convex_hull_analysis.reward_computer import MultiGPUComputer, StandaloneRewardComputer
+from tools.reward_convex_hull_analysis.reward_computer import (
+    MultiGPUComputer,
+    StandaloneRewardComputer,
+)
 from tools.reward_convex_hull_analysis.rewards_reader import (
     load_eval_rewards,
     load_train_rewards,
@@ -66,7 +70,6 @@ class AnalysisConfig:
 
     images_analysis_enabled: bool = True
     images_max_images_per_step: int = 0
-    images_datasets: List[str] = field(default_factory=list)
     evaluation_enabled: bool = True
     rewards_analysis_enabled: bool = True
     eval_checkpoint_dir: str = ""
@@ -101,7 +104,6 @@ def _parse_config(path: str) -> AnalysisConfig:
         save_dir=raw.get("save_dir", "saves"),
         images_analysis_enabled=img.get("enabled", True),
         images_max_images_per_step=img.get("max_images_per_step", 0),
-        images_datasets=img.get("datasets", []),
         evaluation_enabled=ev.get("enabled", True),
         rewards_analysis_enabled=ra.get("enabled", True),
         eval_checkpoint_dir=ev.get("checkpoint_dir", ""),
@@ -221,11 +223,18 @@ def _dispatch_plots(
     out_dir: str,
     title_prefix: str,
     label_name: str = "Step",
+    skip_window_plots: bool = False,
 ) -> None:
     """Generate plots for a single dataset/source combination.
 
     Uses the same dispatch logic for both images→reward_model and rewards/
     pickle data paths: ≥2 reward dims → convex hull suite, else 1-D distribution.
+
+    Args:
+        skip_window_plots: If True, skip window-averaged hull plots and
+            cumulative frames (useful for eval datasets where data only
+            appears every N epochs).  Percentile plots are always generated
+            (with ``force_per_step`` when this is True).
     """
     n_models = len(reward_names)
     if n_models >= 2:
@@ -267,21 +276,31 @@ def _dispatch_plots(
                 step_range=(mid, all_steps_sorted[-1]),
             )
 
-        print(f"  [Plot] Generating window-averaged hull trend ...")
-        plot_convex_hulls_windows(
+        if not skip_window_plots:
+            print(f"  [Plot] Generating window-averaged hull trend ...")
+            plot_convex_hulls_windows(
+                all_step_data,
+                reward_names,
+                os.path.join(out_dir, "convex_hulls_windows.png"),
+                title=f"{title_prefix} Convex Hull Trend (Window-Averaged)",
+                label_name=label_name,
+            )
+            print(f"  [Plot] Generating cumulative window frames ...")
+            plot_convex_hulls_windows_cumulative(
+                all_step_data,
+                reward_names,
+                os.path.join(out_dir, "convex_hulls_windows_frames"),
+                title=f"{title_prefix} Convex Hull",
+                label_name=label_name,
+            )
+        print(f"  [Plot] Generating reward percentile trends ...")
+        plot_reward_percentiles(
             all_step_data,
             reward_names,
-            os.path.join(out_dir, "convex_hulls_windows.png"),
-            title=f"{title_prefix} Convex Hull Trend (Window-Averaged)",
+            os.path.join(out_dir, "reward_percentiles.png"),
+            title=f"{title_prefix} Reward Percentile Trends",
             label_name=label_name,
-        )
-        print(f"  [Plot] Generating reward quantile trends ...")
-        plot_reward_quantiles(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "reward_quantiles.png"),
-            title=f"{title_prefix} Reward Quantile Trends",
-            label_name=label_name,
+            force_per_step=skip_window_plots,
         )
         print(f"  [Plot] Generating Pareto front evolution ...")
         plot_pareto_front_evolution(
@@ -300,13 +319,14 @@ def _dispatch_plots(
             title=f"{title_prefix} Reward Distribution",
             label_name=label_name,
         )
-        print(f"  [Plot] Generating reward quantile trends ...")
-        plot_reward_quantiles(
+        print(f"  [Plot] Generating reward percentile trends ...")
+        plot_reward_percentiles(
             all_step_data,
             reward_names,
-            os.path.join(out_dir, "reward_quantiles.png"),
-            title=f"{title_prefix} Reward Quantile Trends",
+            os.path.join(out_dir, "reward_percentiles.png"),
+            title=f"{title_prefix} Reward Percentile Trends",
             label_name=label_name,
+            force_per_step=skip_window_plots,
         )
         print(f"  [Plot] Generating Pareto front evolution ...")
         plot_pareto_front_evolution(
@@ -414,7 +434,12 @@ def _run_images_analysis(
         _save_reward_cache(out_dir, all_step_data, reward_names)
 
     _dispatch_plots(
-        all_step_data, reward_names, out_dir, title_prefix=f"{label} Rollout", label_name="Step"
+        all_step_data,
+        reward_names,
+        out_dir,
+        title_prefix=f"{label} Rollout",
+        label_name="Step",
+        skip_window_plots=output_subdir.startswith("eval"),
     )
     print(f"  {label} → {out_dir}/")
     return all_step_data
@@ -498,43 +523,19 @@ def _run_evaluation(
 
     del runner
 
-    n_models = len(reward_names)
-    if n_models >= 2:
-        plot_convex_hulls_2d(
-            all_epoch_data,
-            reward_names,
-            os.path.join(ev_out, "convex_hulls_2d.png"),
-            title="Evaluation Reward Convex Hulls (Test Prompts)",
-            label_name="Epoch",
-        )
-        plot_convex_hulls_faceted(
-            all_epoch_data,
-            reward_names,
-            os.path.join(ev_out, "convex_hulls_faceted.png"),
-            title="Evaluation Convex Hulls — Per-Epoch Evolution",
-            label_name="Epoch",
-        )
-        plot_hull_area_curve(
-            all_epoch_data,
-            reward_names,
-            os.path.join(ev_out, "hull_area_curve.png"),
-            title="Evaluation Convex Hull Area Over Epochs",
-            label_name="Epoch",
-        )
-    else:
-        plot_distribution_1d(
-            all_epoch_data,
-            reward_names[0],
-            os.path.join(ev_out, "distribution_1d.png"),
-            title="Evaluation Reward Distribution (Test Prompts)",
-            label_name="Epoch",
-        )
+    _dispatch_plots(
+        all_epoch_data,
+        reward_names,
+        ev_out,
+        title_prefix="Evaluation (Test Prompts)",
+        label_name="Epoch",
+    )
     print(f"  Evaluation results saved to {ev_out}/")
     return all_epoch_data
 
 
 # ---------------------------------------------------------------------------
-# Workflow: Rewards/ pickles → distribution / quantile / Pareto
+# Workflow: Rewards/ pickles → distribution / percentile / Pareto
 # ---------------------------------------------------------------------------
 
 
@@ -599,6 +600,7 @@ def _run_rewards_analysis(
             ev_out,
             title_prefix="Eval Rewards (from pickles)",
             label_name="Step",
+            skip_window_plots=True,
         )
         print(f"  Eval rewards → {ev_out}/")
 
@@ -681,8 +683,6 @@ def _save_reward_cache(
         json.dump({"reward_names": reward_names, "steps": steps_dict}, f, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Combined plot
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
