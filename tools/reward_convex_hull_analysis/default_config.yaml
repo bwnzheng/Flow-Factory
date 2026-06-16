@@ -35,6 +35,7 @@ model:
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
   device: "cuda"                   # "cuda" or "cpu"
+  num_gpus: 1                      # >1 → parallel scoring across multiple GPUs
 
 # ---- Reward models (2+ models recommended for meaningful convex hulls) ----
 rewards:

@@ -6,6 +6,7 @@ the training-time reward infrastructure.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -98,6 +99,108 @@ class StandaloneRewardComputer:
         for name in self._names:
             results[name] = self._models[name](images, prompts, batch_size)
         return results
+
+
+class MultiGPUComputer:
+    """Scores images in parallel across multiple accelerators (CUDA / NPU).
+
+    Creates one :class:`StandaloneRewardComputer` per device, splits the image
+    batch across them, and merges results.  When *num_gpus* is 1, behaves
+    identically to a single :class:`StandaloneRewardComputer`.
+
+    Usage::
+
+        computer = MultiGPUComputer(reward_configs, num_gpus=4, device="cuda")
+        computer = MultiGPUComputer(reward_configs, num_gpus=8, device="npu")
+        scores = computer.compute(images, prompts)
+    """
+
+    def __init__(
+        self,
+        reward_configs: List[Dict[str, Any]],
+        num_gpus: int = 1,
+        device: str = "cuda",
+        dtype: Optional[torch.dtype] = None,
+    ):
+        if num_gpus < 1:
+            raise ValueError(f"num_gpus must be >= 1, got {num_gpus}")
+
+        self._num_gpus = num_gpus
+        self._device_type = device.split(":")[0]  # "cuda", "npu", "cpu"
+
+        self._computers: List[StandaloneRewardComputer] = []
+        for i in range(num_gpus):
+            dev = f"{self._device_type}:{i}" if num_gpus > 1 else device
+            self._computers.append(
+                StandaloneRewardComputer(reward_configs, device=dev, dtype=dtype)
+            )
+
+    @property
+    def reward_names(self) -> List[str]:
+        return self._computers[0].reward_names
+
+    @torch.no_grad()
+    def compute(
+        self,
+        images: List[Image.Image],
+        prompts: List[str],
+        batch_size: int = 16,
+    ) -> Dict[str, List[float]]:
+        """Score (image, prompt) pairs, distributing work across GPUs."""
+        if self._num_gpus == 1:
+            return self._computers[0].compute(images, prompts, batch_size)
+
+        # Split images evenly across GPUs
+        n = self._num_gpus
+        chunk_size = (len(images) + n - 1) // n
+
+        chunks = []
+        for i in range(n):
+            start = i * chunk_size
+            end = min(start + chunk_size, len(images))
+            if start >= len(images):
+                break
+            chunks.append((i, images[start:end], prompts[start:end]))
+
+        # Parallel scoring
+        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+            futures = {
+                executor.submit(
+                    self._score_chunk, gpu_idx,
+                    self._computers[gpu_idx],
+                    chunk_images, chunk_prompts, batch_size,
+                ): gpu_idx
+                for gpu_idx, chunk_images, chunk_prompts in chunks
+            }
+            results_by_gpu: Dict[int, Dict[str, List[float]]] = {}
+            for future in futures:
+                gpu_idx = futures[future]
+                results_by_gpu[gpu_idx] = future.result()
+
+        # Merge — concat per-reward-name lists in GPU order
+        merged: Dict[str, List[float]] = {}
+        first = results_by_gpu[0]
+        for rname in first:
+            merged[rname] = []
+            for i, chunk_images, _ in chunks:
+                merged[rname].extend(results_by_gpu[i][rname])
+        return merged
+
+    @staticmethod
+    def _score_chunk(
+        gpu_idx: int,
+        computer: StandaloneRewardComputer,
+        images: List[Image.Image],
+        prompts: List[str],
+        batch_size: int,
+    ) -> Dict[str, List[float]]:
+        dev = computer.device
+        if dev.startswith("npu"):
+            torch.npu.set_device(gpu_idx)
+        elif dev.startswith("cuda"):
+            torch.cuda.set_device(gpu_idx)
+        # cpu — no-op
+        return computer.compute(images, prompts, batch_size)
 
 
 # ---------------------------------------------------------------------------

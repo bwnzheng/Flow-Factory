@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import yaml
@@ -48,7 +48,7 @@ from tools.reward_convex_hull_analysis.evaluation_runner import (
 from tools.reward_convex_hull_analysis.log_reader import (
     load_media_samples,
 )
-from tools.reward_convex_hull_analysis.reward_computer import StandaloneRewardComputer
+from tools.reward_convex_hull_analysis.reward_computer import MultiGPUComputer, StandaloneRewardComputer
 from tools.reward_convex_hull_analysis.rewards_reader import (
     load_eval_rewards,
     load_train_rewards,
@@ -79,6 +79,7 @@ class AnalysisConfig:
     base_model: str = "stabilityai/stable-diffusion-3.5-medium"
     dtype: str = "bfloat16"
     device: str = "cuda"
+    num_gpus: int = 1
 
     rewards: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -112,6 +113,7 @@ def _parse_config(path: str) -> AnalysisConfig:
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
         dtype=model.get("dtype", "bfloat16"),
         device=model.get("device", "cuda"),
+        num_gpus=model.get("num_gpus", 1),
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
     )
@@ -168,7 +170,7 @@ def _load_prompts(config: AnalysisConfig) -> List[str]:
 
 
 def _score_images(
-    computer: StandaloneRewardComputer,
+    computer: Union[StandaloneRewardComputer, MultiGPUComputer],
     images: List,
     prompts: List[str],
     batch_size: int = 16,
@@ -324,7 +326,7 @@ def _dispatch_plots(
 def _run_images_analysis(
     config: AnalysisConfig,
     run_name: str,
-    computer: Optional[StandaloneRewardComputer],
+    computer: Optional[Union[StandaloneRewardComputer, MultiGPUComputer]],
     all_prompts: List[str],
     output_dir: str,
     reward_names: List[str],
@@ -426,7 +428,7 @@ def _run_images_analysis(
 def _run_evaluation(
     config: AnalysisConfig,
     run_name: str,
-    computer: Optional[StandaloneRewardComputer],
+    computer: Optional[Union[StandaloneRewardComputer, MultiGPUComputer]],
     prompts: List[str],
     output_dir: str,
     reward_names: List[str],
@@ -767,7 +769,10 @@ def main(config_path: str):
             if free_mem < 4.0:
                 print(f'  [WARN] Low GPU memory — consider device: "cpu"')
         t0 = time.time()
-        computer = StandaloneRewardComputer(config.rewards, device=device)
+        num_gpus = config.num_gpus
+        if num_gpus > 1:
+            print(f"  Creating {num_gpus}-GPU scorer ...")
+        computer = MultiGPUComputer(config.rewards, num_gpus=num_gpus, device=config.device)
         print(f"  Reward models loaded in {time.time() - t0:.1f}s: {reward_names}")
     else:
         print(f"All image caches valid — skipping model loading ({reward_names}).")
