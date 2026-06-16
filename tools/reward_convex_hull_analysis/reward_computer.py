@@ -26,7 +26,11 @@ def _extract_feature_tensor(output: Any) -> torch.Tensor:
 
 
 class StandaloneRewardComputer:
-    """Loads and runs CLIP and/or PickScore reward models for offline scoring.
+    """Lazy-loading CLIP and/or PickScore reward models for offline scoring.
+
+    Models are NOT loaded at construction time — they are built on the first
+    call to :meth:`compute`.  This makes it cheap to create many instances
+    (one per GPU) and lets each load its models in parallel on its own device.
 
     Set the ``HF_HOME`` environment variable before instantiation to control
     where cached models are loaded from.
@@ -47,9 +51,10 @@ class StandaloneRewardComputer:
 
         self.device = device
         self.dtype = dtype
-        self._models: Dict[str, callable] = {}
-        self._names: List[str] = []
 
+        # Validate configs eagerly, defer model building
+        self._configs: List[Dict[str, Any]] = []
+        self._names: List[str] = []
         for cfg in reward_configs:
             rtype = cfg.get("reward_model", cfg.get("type", ""))
             rname = cfg.get("name", rtype)
@@ -57,12 +62,24 @@ class StandaloneRewardComputer:
                 raise ValueError(
                     f"Unsupported reward model '{rtype}'. Supported: {self._SUPPORTED}"
                 )
-            self._models[rname] = self._build(rtype, cfg)
+            self._configs.append(cfg)
             self._names.append(rname)
+
+        self._models: Optional[Dict[str, callable]] = None
 
     @property
     def reward_names(self) -> List[str]:
         return self._names
+
+    def _ensure_loaded(self) -> None:
+        """Build and load models if not already done (called on first compute)."""
+        if self._models is not None:
+            return
+        self._models = {}
+        for cfg in self._configs:
+            rtype = cfg.get("reward_model", cfg.get("type", ""))
+            rname = cfg.get("name", rtype)
+            self._models[rname] = self._build(rtype, cfg)
 
     def _build(self, rtype: str, cfg: Dict[str, Any]):
         if rtype == "CLIP":
@@ -84,6 +101,8 @@ class StandaloneRewardComputer:
     ) -> Dict[str, List[float]]:
         """Score every (image, prompt) pair with every loaded reward model.
 
+        Models are loaded on first call (lazy init).
+
         Args:
             images: List of PIL Images.
             prompts: List of prompt strings (same length as ``images``).
@@ -92,6 +111,8 @@ class StandaloneRewardComputer:
         Returns:
             ``{reward_name: [score_0, ...]}`` aligned with the input lists.
         """
+        self._ensure_loaded()
+        assert self._models is not None
         assert len(images) == len(prompts), (
             f"Mismatch: {len(images)} images vs {len(prompts)} prompts"
         )
@@ -104,9 +125,9 @@ class StandaloneRewardComputer:
 class MultiGPUComputer:
     """Scores images in parallel across multiple accelerators (CUDA / NPU).
 
-    Creates one :class:`StandaloneRewardComputer` per device, splits the image
-    batch across them, and merges results.  When *num_gpus* is 1, behaves
-    identically to a single :class:`StandaloneRewardComputer`.
+    Creates one :class:`StandaloneRewardComputer` per device — models are
+    loaded lazily on first :meth:`compute` in each worker thread, so model
+    loading is naturally parallel.
 
     Usage::
 
@@ -128,6 +149,7 @@ class MultiGPUComputer:
         self._num_gpus = num_gpus
         self._device_type = device.split(":")[0]  # "cuda", "npu", "cpu"
 
+        # Create instances cheaply — models are NOT loaded yet (lazy)
         self._computers: List[StandaloneRewardComputer] = []
         for i in range(num_gpus):
             dev = f"{self._device_type}:{i}" if num_gpus > 1 else device
