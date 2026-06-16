@@ -28,14 +28,16 @@ on the resolved sampler type:
   select between plain NumPy (post-gather global arrays) and ``utils.dist``
   reductions (local shards) so logging always reflects global statistics.
 """
-from typing import List, Dict, Optional, Union, Literal, Callable, Tuple, Any
+
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
+
 import numpy as np
 import torch
 from accelerate import Accelerator
 
-from ..samples import BaseSample
 from ..rewards import RewardProcessor
-from ..utils.dist import global_zero_std_ratio, global_tensor_stats_batch
+from ..samples import BaseSample
+from ..utils.dist import global_tensor_stats_batch, global_zero_std_ratio
 from ..utils.logger_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -193,11 +195,14 @@ class AdvantageProcessor:
             reward_keys = list(rewards.keys())
             device = self.accelerator.device
             unique_ids = torch.tensor(
-                [s.unique_id for s in samples], dtype=torch.int64, device=device,
+                [s.unique_id for s in samples],
+                dtype=torch.int64,
+                device=device,
             )
             local_source_ids = torch.tensor(
                 [s.source_id if s.source_id is not None else -1 for s in samples],
-                dtype=torch.int64, device=device,
+                dtype=torch.int64,
+                device=device,
             )
             # Pack: [reward_0, ..., reward_{N-1}, unique_id, source_id]
             columns = [rewards[k].view(-1).float() for k in reward_keys]
@@ -207,9 +212,7 @@ class AdvantageProcessor:
 
             gathered = self.accelerator.gather(packed).cpu().numpy()  # (W*B, N+2)
 
-            collected_rewards = {
-                key: gathered[:, i] for i, key in enumerate(reward_keys)
-            }
+            collected_rewards = {key: gathered[:, i] for i, key in enumerate(reward_keys)}
             gathered_ids = gathered[:, -2].astype(np.int64)
             _unique_ids, group_indices = np.unique(gathered_ids, return_inverse=True)
             source_ids = gathered[:, -1].astype(np.int64)
@@ -222,33 +225,41 @@ class AdvantageProcessor:
         group_indices: np.ndarray,
         advantages: Optional[np.ndarray] = None,
         applicable: Optional[np.ndarray] = None,
-    ) -> Tuple[List[str], Dict[str, np.ndarray], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> Tuple[
+        List[str], Dict[str, np.ndarray], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]
+    ]:
         """Gather prompts, rewards, group_indices, advantages, and applicable for logging."""
         device = self.accelerator.device
         reward_keys = list(gathered_rewards.keys())
         R = len(reward_keys)
 
         # Gather prompts
-        prompts_bytes = [s.prompt.encode('utf-8') for s in samples]
+        prompts_bytes = [s.prompt.encode("utf-8") for s in samples]
         max_len = max((len(b) for b in prompts_bytes), default=0)
         max_len_t = torch.tensor([max_len], dtype=torch.long, device=device)
         synced = self.accelerator.gather(max_len_t)
         global_max_len = int(synced.max().item()) if synced.numel() > 0 else 0
         if global_max_len > 0:
             padded = torch.tensor(
-                [b + b'\x00' * (global_max_len - len(b)) for b in prompts_bytes],
-                dtype=torch.uint8, device=device,
+                [b + b"\x00" * (global_max_len - len(b)) for b in prompts_bytes],
+                dtype=torch.uint8,
+                device=device,
             )
             gathered_p = self.accelerator.gather(padded).cpu().numpy()
-            all_prompts = [bytes(row).rstrip(b'\x00').decode('utf-8') for row in gathered_p]
+            all_prompts = [bytes(row).rstrip(b"\x00").decode("utf-8") for row in gathered_p]
         else:
-            all_prompts = [''] * len(samples)
+            all_prompts = [""] * len(samples)
 
         if self.group_on_same_rank:
             # Use unique_id (globally unique) for grouping, not group_indices (local)
-            unique_ids = torch.tensor([s.unique_id for s in samples], dtype=torch.float32, device=device)
+            unique_ids = torch.tensor(
+                [s.unique_id for s in samples], dtype=torch.float32, device=device
+            )
 
-            columns = [torch.tensor(gathered_rewards[k], dtype=torch.float32, device=device) for k in reward_keys]
+            columns = [
+                torch.tensor(gathered_rewards[k], dtype=torch.float32, device=device)
+                for k in reward_keys
+            ]
             columns.append(unique_ids)
             if advantages is not None:
                 columns.append(torch.tensor(advantages, dtype=torch.float32, device=device))
@@ -258,21 +269,21 @@ class AdvantageProcessor:
             packed = torch.stack(columns, dim=1)
             gathered = self.accelerator.gather(packed).cpu().numpy()
             all_rewards = {k: gathered[:, i] for i, k in enumerate(reward_keys)}
-            all_gids = gathered[:, len(reward_keys)].astype(np.int64)
+            all_unique_ids = gathered[:, len(reward_keys)].astype(np.int64)
             col = len(reward_keys) + 1
             all_advantages = gathered[:, col].astype(np.float64) if advantages is not None else None
             if applicable is not None:
                 col += 1
-                all_applicable = gathered[:, col:col + R].astype(bool).T
+                all_applicable = gathered[:, col : col + R].astype(bool).T
             else:
                 all_applicable = None
         else:
             all_rewards = gathered_rewards
-            all_gids = group_indices
+            all_unique_ids = group_indices
             all_advantages = advantages
             all_applicable = applicable
 
-        return all_prompts, all_rewards, all_gids, all_advantages, all_applicable
+        return all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable
 
     def build_source_aware_matrices(
         self,
@@ -308,7 +319,7 @@ class AdvantageProcessor:
                     local_mask[:, j] = True
                 else:
                     for i, name in enumerate(reward_keys):
-                        local_mask[i, j] = (name in applicable)
+                        local_mask[i, j] = name in applicable
             sources = [s.source for s in samples]
             weight_matrix = self._weights_from_sources(reward_keys, sources)
             return local_mask, weight_matrix
@@ -326,7 +337,7 @@ class AdvantageProcessor:
             else:
                 for i, key in enumerate(reward_keys):
                     per_ds = self.reward_weights[key]
-                    applicable[i, j] = (src in per_ds)
+                    applicable[i, j] = src in per_ds
 
         weight_matrix = self._weights_from_sources(reward_keys, source_names)
         return applicable, weight_matrix
@@ -361,9 +372,13 @@ class AdvantageProcessor:
         to this rank's portion.
         """
         if not self.group_on_same_rank:
-            values = torch.as_tensor(values).reshape(
-                self.accelerator.num_processes, -1, *values.shape[1:]
-            )[self.accelerator.process_index].to(self.accelerator.device)
+            values = (
+                torch.as_tensor(values)
+                .reshape(self.accelerator.num_processes, -1, *values.shape[1:])[
+                    self.accelerator.process_index
+                ]
+                .to(self.accelerator.device)
+            )
         else:
             values = torch.as_tensor(values).to(self.accelerator.device)
         return values
@@ -379,13 +394,13 @@ class AdvantageProcessor:
         """
         if self.group_on_same_rank:
             t = torch.tensor(
-                [float(len(values)), float(np.sum(values)), float(np.sum(values ** 2))],
+                [float(len(values)), float(np.sum(values)), float(np.sum(values**2))],
                 device=self.accelerator.device,
             )
             t = self.accelerator.reduce(t, reduction="sum")  # 1 call, 3 scalars
             n, s, ss = t[0].item(), t[1].item(), t[2].item()
             mean = s / n
-            std = max((ss / n - mean ** 2) ** 0.5, 1e-6)
+            std = max((ss / n - mean**2) ** 0.5, 1e-6)
         else:
             mean = float(np.mean(values))
             std = max(float(np.std(values)), 1e-6)
@@ -395,9 +410,7 @@ class AdvantageProcessor:
     # Batched metric reduction (mode-aware)
     # ------------------------------------------------------------------
 
-    def _batch_reduce_stats(
-        self, arrays: Dict[str, np.ndarray]
-    ) -> Dict[str, Dict[str, float]]:
+    def _batch_reduce_stats(self, arrays: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
         """Compute global ``{min, max, mean, std}`` for each named array.
 
         When ``group_on_same_rank`` the arrays are local shards and require
@@ -409,8 +422,7 @@ class AdvantageProcessor:
         """
         if self.group_on_same_rank:
             tensors = {
-                k: torch.from_numpy(np.asarray(v, dtype=np.float64))
-                for k, v in arrays.items()
+                k: torch.from_numpy(np.asarray(v, dtype=np.float64)) for k, v in arrays.items()
             }
             return global_tensor_stats_batch(self.accelerator, tensors)
 
@@ -428,9 +440,7 @@ class AdvantageProcessor:
                 }
         return out
 
-    def _metric_zero_std_ratio(
-        self, rewards: np.ndarray, group_indices: np.ndarray
-    ) -> float:
+    def _metric_zero_std_ratio(self, rewards: np.ndarray, group_indices: np.ndarray) -> float:
         """Fraction of groups with near-zero std — global-reduced when ``group_on_same_rank``."""
         if self.group_on_same_rank:
             return global_zero_std_ratio(self.accelerator, rewards, group_indices)
@@ -467,13 +477,42 @@ class AdvantageProcessor:
         means = sums / safe_counts
 
         residuals = np.where(mask, values - means[group_indices], 0.0)
-        sq_sums = np.bincount(group_indices, weights=residuals ** 2, minlength=num_groups)
+        sq_sums = np.bincount(group_indices, weights=residuals**2, minlength=num_groups)
         stds = np.sqrt(sq_sums / safe_counts)
         stds = np.maximum(stds, eps)
 
         result = np.zeros(S, dtype=np.float64)
         result[mask] = residuals[mask] / stds[group_indices[mask]]
         return result
+
+    @staticmethod
+    def _assert_no_nan_at_applicable(
+        stack: np.ndarray,
+        reward_keys: List[str],
+        applicable: np.ndarray,
+        label: str = "",
+    ) -> None:
+        """Assert no NaN/Inf at applicable positions — loud failure on reward bugs.
+
+        Args:
+            stack: ``(R, S)`` float64 array of all rewards.
+            reward_keys: Ordered list of reward names matching stack axis 0.
+            applicable: ``(R, S)`` boolean applicability mask.
+            label: Optional prefix for the error message.
+        """
+        nan_mask = ~np.isfinite(stack)
+        bug_positions = nan_mask & applicable
+        if bug_positions.any():
+            r_idx, s_idx = np.where(bug_positions)
+            offenders = sorted({reward_keys[i] for i in r_idx})
+            prefix = f"{label}: " if label else ""
+            raise RuntimeError(
+                f"{prefix}NaN/Inf reward at APPLICABLE positions for reward(s) "
+                f"{offenders} (sample indices {sorted(set(s_idx.tolist()))[:10]}"
+                f"{'...' if len(s_idx) > 10 else ''}). "
+                "This is a reward-model bug, not a routing miss; "
+                "aggregation refuses to silently mask it."
+            )
 
     # ------------------------------------------------------------------
     # Strategy: weighted sum (default GRPO)
@@ -524,21 +563,11 @@ class AdvantageProcessor:
             samples, reward_keys, source_ids
         )
 
-        # Bug-detection: NaN at applicable position == reward-model bug.
+        # Build stack and validate: NaN at applicable position == reward-model bug.
         stack = np.stack(
             [gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=0
         )  # (R, S)
-        nan_mask = ~np.isfinite(stack)
-        bug_positions = nan_mask & applicable
-        if bug_positions.any():
-            r_idx, s_idx = np.where(bug_positions)
-            offenders = sorted({reward_keys[i] for i in r_idx})
-            raise RuntimeError(
-                f"NaN/Inf reward at APPLICABLE positions for reward(s) "
-                f"{offenders} (sample indices {sorted(set(s_idx.tolist()))[:10]}{'...' if len(s_idx) > 10 else ''}). "
-                "This is a reward-model bug, not a routing miss; "
-                "aggregation refuses to silently mask it."
-            )
+        self._assert_no_nan_at_applicable(stack, reward_keys, applicable)
 
         # Aggregate: weighted sum over applicable rewards only.
         contrib = np.where(applicable, stack, 0.0) * weight_matrix
@@ -567,13 +596,33 @@ class AdvantageProcessor:
         else:
             advantages = self._group_normalize(aggregated_rewards, group_indices)
 
-        all_prompts, all_rewards, all_gids, all_advantages, all_applicable = self._gather_for_logging(
-            samples, gathered_rewards, group_indices, advantages=advantages, applicable=applicable,
+        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
+            self._gather_for_logging(
+                samples,
+                gathered_rewards,
+                group_indices,
+                advantages=advantages,
+                applicable=applicable,
+            )
         )
 
+        # When group_on_same_rank, aggregated_rewards is local but all_unique_ids is
+        # gathered. Gather aggregated_rewards so shapes match in log-data builder.
+        if self.group_on_same_rank:
+            agg_t = torch.tensor(
+                aggregated_rewards, dtype=torch.float32, device=self.accelerator.device
+            )
+            aggregated_rewards = self.accelerator.gather(agg_t).cpu().numpy()
+
         self._pending_advantage_metrics = self._build_weighted_sum_log_data(
-            all_rewards, all_gids, aggregated_rewards, all_advantages, samples, all_prompts,
-            applicable=all_applicable, reward_keys=reward_keys,
+            all_rewards,
+            all_unique_ids,
+            aggregated_rewards,
+            all_advantages,
+            samples,
+            all_prompts,
+            applicable=all_applicable,
+            reward_keys=reward_keys,
         )
 
         # Scatter & store
@@ -629,28 +678,16 @@ class AdvantageProcessor:
             samples, reward_keys, source_ids
         )
 
-        # Bug-detection: NaN at applicable position == reward-model bug.
-        stack = np.stack(
-            [gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=0
-        )
-        nan_mask = ~np.isfinite(stack)
-        bug_positions = nan_mask & applicable
-        if bug_positions.any():
-            r_idx, _s_idx = np.where(bug_positions)
-            offenders = sorted({reward_keys[i] for i in r_idx})
-            raise RuntimeError(
-                f"GDPO: NaN/Inf reward at APPLICABLE positions for reward(s) "
-                f"{offenders}. This is a reward-model bug, not a routing miss."
-            )
+        # Build stack and validate: NaN at applicable position == reward-model bug.
+        stack = np.stack([gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=0)
+        self._assert_no_nan_at_applicable(stack, reward_keys, applicable, label="GDPO")
 
         # Per-reward group-wise normalisation, restricted to applicable samples.
         all_reward_advantages = []
         for r_idx, key in enumerate(reward_keys):
             reward_array = gathered_rewards[key].astype(np.float64)
             r_applicable = applicable[r_idx]
-            reward_adv = self._group_normalize(
-                reward_array, group_indices, mask=r_applicable
-            )
+            reward_adv = self._group_normalize(reward_array, group_indices, mask=r_applicable)
             all_reward_advantages.append(reward_adv * weight_matrix[r_idx])
 
         # Combine and batch normalise.
@@ -667,13 +704,26 @@ class AdvantageProcessor:
         bn_mean, bn_std = self._global_mean_std(combined_advantages)
         advantages = (combined_advantages - bn_mean) / bn_std
 
-        all_prompts, all_rewards, all_gids, all_advantages, all_applicable = self._gather_for_logging(
-            samples, gathered_rewards, group_indices, advantages=advantages, applicable=applicable,
+        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
+            self._gather_for_logging(
+                samples,
+                gathered_rewards,
+                group_indices,
+                advantages=advantages,
+                applicable=applicable,
+            )
         )
 
         self._pending_advantage_metrics = self._build_gdpo_log_data(
-            all_rewards, all_gids, all_advantages, bn_mean, bn_std, samples, all_prompts,
-            applicable=all_applicable, reward_keys=reward_keys,
+            all_rewards,
+            all_unique_ids,
+            all_advantages,
+            bn_mean,
+            bn_std,
+            samples,
+            all_prompts,
+            applicable=all_applicable,
+            reward_keys=reward_keys,
             all_reward_advantages=all_reward_advantages,
         )
 
@@ -710,12 +760,11 @@ class AdvantageProcessor:
         stat_arrays: Dict[str, np.ndarray] = {}
         for key in keys_sorted:
             mask_k = r_applicable[key]
-            stat_arrays[f"reward_{key}"] = gathered_rewards[key][mask_k]
-
-        for key in keys_sorted:
-            mask_k = r_applicable[key]
+            masked_rewards = gathered_rewards[key][mask_k]
+            masked_gids = group_indices[mask_k]
+            stat_arrays[f"reward_{key}"] = masked_rewards
             group_means, group_stds = RewardProcessor.compute_group_reward_stats(
-                gathered_rewards[key][mask_k], group_indices[mask_k]
+                masked_rewards, masked_gids
             )
             stat_arrays[f"reward_{key}_g_stds"] = group_stds
             stat_arrays[f"reward_{key}_g_means"] = group_means
@@ -734,8 +783,6 @@ class AdvantageProcessor:
             reward_stats = all_stats[f"reward_{key}"]
             _log_data[f"train/reward_{key}_mean"] = reward_stats["mean"]
             _log_data[f"train/reward_{key}_std"] = reward_stats["std"]
-
-        for key in keys_sorted:
             group_std_stats = all_stats[f"reward_{key}_g_stds"]
             group_mean_stats = all_stats[f"reward_{key}_g_means"]
             _log_data[f"train/reward_{key}_group_std_mean"] = group_std_stats["mean"]
@@ -791,23 +838,17 @@ class AdvantageProcessor:
         _log_data["train/adv_max"] = adv_stats["max"]
         _log_data["train/adv_abs_mean"] = all_stats["adv_abs"]["mean"]
 
-        pos = advantages > 0; neg = advantages < 0; zero = advantages == 0
+        pos = advantages > 0
+        neg = advantages < 0
+        zero = advantages == 0
         n = len(advantages)
         _log_data["train/adv_pos_ratio"] = float(pos.sum() / n)
         _log_data["train/adv_neg_ratio"] = float(neg.sum() / n)
         _log_data["train/adv_zero_ratio"] = float(zero.sum() / n)
         _log_data["train/adv_pos_sum"] = float(advantages[pos].sum())
 
-        for name in gathered_rewards:
-            arr = gathered_rewards[name]
-            for q in [0, 25, 50, 75, 100]:
-                _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
-
-        _log_data["train_samples"] = samples[:self.max_log_samples]
-        groups = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
-        _log_data["train/prompts"] = [g["prompt"] for g in groups]
-        _log_data["train/rewards"] = groups
-        return _log_data
+        _log_data["train_samples"] = samples[: self.max_log_samples]
+        return self._finalize_log_data(_log_data, gathered_rewards, group_indices, all_prompts)
 
     def _build_gdpo_log_data(
         self,
@@ -841,33 +882,29 @@ class AdvantageProcessor:
             )
 
         adv_stats = all_stats["adv"]
-        _log_data.update({
-            "train/batch_norm_mean": bn_mean,
-            "train/batch_norm_std": bn_std,
-            "train/adv_min": adv_stats["min"],
-            "train/adv_max": adv_stats["max"],
-            "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
-            "train_samples": samples[:self.max_log_samples],
-        })
+        _log_data.update(
+            {
+                "train/batch_norm_mean": bn_mean,
+                "train/batch_norm_std": bn_std,
+                "train/adv_min": adv_stats["min"],
+                "train/adv_max": adv_stats["max"],
+                "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
+                "train_samples": samples[: self.max_log_samples],
+            }
+        )
         if all_reward_advantages is not None and reward_keys is not None:
             for r_idx, name in enumerate(reward_keys):
                 adv = all_reward_advantages[r_idx]
-                pos = adv > 0; neg = adv < 0; zero = adv == 0
+                pos = adv > 0
+                neg = adv < 0
+                zero = adv == 0
                 n = len(adv)
                 _log_data[f"train/reward_{name}_adv_pos_ratio"] = float(pos.sum() / n)
                 _log_data[f"train/reward_{name}_adv_neg_ratio"] = float(neg.sum() / n)
                 _log_data[f"train/reward_{name}_adv_zero_ratio"] = float(zero.sum() / n)
                 _log_data[f"train/reward_{name}_adv_pos_sum"] = float(adv[pos].sum())
 
-        for name in gathered_rewards:
-            arr = gathered_rewards[name]
-            for q in [0, 25, 50, 75, 100]:
-                _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
-
-        groups = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
-        _log_data["train/prompts"] = [g["prompt"] for g in groups]
-        _log_data["train/rewards"] = groups
-        return _log_data
+        return self._finalize_log_data(_log_data, gathered_rewards, group_indices, all_prompts)
 
     def _group_rewards_by_prompt(
         self,
@@ -881,9 +918,27 @@ class AdvantageProcessor:
             gid = int(group_indices[i])
             if gid not in groups:
                 groups[gid] = {
-                    'prompt': prompt,
-                    'rewards': {name: [] for name in gathered_rewards},
+                    "prompt": prompt,
+                    "rewards": {name: [] for name in gathered_rewards},
                 }
             for name in gathered_rewards:
-                groups[gid]['rewards'][name].append(float(gathered_rewards[name][i]))
+                groups[gid]["rewards"][name].append(float(gathered_rewards[name][i]))
         return list(groups.values())
+
+    def _finalize_log_data(
+        self,
+        _log_data: Dict[str, Any],
+        gathered_rewards: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+        all_prompts: List[str],
+    ) -> Dict[str, Any]:
+        """Common tail for both log-data builders: percentiles + per-prompt groups."""
+        for name in gathered_rewards:
+            arr = gathered_rewards[name]
+            for q in [0, 25, 50, 75, 100]:
+                _log_data[f"train/reward_{name}_p{q}"] = float(np.percentile(arr, q))
+
+        groups = self._group_rewards_by_prompt(all_prompts, group_indices, gathered_rewards)
+        _log_data["train/prompts"] = [g["prompt"] for g in groups]
+        _log_data["train/rewards"] = groups
+        return _log_data
