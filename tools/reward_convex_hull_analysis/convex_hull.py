@@ -7,6 +7,7 @@ and a 1D distribution fallback for single-reward-model configurations.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -747,18 +748,27 @@ def plot_convex_hulls_windows_cumulative(
         "PickScore": (0.4, 1.2),
     }
 
-    # Pre-compute global limits from ALL cumulative points so axes stay fixed across frames
+    # --- Pre-compute per-window point arrays (pool once, reuse across frames) ---
+    window_arrays: List[np.ndarray] = []
+    all_pool: List[np.ndarray] = []
+    for _mid, w_steps in windows:
+        pool = []
+        for s in w_steps:
+            pts = all_steps.get(s, {}).get("points")
+            if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
+                pool.append(pts[:, :dim])
+        arr = np.vstack(pool) if pool else np.empty((0, dim))
+        window_arrays.append(arr)
+        if len(arr) > 0:
+            all_pool.append(arr)
+
+    # --- Global axis limits (from all points, kept fixed across frames) ---
     global_limits: Dict[Tuple[int, int], Tuple[float, float, float, float]] = {}
-    all_pts_global = []
-    for step in steps:
-        pts = all_steps.get(step, {}).get("points")
-        if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
-            all_pts_global.append(pts[:, :dim])
-    if all_pts_global:
-        global_combined = np.vstack(all_pts_global)
+    if all_pool:
+        all_pts = np.vstack(all_pool)
         for di, dj in pairs:
-            dx = global_combined[:, di]
-            dy = global_combined[:, dj]
+            dx = all_pts[:, di]
+            dy = all_pts[:, dj]
             margin = 0.05
             x0, x1 = dx.min() - margin, dx.max() + margin
             y0, y1 = dy.min() - margin, dy.max() + margin
@@ -770,20 +780,18 @@ def plot_convex_hulls_windows_cumulative(
                 y0, y1 = ly[0], ly[1]
             global_limits[(di, dj)] = (x0, x1, y0, y1)
 
-    for wi in range(len(windows)):
-        # Pool ALL points from windows 0..wi
-        pool = []
-        for wj in range(wi + 1):
-            _, w_steps = windows[wj]
-            for s in w_steps:
-                pts = all_steps.get(s, {}).get("points")
-                if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
-                    pool.append(pts[:, :dim])
+    # --- Color ramp (same as plot_convex_hulls_windows) ---
+    nw = len(windows)
+    if nw > 1:
+        t = np.linspace(0, 3.0, nw)
+        t_norm = (np.exp(t) - 1) / (np.exp(3.0) - 1)
+    else:
+        t_norm = [0.5]
+    colors = [str(0.85 - 0.70 * v) for v in t_norm]  # light → dark gray
 
-        if not pool:
-            continue
+    # --- Parallel frame generation ---
 
-        cumulative = np.vstack(pool)
+    def _draw_one(wi: int) -> None:
         mid, w_steps = windows[wi]
 
         fig, axes = plt.subplots(rows, cols, figsize=(10 * cols, 7 * rows), squeeze=False)
@@ -794,35 +802,49 @@ def plot_convex_hulls_windows_cumulative(
             ax.set_ylabel(reward_names[dj])
 
             if (di, dj) in global_limits:
-                x0, x1, y0, y1 = global_limits[(di, dj)]
-                ax.set_xlim(x0, x1)
-                ax.set_ylim(y0, y1)
+                ax.set_xlim(global_limits[(di, dj)][0], global_limits[(di, dj)][1])
+                ax.set_ylim(global_limits[(di, dj)][2], global_limits[(di, dj)][3])
 
-            xy = np.column_stack([cumulative[:, di], cumulative[:, dj]])
+            # Draw each window's hull in its own color, overlaid
+            total_pts = 0
+            total_wins = 0
+            for wj in range(wi + 1):
+                arr = window_arrays[wj]
+                if len(arr) == 0:
+                    continue
+                total_pts += len(arr)
+                total_wins += 1
+                c = colors[wj]
+                xy = np.column_stack([arr[:, di], arr[:, dj]])
 
-            # Scatter
-            ax.scatter(xy[:, 0], xy[:, 1], color="#2196F3", alpha=0.35, s=4, edgecolors="none")
+                ax.scatter(
+                    xy[:, 0],
+                    xy[:, 1],
+                    color=c,
+                    alpha=0.6,
+                    s=6,
+                    edgecolors="none",
+                )
 
-            # Hull
-            if len(xy) >= 3:
-                hull_xy = andrews_monotone_chain(xy)
-                if len(hull_xy) >= 2:
-                    ax.fill(hull_xy[:, 0], hull_xy[:, 1], color="#2196F3", alpha=0.10)
-                    ax.plot(
-                        np.append(hull_xy[:, 0], hull_xy[0, 0]),
-                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
-                        color="#1565C0",
-                        linewidth=2.0,
-                        alpha=0.9,
-                    )
+                if len(xy) >= 3:
+                    hull_xy = andrews_monotone_chain(xy)
+                    if len(hull_xy) >= 2:
+                        ax.fill(hull_xy[:, 0], hull_xy[:, 1], color=c, alpha=0.08)
+                        ax.plot(
+                            np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                            np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                            color=c,
+                            linewidth=2.0,
+                            alpha=0.85,
+                        )
 
-            # Info text
-            n_points = len(xy)
-            n_steps_covered = len(pool)
             ax.text(
-                0.02, 0.98,
-                f"Window {wi + 1}/{len(windows)} | {label_name}s {w_steps[0]}–{w_steps[-1]} | {n_points} pts | {n_steps_covered} steps",
-                transform=ax.transAxes, fontsize=8, verticalalignment="top",
+                0.02,
+                0.98,
+                f"Window {wi + 1}/{nw} | {label_name}s {w_steps[0]}–{w_steps[-1]} | {total_pts} pts | {total_wins} windows",
+                transform=ax.transAxes,
+                fontsize=8,
+                verticalalignment="top",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
             )
 
@@ -830,13 +852,21 @@ def plot_convex_hulls_windows_cumulative(
             axes[pi // cols][pi % cols].set_visible(False)
 
         fig.suptitle(
-            f"{title} — Cumulative up to Window {wi + 1}/{len(windows)} ({label_name} ≈{mid:.0f})",
-            fontsize=12, fontweight="bold",
+            f"{title} — Cumulative up to Window {wi + 1}/{nw} ({label_name} ≈{mid:.0f})",
+            fontsize=12,
+            fontweight="bold",
         )
         fig.tight_layout(rect=[0, 0, 1, 0.95])
-        frame_path = os.path.join(output_dir, f"frame_{wi:04d}.png")
-        fig.savefig(frame_path, dpi=120, bbox_inches="tight")
+        fig.savefig(
+            os.path.join(output_dir, f"frame_{wi:04d}.png"),
+            dpi=120,
+            bbox_inches="tight",
+        )
         plt.close(fig)
+
+    max_workers = min(len(windows), os.cpu_count() or 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(executor.map(_draw_one, range(len(windows))))
 
     print(f"  [Plot] Saved {len(windows)} cumulative frames → {output_dir}/")
 
@@ -875,7 +905,7 @@ def plot_reward_percentiles(
     else:
         lo = 0
         while lo + window_size <= len(steps):
-            w_steps = steps[lo:lo + window_size]
+            w_steps = steps[lo : lo + window_size]
             mid = sum(w_steps) / len(w_steps)
             windows.append((mid, w_steps))
             lo += window_size

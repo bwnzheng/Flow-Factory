@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -217,6 +218,31 @@ def _build_step_data(
 # ---------------------------------------------------------------------------
 
 
+def _run_plots_parallel(tasks: List[Tuple[str, callable, tuple, dict]]) -> None:
+    """Execute multiple plot functions in parallel threads.
+
+    Each task is ``(label, func, args, kwargs)``.  matplotlib Agg backend is
+    thread-safe, so we can overlap CPU-bound figure generation and PNG I/O.
+    """
+    if len(tasks) <= 1:
+        for label, func, args, kwargs in tasks:
+            print(f"  [Plot] Generating {label} ...")
+            func(*args, **kwargs)
+        return
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {
+            executor.submit(func, *args, **kwargs): label for label, func, args, kwargs in tasks
+        }
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                future.result()
+                print(f"  [Plot] ✓ {label}")
+            except Exception as exc:
+                print(f"  [Plot] ✗ {label}: {exc}")
+
+
 def _dispatch_plots(
     all_step_data: Dict[int, Dict[str, Any]],
     reward_names: List[str],
@@ -238,31 +264,43 @@ def _dispatch_plots(
     """
     n_models = len(reward_names)
     if n_models >= 2:
-        print(f"  [Plot] Generating convex hull overlay ...")
-        plot_convex_hulls_2d(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "convex_hulls_2d.png"),
-            title=f"{title_prefix} Reward Convex Hulls",
-            label_name=label_name,
-        )
-        print(f"  [Plot] Generating faceted hull grid ...")
-        plot_convex_hulls_faceted(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "convex_hulls_faceted.png"),
-            title=f"{title_prefix} Convex Hulls — Per-Step Evolution",
-            label_name=label_name,
-        )
-        print(f"  [Plot] Generating hull area curve ...")
-        plot_hull_area_curve(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "hull_area_curve.png"),
-            title=f"{title_prefix} Convex Hull Area Over Steps",
-            label_name=label_name,
+        # Phase 1: independent 2-D plots
+        _run_plots_parallel(
+            [
+                (
+                    "convex hull overlay",
+                    plot_convex_hulls_2d,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "convex_hulls_2d.png"),
+                        "title": f"{title_prefix} Reward Convex Hulls",
+                        "label_name": label_name,
+                    },
+                ),
+                (
+                    "faceted hull grid",
+                    plot_convex_hulls_faceted,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "convex_hulls_faceted.png"),
+                        "title": f"{title_prefix} Convex Hulls — Per-Step Evolution",
+                        "label_name": label_name,
+                    },
+                ),
+                (
+                    "hull area curve",
+                    plot_hull_area_curve,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "hull_area_curve.png"),
+                        "title": f"{title_prefix} Convex Hull Area Over Steps",
+                        "label_name": label_name,
+                    },
+                ),
+            ]
         )
 
+        # Phase 2: late-stage faceted (depends on mid, cheap to compute)
         all_steps_sorted = sorted(all_step_data.keys())
         if len(all_steps_sorted) >= 2:
             mid = all_steps_sorted[len(all_steps_sorted) // 2]
@@ -276,41 +314,62 @@ def _dispatch_plots(
                 step_range=(mid, all_steps_sorted[-1]),
             )
 
+        # Phase 3: window + percentile + Pareto in parallel
+        phase3_tasks = []
         if not skip_window_plots:
-            print(f"  [Plot] Generating window-averaged hull trend ...")
-            plot_convex_hulls_windows(
-                all_step_data,
-                reward_names,
-                os.path.join(out_dir, "convex_hulls_windows.png"),
-                title=f"{title_prefix} Convex Hull Trend (Window-Averaged)",
-                label_name=label_name,
+            phase3_tasks.extend(
+                [
+                    (
+                        "window-averaged hull",
+                        plot_convex_hulls_windows,
+                        (all_step_data, reward_names),
+                        {
+                            "output_path": os.path.join(out_dir, "convex_hulls_windows.png"),
+                            "title": f"{title_prefix} Convex Hull Trend (Window-Averaged)",
+                            "label_name": label_name,
+                        },
+                    ),
+                    (
+                        "cumulative window frames",
+                        plot_convex_hulls_windows_cumulative,
+                        (all_step_data, reward_names),
+                        {
+                            "output_dir": os.path.join(out_dir, "convex_hulls_windows_frames"),
+                            "title": f"{title_prefix} Convex Hull",
+                            "label_name": label_name,
+                        },
+                    ),
+                ]
             )
-            print(f"  [Plot] Generating cumulative window frames ...")
-            plot_convex_hulls_windows_cumulative(
-                all_step_data,
-                reward_names,
-                os.path.join(out_dir, "convex_hulls_windows_frames"),
-                title=f"{title_prefix} Convex Hull",
-                label_name=label_name,
-            )
-        print(f"  [Plot] Generating reward percentile trends ...")
-        plot_reward_percentiles(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "reward_percentiles.png"),
-            title=f"{title_prefix} Reward Percentile Trends",
-            label_name=label_name,
-            force_per_step=skip_window_plots,
+        phase3_tasks.extend(
+            [
+                (
+                    "reward percentiles",
+                    plot_reward_percentiles,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "reward_percentiles.png"),
+                        "title": f"{title_prefix} Reward Percentile Trends",
+                        "label_name": label_name,
+                        "force_per_step": skip_window_plots,
+                    },
+                ),
+                (
+                    "Pareto front evolution",
+                    plot_pareto_front_evolution,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
+                        "title": f"{title_prefix} Pareto Front Evolution",
+                        "label_name": label_name,
+                    },
+                ),
+            ]
         )
-        print(f"  [Plot] Generating Pareto front evolution ...")
-        plot_pareto_front_evolution(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "pareto_front_evolution.png"),
-            title=f"{title_prefix} Pareto Front Evolution",
-            label_name=label_name,
-        )
+        _run_plots_parallel(phase3_tasks)
+
     else:
+        # 1-D: distribution first, then percentiles + Pareto in parallel
         print(f"  [Plot] Generating 1-D reward distribution ...")
         plot_distribution_1d(
             all_step_data,
@@ -319,22 +378,30 @@ def _dispatch_plots(
             title=f"{title_prefix} Reward Distribution",
             label_name=label_name,
         )
-        print(f"  [Plot] Generating reward percentile trends ...")
-        plot_reward_percentiles(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "reward_percentiles.png"),
-            title=f"{title_prefix} Reward Percentile Trends",
-            label_name=label_name,
-            force_per_step=skip_window_plots,
-        )
-        print(f"  [Plot] Generating Pareto front evolution ...")
-        plot_pareto_front_evolution(
-            all_step_data,
-            reward_names,
-            os.path.join(out_dir, "pareto_front_evolution.png"),
-            title=f"{title_prefix} Pareto Front Evolution",
-            label_name=label_name,
+        _run_plots_parallel(
+            [
+                (
+                    "reward percentiles",
+                    plot_reward_percentiles,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "reward_percentiles.png"),
+                        "title": f"{title_prefix} Reward Percentile Trends",
+                        "label_name": label_name,
+                        "force_per_step": skip_window_plots,
+                    },
+                ),
+                (
+                    "Pareto front evolution",
+                    plot_pareto_front_evolution,
+                    (all_step_data, reward_names),
+                    {
+                        "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
+                        "title": f"{title_prefix} Pareto Front Evolution",
+                        "label_name": label_name,
+                    },
+                ),
+            ]
         )
 
 
@@ -412,24 +479,55 @@ def _run_images_analysis(
         print(f"  [Reward] Scoring images with {reward_names} ...")
 
         t0 = time.time()
-        all_step_data = {}
-        for step in tqdm(steps, desc="  Scoring", unit="step"):
-            entries = images_by_step.get(step, [])
-            images = []
-            prompt_per_img = []
-            for e in entries:
+
+        # --- Build flat entry list (paths + prompts, no file handles yet) ---
+        Entry = Tuple[str, str, int]  # (path, prompt, step)
+        all_entries: List[Entry] = []
+        for step in tqdm(steps, desc="  Indexing", unit="step"):
+            for e in images_by_step.get(step, []):
                 img_path = e["image_path"]
                 if os.path.isfile(img_path):
-                    images.append(Image.open(img_path))
-                    prompt_per_img.append(e.get("prompt", "a photo"))
-            if not images:
-                continue
-            rewards = _score_images(computer, images, prompt_per_img)
-            all_step_data[step] = _build_step_data(step, rewards, reward_names, prompt_per_img)
+                    all_entries.append((img_path, e.get("prompt", "a photo"), step))
+
+        total_images = len(all_entries)
+        SCORING_CHUNK = 500  # bound file handles per batch
+
+        step_reward_buf: Dict[int, Dict[str, List[float]]] = {}
+        step_prompt_buf: Dict[int, List[str]] = {}
+
+        for chunk_start in range(0, total_images, SCORING_CHUNK):
+            chunk_entries = all_entries[chunk_start : chunk_start + SCORING_CHUNK]
+
+            # Open only this chunk's images
+            chunk_images = [Image.open(path) for path, _, _ in chunk_entries]
+            chunk_prompts = [prompt for _, prompt, _ in chunk_entries]
+
+            chunk_rewards = _score_images(computer, chunk_images, chunk_prompts)
+
+            # Scatter back to per-step buffers
+            for i, (_, _, step) in enumerate(chunk_entries):
+                if step not in step_reward_buf:
+                    step_reward_buf[step] = {name: [] for name in reward_names}
+                    step_prompt_buf[step] = []
+                for name in reward_names:
+                    step_reward_buf[step][name].append(chunk_rewards[name][i])
+                step_prompt_buf[step].append(chunk_prompts[i])
+
+        # --- Build final step data ---
+        all_step_data = {}
+        for step in sorted(step_reward_buf.keys()):
+            all_step_data[step] = _build_step_data(
+                step,
+                step_reward_buf[step],
+                reward_names,
+                step_prompt_buf[step],
+            )
+
         elapsed = time.time() - t0
+        n_chunks = (total_images + SCORING_CHUNK - 1) // SCORING_CHUNK
         print(
-            f"  [Reward] Scored {len(steps)} steps in {elapsed:.1f}s "
-            f"({elapsed / max(len(steps), 1):.1f}s/step)"
+            f"  [Reward] Scored {total_images} images in {n_chunks} chunk(s), "
+            f"{elapsed:.1f}s ({elapsed / max(total_images, 1):.3f}s/image)"
         )
         _save_reward_cache(out_dir, all_step_data, reward_names)
 
