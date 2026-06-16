@@ -8,8 +8,8 @@
 run_name: ""                       # Auto-resolved from checkpoint_dir if empty
 save_dir: "saves"                  # Parent of saves/tensorboard/ and saves/{run_name}/
 
-# ---- Training rollouts (from TensorBoard events) ----
-training:
+# ---- Images analysis (reads images from media.jsonl, scores with reward models) ----
+images_analysis:
   enabled: true
   # Reads {save_dir}/{run_name}/logs/media.jsonl
   max_images_per_step: 0          # 0 = all; set to N to cap per-step images

@@ -13,7 +13,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 
-def load_training_samples(
+def load_media_samples(
     log_dir: str,
     datasets: Optional[List[str]] = None,
     max_per_step: int = 0,

@@ -108,8 +108,9 @@ def plot_convex_hulls_2d(
     n_pairs = len(pairs)
     cols = min(n_pairs, 3)
     rows = (n_pairs + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(figsize[0] * cols, figsize[1] * rows),
-                             squeeze=False)
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(figsize[0] * cols, figsize[1] * rows), squeeze=False
+    )
 
     steps = sorted(all_steps.keys())
     cmap = plt.cm.viridis
@@ -134,21 +135,31 @@ def plot_convex_hulls_2d(
                 for pi in sorted(set(prompt_idx.tolist())):
                     mask = prompt_idx == pi
                     marker = _PROMPT_MARKERS[pi % len(_PROMPT_MARKERS)]
-                    ax.scatter(xy[mask, 0], xy[mask, 1], color=color, alpha=0.55,
-                               s=12, marker=marker, edgecolors="none",
-                               label=f"P{pi}" if step == steps[0] and pi < 8 else None)
+                    ax.scatter(
+                        xy[mask, 0],
+                        xy[mask, 1],
+                        color=color,
+                        alpha=0.55,
+                        s=12,
+                        marker=marker,
+                        edgecolors="none",
+                        label=f"P{pi}" if step == steps[0] and pi < 8 else None,
+                    )
             else:
-                ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.55, s=12,
-                           edgecolors="none")
+                ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.55, s=12, edgecolors="none")
 
             # Draw hull polygon (over all points, regardless of prompt)
             if len(xy) >= 3:
                 hull_xy = andrews_monotone_chain(xy)
                 if len(hull_xy) >= 2:
                     ax.fill(hull_xy[:, 0], hull_xy[:, 1], color=color, alpha=0.12)
-                    ax.plot(np.append(hull_xy[:, 0], hull_xy[0, 0]),
-                            np.append(hull_xy[:, 1], hull_xy[0, 1]),
-                            color=color, linewidth=1.0, alpha=0.7)
+                    ax.plot(
+                        np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                    )
 
     # Hide unused subplots
     for pi in range(n_pairs, rows * cols):
@@ -157,8 +168,7 @@ def plot_convex_hulls_2d(
     # Add prompt legend on first subplot if markers were used
     handles, labels = axes[0][0].get_legend_handles_labels()
     if handles:
-        axes[0][0].legend(handles, labels, fontsize=7, loc="best",
-                          title="Prompt", title_fontsize=8)
+        axes[0][0].legend(handles, labels, fontsize=7, loc="best", title="Prompt", title_fontsize=8)
 
     # Colorbar
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
@@ -220,22 +230,41 @@ def plot_combined_convex_hulls_2d(
                     continue
                 color = cmap(norm(step))
                 xy = np.column_stack([pts[:, di], pts[:, dj]])
-                ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.45, s=10,
-                           edgecolors="none")
+                ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.45, s=10, edgecolors="none")
 
                 hull_xy = andrews_monotone_chain(xy)
                 if len(hull_xy) >= 3:
-                    ax.plot(np.append(hull_xy[:, 0], hull_xy[0, 0]),
-                            np.append(hull_xy[:, 1], hull_xy[0, 1]),
-                            color=color, linewidth=1.0, alpha=0.6, linestyle="--")
+                    ax.plot(
+                        np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.6,
+                        linestyle="--",
+                    )
 
         # Legend for source identity
         from matplotlib.lines import Line2D
+
         legend_elements = [
-            Line2D([0], [0], marker="o", color="w", markerfacecolor=plt.cm.viridis(0.5),
-                   markersize=8, label=label_a),
-            Line2D([0], [0], marker="o", color="w", markerfacecolor=plt.cm.plasma(0.5),
-                   markersize=8, label=label_b),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor=plt.cm.viridis(0.5),
+                markersize=8,
+                label=label_a,
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor=plt.cm.plasma(0.5),
+                markersize=8,
+                label=label_b,
+            ),
         ]
         ax.legend(handles=legend_elements, loc="best", fontsize=8)
 
@@ -276,8 +305,9 @@ def plot_distribution_1d(
     norm = plt.Normalize(vmin=min(steps), vmax=max(steps)) if steps else plt.Normalize(0, 1)
 
     # Strip plot
-    fig, (ax_strip, ax_dist) = plt.subplots(2, 1, figsize=(10, 8),
-                                            gridspec_kw={"height_ratios": [1, 2]})
+    fig, (ax_strip, ax_dist) = plt.subplots(
+        2, 1, figsize=(10, 8), gridspec_kw={"height_ratios": [1, 2]}
+    )
 
     # Upper panel: strip + range bar per step
     for step in steps:
@@ -301,9 +331,17 @@ def plot_distribution_1d(
             continue
         vals = pts[:, 0] if pts.ndim == 2 else pts
         color = cmap(norm(step))
-        ax_dist.hist(vals, bins="auto", density=True, alpha=0.3, color=color,
-                     histtype="stepfilled", linewidth=0.5, edgecolor=color,
-                     label=f"{label_name} {step}")
+        ax_dist.hist(
+            vals,
+            bins="auto",
+            density=True,
+            alpha=0.3,
+            color=color,
+            histtype="stepfilled",
+            linewidth=0.5,
+            edgecolor=color,
+            label=f"{label_name} {step}",
+        )
 
     ax_dist.set_xlabel(reward_name)
     ax_dist.set_ylabel("Density")
@@ -382,8 +420,9 @@ def plot_convex_hulls_faceted(
     else:
         xlim = ylim = None
 
-    fig, axes = plt.subplots(rows, cols, figsize=(3.5 * cols, 3.2 * rows),
-                             squeeze=False, sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(3.5 * cols, 3.2 * rows), squeeze=False, sharex=True, sharey=True
+    )
     cmap = plt.cm.viridis
     norm = plt.Normalize(vmin=min(steps), vmax=max(steps)) if steps else plt.Normalize(0, 1)
 
@@ -404,20 +443,30 @@ def plot_convex_hulls_faceted(
             for pi in sorted(set(prompt_idx.tolist())):
                 mask = prompt_idx == pi
                 marker = _PROMPT_MARKERS[pi % len(_PROMPT_MARKERS)]
-                ax.scatter(xy[mask, 0], xy[mask, 1], color=color, alpha=0.55,
-                           s=8, marker=marker, edgecolors="none",
-                           label=f"P{pi}" if pi < 8 else None)
+                ax.scatter(
+                    xy[mask, 0],
+                    xy[mask, 1],
+                    color=color,
+                    alpha=0.55,
+                    s=8,
+                    marker=marker,
+                    edgecolors="none",
+                    label=f"P{pi}" if pi < 8 else None,
+                )
         else:
-            ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.55, s=8,
-                       edgecolors="none")
+            ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.55, s=8, edgecolors="none")
 
         if len(xy) >= 3:
             hull_xy = andrews_monotone_chain(xy)
             if len(hull_xy) >= 2:
                 ax.fill(hull_xy[:, 0], hull_xy[:, 1], color=color, alpha=0.15)
-                ax.plot(np.append(hull_xy[:, 0], hull_xy[0, 0]),
-                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
-                        color=color, linewidth=1.2, alpha=0.8)
+                ax.plot(
+                    np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                    np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                    color=color,
+                    linewidth=1.2,
+                    alpha=0.8,
+                )
 
         ax.set_title(f"{label_name} {step}", fontsize=9)
         ax.tick_params(labelsize=7)
@@ -599,16 +648,19 @@ def plot_convex_hulls_windows(
             c = colors[wi]
             label = f"{w_steps[0]}-{w_steps[-1]}"
 
-            ax.scatter(xy[:, 0], xy[:, 1], color=c, alpha=0.6, s=6,
-                       edgecolors="none", label=label)
+            ax.scatter(xy[:, 0], xy[:, 1], color=c, alpha=0.6, s=6, edgecolors="none", label=label)
 
             if len(xy) >= 3:
                 hull_xy = andrews_monotone_chain(xy)
                 if len(hull_xy) >= 2:
                     ax.fill(hull_xy[:, 0], hull_xy[:, 1], color=c, alpha=0.08)
-                    ax.plot(np.append(hull_xy[:, 0], hull_xy[0, 0]),
-                            np.append(hull_xy[:, 1], hull_xy[0, 1]),
-                            color=c, linewidth=2.0, alpha=0.85)
+                    ax.plot(
+                        np.append(hull_xy[:, 0], hull_xy[0, 0]),
+                        np.append(hull_xy[:, 1], hull_xy[0, 1]),
+                        color=c,
+                        linewidth=2.0,
+                        alpha=0.85,
+                    )
 
         fontsize = 6 if nw <= 20 else 5
         ax.legend(fontsize=fontsize, loc="best", title="Window", title_fontsize=7)
@@ -630,8 +682,9 @@ def plot_convex_hulls_windows(
             centroids.append((cx, cy))
             # Mark centroid with a small dot
             c = colors[wi]
-            ax.plot(cx, cy, "o", color=c, markersize=6, markeredgecolor="white",
-                    markeredgewidth=0.5)
+            ax.plot(
+                cx, cy, "o", color=c, markersize=6, markeredgecolor="white", markeredgewidth=0.5
+            )
 
         # Connect consecutive valid centroids with dashed lines
         valid = [(cx, cy) for cx, cy in centroids if cx is not None]
@@ -682,8 +735,7 @@ def plot_reward_quantiles(
         lo = hi
 
     n_rewards = len(reward_names)
-    fig, axes = plt.subplots(n_rewards, 1, figsize=(10, 3.5 * n_rewards),
-                             squeeze=False)
+    fig, axes = plt.subplots(n_rewards, 1, figsize=(10, 3.5 * n_rewards), squeeze=False)
 
     for ri, rname in enumerate(reward_names):
         ax = axes[ri][0]
@@ -706,12 +758,9 @@ def plot_reward_quantiles(
             maxs.append(np.max(vals))
             means.append(np.mean(vals))
 
-        ax.fill_between(xs, q25s, q75s, alpha=0.25, color="#2196F3",
-                         label="25%-75%")
-        ax.plot(xs, medians, "o-", color="#1565C0", linewidth=1.5,
-                markersize=4, label="Median")
-        ax.plot(xs, means, "s-", color="#0D47A1", linewidth=1.2,
-                markersize=4, label="Mean")
+        ax.fill_between(xs, q25s, q75s, alpha=0.25, color="#2196F3", label="25%-75%")
+        ax.plot(xs, medians, "o-", color="#1565C0", linewidth=1.5, markersize=4, label="Median")
+        ax.plot(xs, means, "s-", color="#0D47A1", linewidth=1.2, markersize=4, label="Mean")
         ax.plot(xs, mins, "--", color="#90CAF9", linewidth=0.7, label="Min")
         ax.plot(xs, maxs, "--", color="#90CAF9", linewidth=0.7, label="Max")
 
@@ -775,7 +824,7 @@ def _hypervolume(pareto: np.ndarray, ref: np.ndarray) -> float:
         if x <= prev_x:
             continue
         # Slice: points above this one in remaining dims
-        remaining = pts[:i + 1, 1:]  # include current point
+        remaining = pts[: i + 1, 1:]  # include current point
         # Filter: only points that dominate ref in remaining dims
         mask = np.all(remaining >= ref[1:], axis=1)
         if mask.sum() > 0:
@@ -795,7 +844,7 @@ def plot_pareto_front_evolution(
 ) -> None:
     """Track cumulative Pareto front size and hypervolume over training steps.
 
-    Works with any number of reward dimensions (≥2).  At each step, all
+    Works with any number of reward dimensions (≥1).  At each step, all
     reward vectors seen so far are pooled, and the N-dimensional Pareto front
     is computed.  Plots the number of Pareto-optimal points and an estimated
     hypervolume over steps.
@@ -804,7 +853,7 @@ def plot_pareto_front_evolution(
 
     steps = sorted(all_steps.keys())
     dim = len(reward_names)
-    if dim < 2 or len(steps) == 0:
+    if len(steps) == 0:
         return
 
     cumulative = []  # list of (N, D) arrays
@@ -834,10 +883,8 @@ def plot_pareto_front_evolution(
     fig, ax_count = plt.subplots(figsize=(10, 5))
     ax_hv = ax_count.twinx()
 
-    ax_count.plot(steps, pareto_counts, "-", color="#2E7D32", linewidth=1.5,
-                   label="Pareto Size")
-    ax_hv.plot(steps, hypervolumes, "-", color="#C62828", linewidth=1.5,
-               label="Hypervolume")
+    ax_count.plot(steps, pareto_counts, "-", color="#2E7D32", linewidth=1.5, label="Pareto Size")
+    ax_hv.plot(steps, hypervolumes, "-", color="#C62828", linewidth=1.5, label="Hypervolume")
 
     ax_count.set_ylabel("Pareto Front Size", color="#2E7D32")
     ax_hv.set_ylabel("Hypervolume", color="#C62828")
