@@ -7,6 +7,7 @@ All implementations are freshly written using the underlying library APIs
 from __future__ import annotations
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,18 +54,26 @@ def _resolve_dtype(dtype_str: str) -> torch.dtype:
     }[dtype_str]
 
 
+_pipe_load_lock = threading.Lock()
+
 def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
-    """Load SD3.5 pipeline with FlowMatch ODE scheduler."""
+    """Load SD3.5 pipeline with FlowMatch ODE scheduler.
+
+    Serialised across threads via a module-level lock — parallel
+    ``from_pretrained`` calls can trigger meta-tensor initialisation
+    conflicts in transformers/diffusers.
+    """
     dtype = _resolve_dtype(dtype_str)
-    pipe = StableDiffusion3Pipeline.from_pretrained(
-        base_model, torch_dtype=dtype, low_cpu_mem_usage=False, device_map=None,
-    )
-    scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
-        pipe.scheduler.config, dynamics_type="ODE",
-    )
-    scheduler.eval()
-    pipe.scheduler = scheduler
-    pipe = pipe.to(device)
+    with _pipe_load_lock:
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            base_model, torch_dtype=dtype,
+        )
+        scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
+            pipe.scheduler.config, dynamics_type="ODE",
+        )
+        scheduler.eval()
+        pipe.scheduler = scheduler
+        pipe = pipe.to(device)
     return pipe
 
 
