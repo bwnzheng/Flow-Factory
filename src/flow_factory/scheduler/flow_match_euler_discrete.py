@@ -337,6 +337,7 @@ class FlowMatchEulerDiscreteSDEScheduler(FlowMatchEulerDiscreteScheduler, SDESch
             if compute_log_prob:
                 # ODE doesn't support log_prob computation, provide zero
                 logger.warning(f"`log_prob` is meaningless when `dynamics_type` is set `ODE`, setting to zero.")
+                logger.setLevel(logging.ERROR)  # suppress further warnings after first
                 log_prob = torch.zeros((next_latents.shape[0]), dtype=next_latents.dtype, device=next_latents.device)
 
         elif dynamics_type == "Flow-SDE":

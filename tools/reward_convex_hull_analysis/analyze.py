@@ -45,6 +45,7 @@ from tools.reward_convex_hull_analysis.convex_hull import (
 )
 from tools.reward_convex_hull_analysis.evaluation_runner import (
     EvaluationRunner,
+    MultiGPUEvaluationRunner,
     discover_checkpoints,
 )
 from tools.reward_convex_hull_analysis.log_reader import (
@@ -78,6 +79,7 @@ class AnalysisConfig:
     prompts: List[str] = field(default_factory=list)
     max_prompts: int = 0
     num_samples: int = 4
+    gen_batch_size: int = 16
     gen_kwargs: Dict[str, Any] = field(default_factory=dict)
 
     base_model: str = "stabilityai/stable-diffusion-3.5-medium"
@@ -112,6 +114,7 @@ def _parse_config(path: str) -> AnalysisConfig:
         prompts=ev.get("prompts", []),
         max_prompts=ev.get("max_prompts", 0),
         num_samples=ev.get("num_samples", 4),
+        gen_batch_size=ev.get("gen_batch_size", 16),
         gen_kwargs=ev.get("gen_kwargs", {}),
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
         dtype=model.get("dtype", "bfloat16"),
@@ -249,18 +252,12 @@ def _dispatch_plots(
     out_dir: str,
     title_prefix: str,
     label_name: str = "Step",
-    skip_window_plots: bool = False,
+    window_size: int = 20,
 ) -> None:
     """Generate plots for a single dataset/source combination.
 
     Uses the same dispatch logic for both images→reward_model and rewards/
     pickle data paths: ≥2 reward dims → convex hull suite, else 1-D distribution.
-
-    Args:
-        skip_window_plots: If True, skip window-averaged hull plots and
-            cumulative frames (useful for eval datasets where data only
-            appears every N epochs).  Percentile plots are always generated
-            (with ``force_per_step`` when this is True).
     """
     n_models = len(reward_names)
     if n_models >= 2:
@@ -315,57 +312,50 @@ def _dispatch_plots(
             )
 
         # Phase 3: window + percentile + Pareto in parallel
-        phase3_tasks = []
-        if not skip_window_plots:
-            phase3_tasks.extend(
-                [
-                    (
-                        "window-averaged hull",
-                        plot_convex_hulls_windows,
-                        (all_step_data, reward_names),
-                        {
-                            "output_path": os.path.join(out_dir, "convex_hulls_windows.png"),
-                            "title": f"{title_prefix} Convex Hull Trend (Window-Averaged)",
-                            "label_name": label_name,
-                        },
-                    ),
-                    (
-                        "cumulative window frames",
-                        plot_convex_hulls_windows_cumulative,
-                        (all_step_data, reward_names),
-                        {
-                            "output_dir": os.path.join(out_dir, "convex_hulls_windows_frames"),
-                            "title": f"{title_prefix} Convex Hull",
-                            "label_name": label_name,
-                        },
-                    ),
-                ]
-            )
-        phase3_tasks.extend(
-            [
-                (
-                    "reward percentiles",
-                    plot_reward_percentiles,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "reward_percentiles.png"),
-                        "title": f"{title_prefix} Reward Percentile Trends",
-                        "label_name": label_name,
-                        "force_per_step": skip_window_plots,
-                    },
-                ),
-                (
-                    "Pareto front evolution",
-                    plot_pareto_front_evolution,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
-                        "title": f"{title_prefix} Pareto Front Evolution",
-                        "label_name": label_name,
-                    },
-                ),
-            ]
-        )
+        phase3_tasks = [
+            (
+                "window-averaged hull",
+                plot_convex_hulls_windows,
+                (all_step_data, reward_names),
+                {
+                    "output_path": os.path.join(out_dir, "convex_hulls_windows.png"),
+                    "title": f"{title_prefix} Convex Hull Trend (Window-Averaged)",
+                    "label_name": label_name,
+                    "window_size": window_size,
+                },
+            ),
+            (
+                "cumulative window frames",
+                plot_convex_hulls_windows_cumulative,
+                (all_step_data, reward_names),
+                {
+                    "output_dir": os.path.join(out_dir, "convex_hulls_windows_frames"),
+                    "title": f"{title_prefix} Convex Hull",
+                    "label_name": label_name,
+                    "window_size": window_size,
+                },
+            ),
+            (
+                "reward percentiles",
+                plot_reward_percentiles,
+                (all_step_data, reward_names),
+                {
+                    "output_path": os.path.join(out_dir, "reward_percentiles.png"),
+                    "title": f"{title_prefix} Reward Percentile Trends",
+                    "label_name": label_name,
+                },
+            ),
+            (
+                "Pareto front evolution",
+                plot_pareto_front_evolution,
+                (all_step_data, reward_names),
+                {
+                    "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
+                    "title": f"{title_prefix} Pareto Front Evolution",
+                    "label_name": label_name,
+                },
+            ),
+        ]
         _run_plots_parallel(phase3_tasks)
 
     else:
@@ -388,7 +378,6 @@ def _dispatch_plots(
                         "output_path": os.path.join(out_dir, "reward_percentiles.png"),
                         "title": f"{title_prefix} Reward Percentile Trends",
                         "label_name": label_name,
-                        "force_per_step": skip_window_plots,
                     },
                 ),
                 (
@@ -461,7 +450,7 @@ def _run_images_analysis(
     step_img_counts = {s: len(entries) for s, entries in images_by_step.items()}
 
     cached = _load_reward_cache(out_dir, steps, reward_names)
-    cache_valid = cached is not None
+    cache_valid = cached is not None and set(steps) == set(cached.keys())
     if cache_valid:
         for step in steps:
             expected = step_img_counts.get(step, 0)
@@ -504,6 +493,10 @@ def _run_images_analysis(
 
             chunk_rewards = _score_images(computer, chunk_images, chunk_prompts)
 
+            # Close file handles promptly
+            for img in chunk_images:
+                img.close()
+
             # Scatter back to per-step buffers
             for i, (_, _, step) in enumerate(chunk_entries):
                 if step not in step_reward_buf:
@@ -531,13 +524,15 @@ def _run_images_analysis(
         )
         _save_reward_cache(out_dir, all_step_data, reward_names)
 
+    _eval_window = 1 if output_subdir in ("eval_images",) else 20
+
     _dispatch_plots(
         all_step_data,
         reward_names,
         out_dir,
         title_prefix=f"{label} Rollout",
         label_name="Step",
-        skip_window_plots=output_subdir.startswith("eval"),
+        window_size=_eval_window,
     )
     print(f"  {label} → {out_dir}/")
     return all_step_data
@@ -556,7 +551,16 @@ def _run_evaluation(
     output_dir: str,
     reward_names: List[str],
 ) -> Optional[Dict[int, Dict[str, Any]]]:
-    """Discover checkpoints, generate images, score them, return epoch→data dict."""
+    """Discover checkpoints, generate images, score them, return epoch→data dict.
+
+    Flow:
+    1. Per-checkpoint reward cache check → skip already-cached checkpoints.
+    2. Generate images for uncached checkpoints (batch inference, multi-GPU).
+    3. Free the generation pipeline.
+    4. Score ALL uncached checkpoints at once (single or multi-GPU).
+    5. Merge results into cache.
+    6. Dispatch plots.
+    """
     ckpt_dir = _resolve_checkpoint_dir(config, run_name)
     try:
         checkpoints = discover_checkpoints(ckpt_dir)
@@ -575,58 +579,115 @@ def _run_evaluation(
     if config.max_prompts > 0 and len(prompts) > config.max_prompts:
         prompts = prompts[: config.max_prompts]
 
-    print(f"[Evaluation] Found {len(checkpoints)} checkpoints: " f"{[e for e, _ in checkpoints]}")
-    print(f"  Prompts: {len(prompts)}, samples per prompt: {config.num_samples}")
+    expected_per_ckpt = len(prompts) * config.num_samples
+    all_epochs = [e for e, _ in checkpoints]
 
-    runner = EvaluationRunner(config.base_model, config.dtype, device=config.device)
+    print(f"[Evaluation] Found {len(checkpoints)} checkpoints: {all_epochs}")
+    print(f"  Prompts: {len(prompts)}, samples per prompt: {config.num_samples}"
+          f" → {expected_per_ckpt} images per checkpoint")
 
     ev_out = os.path.join(output_dir, "evaluation")
     os.makedirs(ev_out, exist_ok=True)
-
     gen_dir = os.path.join(ev_out, "generated_images")
 
-    epochs = [e for e, _ in checkpoints]
-    cached = _load_reward_cache(ev_out, epochs, reward_names)
-    if cached is not None:
-        print(f"  All {len(epochs)} checkpoints cached — skipping reward scoring.")
-        all_epoch_data = cached
+    # --- 1. Per-checkpoint cache check ---
+    existing_cache = _load_reward_cache(ev_out, all_epochs, reward_names)
+
+    # Validate n_total per cached step
+    def _is_step_cached(step: int) -> bool:
+        if existing_cache is None:
+            return False
+        data = existing_cache.get(step)
+        if data is None:
+            return False
+        return data.get("n_total", 0) == expected_per_ckpt
+
+    cached_epochs = set(e for e in all_epochs if _is_step_cached(e))
+    uncached_epochs = [e for e in all_epochs if e not in cached_epochs]
+
+    if cached_epochs:
+        print(f"  Reward cache hit for epochs {sorted(cached_epochs)}"
+              f" — skipping generation + scoring for these.")
+
+    if not uncached_epochs:
+        print(f"  All {len(all_epochs)} checkpoints fully cached.")
+        all_epoch_data = existing_cache
     else:
-        assert computer is not None, "Reward model needed but not loaded"
-        all_epoch_data = {}
-        for epoch, ckpt_path in checkpoints:
-            print(f"  Evaluation epoch={epoch}: generating images ...")
-            paths = runner.generate_for_checkpoint(
-                ckpt_path,
-                prompts,
-                gen_dir,
-                epoch,
-                config.num_samples,
-                config.gen_kwargs,
+        # --- 2. Generate images for uncached checkpoints ---
+        if config.num_gpus > 1:
+            gen_runner = MultiGPUEvaluationRunner(
+                config.base_model, config.dtype,
+                num_gpus=config.num_gpus, device=config.device,
             )
-            images = []
-            prompt_per_img = []
+            print(f"  Using {config.num_gpus}-GPU generation"
+                  f" (batch size={config.gen_batch_size})")
+        else:
+            gen_runner = EvaluationRunner(config.base_model, config.dtype,
+                                          device=config.device)
+
+        for epoch, ckpt_path in checkpoints:
+            if epoch in cached_epochs:
+                continue
+            print(f"  [Gen] Epoch={epoch}: generating images ...")
+            gen_runner.generate_for_checkpoint(
+                ckpt_path, prompts, gen_dir, epoch,
+                num_samples=config.num_samples,
+                gen_kwargs=config.gen_kwargs,
+                gen_batch_size=config.gen_batch_size,
+            )
+
+        # --- 3. Free generation pipelines ---
+        del gen_runner
+
+        # --- 4. Score uncached checkpoints ---
+        assert computer is not None, "Reward model needed but not loaded"
+        all_epoch_data = dict(existing_cache) if existing_cache else {}
+
+        # Collect all (image, prompt) pairs across uncached checkpoints
+        all_images: List = []
+        all_prompt_texts: List[str] = []
+        ckpt_image_ranges: Dict[int, Tuple[int, int]] = {}  # epoch -> (start, end) in flat lists
+
+        for epoch in uncached_epochs:
+            start = len(all_images)
             for pi, p in enumerate(prompts):
                 for si in range(config.num_samples):
-                    full = os.path.join(gen_dir, f"checkpoint_{epoch}", f"p{pi}_s{si}.png")
-                    if os.path.isfile(full):
-                        images.append(Image.open(full))
-                        prompt_per_img.append(p)
-            print(f"    Scoring {len(images)} images ...")
-            if images:
-                rewards = _score_images(computer, images, prompt_per_img)
+                    full = os.path.join(gen_dir, f"checkpoint_{epoch}",
+                                        f"p{pi}_s{si}.png")
+                    all_images.append(Image.open(full))
+                    all_prompt_texts.append(p)
+            ckpt_image_ranges[epoch] = (start, len(all_images))
+
+        total_images = len(all_images)
+        print(f"  Scoring {total_images} images across {len(uncached_epochs)}"
+              f" checkpoints ...")
+
+        if all_images:
+            all_rewards = _score_images(computer, all_images, all_prompt_texts)
+            for img in all_images:
+                img.close()
+            # Split flat results back per checkpoint
+            for epoch in uncached_epochs:
+                start, end = ckpt_image_ranges[epoch]
+                epoch_rewards = {
+                    name: vals[start:end] for name, vals in all_rewards.items()
+                }
+                epoch_prompts = all_prompt_texts[start:end]
                 all_epoch_data[epoch] = _build_step_data(
-                    epoch, rewards, reward_names, prompt_per_img
+                    epoch, epoch_rewards, reward_names, epoch_prompts
                 )
+
+        # --- 5. Merge into cache ---
         _save_reward_cache(ev_out, all_epoch_data, reward_names)
 
-    del runner
-
+    # --- 6. Plots ---
     _dispatch_plots(
         all_epoch_data,
         reward_names,
         ev_out,
         title_prefix="Evaluation (Test Prompts)",
         label_name="Epoch",
+        window_size=1,
     )
     print(f"  Evaluation results saved to {ev_out}/")
     return all_epoch_data
@@ -682,6 +743,7 @@ def _run_rewards_analysis(
             tr_out,
             title_prefix="Train Rewards (from pickles)",
             label_name="Step",
+            window_size=20,
         )
         print(f"  Train rewards → {tr_out}/")
 
@@ -698,7 +760,7 @@ def _run_rewards_analysis(
             ev_out,
             title_prefix="Eval Rewards (from pickles)",
             label_name="Step",
-            skip_window_plots=True,
+            window_size=1,
         )
         print(f"  Eval rewards → {ev_out}/")
 
@@ -715,6 +777,13 @@ def _reward_cache_path(source_dir: str) -> str:
 def _load_reward_cache(
     source_dir: str, step_keys: List[int], reward_names: List[str]
 ) -> Optional[Dict[int, Dict[str, Any]]]:
+    """Load cached reward scores, returning partial results on miss.
+
+    Returns a dict keyed by the step_keys that are present and valid.
+    Returns ``None`` only if the cache file is missing or *reward_names*
+    have changed (full invalidation).  Callers are responsible for
+    verifying ``n_total`` against the expected image count per step.
+    """
     path = _reward_cache_path(source_dir)
     if not os.path.isfile(path):
         return None
@@ -729,7 +798,7 @@ def _load_reward_cache(
     for step in step_keys:
         key = str(step)
         if key not in steps_data:
-            return None
+            continue
         rec = steps_data[key]
         pts_list = [rec.get(name, []) for name in reward_names]
         n_valid = min(len(lst) for lst in pts_list) if pts_list else 0
@@ -754,13 +823,21 @@ def _load_reward_cache(
         prompt_labels = rec.get("prompt_labels")
         if prompt_labels:
             result[step]["prompt_labels"] = prompt_labels
-    return result
+    return result if result else None
 
 
 def _save_reward_cache(
     source_dir: str, all_data: Dict[int, Dict[str, Any]], reward_names: List[str]
 ):
+    """Save reward scores, merging into existing cache so per-step granularity is preserved."""
+    path = _reward_cache_path(source_dir)
+    # Load existing cache so we don't clobber other steps
     steps_dict = {}
+    if os.path.isfile(path):
+        with open(path, "r") as f:
+            existing = json.load(f)
+        if existing.get("reward_names") == reward_names:
+            steps_dict = existing.get("steps", {})
     for step, data in sorted(all_data.items()):
         pts = data.get("points")
         rec = {"n_total": data.get("n_total", 0), "n_valid": data.get("n_valid", 0)}
@@ -777,7 +854,7 @@ def _save_reward_cache(
         if prompt_labels:
             rec["prompt_labels"] = prompt_labels
         steps_dict[str(step)] = rec
-    with open(_reward_cache_path(source_dir), "w") as f:
+    with open(path, "w") as f:
         json.dump({"reward_names": reward_names, "steps": steps_dict}, f, indent=2)
 
 
@@ -826,7 +903,7 @@ def main(config_path: str):
             if not steps:
                 return False
             cached_all = _load_reward_cache(out_dir, steps, reward_names)
-            if cached_all is None:
+            if cached_all is None or set(steps) != set(cached_all.keys()):
                 return False
             for step in steps:
                 expected = len(images_by_step.get(step, []))
@@ -847,8 +924,15 @@ def main(config_path: str):
         try:
             checkpoints = discover_checkpoints(ckpt_dir)
             epochs = [e for e, _ in checkpoints]
-            if epochs and _load_reward_cache(ev_out, epochs, reward_names) is not None:
-                ev_cached = True
+            if epochs:
+                cached = _load_reward_cache(ev_out, epochs, reward_names)
+                if cached is not None and set(epochs) == set(cached.keys()):
+                    n_prompts = len(all_prompts)
+                    if config.max_prompts > 0 and n_prompts > config.max_prompts:
+                        n_prompts = config.max_prompts
+                    expected = n_prompts * config.num_samples
+                    if all(cached[e].get("n_total", 0) == expected for e in epochs):
+                        ev_cached = True
         except FileNotFoundError:
             pass
 
@@ -870,7 +954,11 @@ def main(config_path: str):
         num_gpus = config.num_gpus
         if num_gpus > 1:
             print(f"  Creating {num_gpus}-GPU scorer ...")
-        computer = MultiGPUComputer(config.rewards, num_gpus=num_gpus, device=config.device)
+            computer: Union[StandaloneRewardComputer, MultiGPUComputer] = MultiGPUComputer(
+                config.rewards, num_gpus=num_gpus, device=config.device
+            )
+        else:
+            computer = StandaloneRewardComputer(config.rewards, device=config.device)
         print(f"  Reward models loaded in {time.time() - t0:.1f}s: {reward_names}")
     else:
         print(f"All image caches valid — skipping model loading ({reward_names}).")

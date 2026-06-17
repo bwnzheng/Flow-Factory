@@ -48,6 +48,9 @@ class StandaloneRewardComputer:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         if dtype is None:
             dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        elif isinstance(dtype, str):
+            # Resolve config-style string (e.g. "bfloat16") to torch.dtype
+            dtype = getattr(torch, dtype)
 
         self.device = device
         self.dtype = dtype
@@ -139,12 +142,12 @@ class MultiGPUComputer:
     def __init__(
         self,
         reward_configs: List[Dict[str, Any]],
-        num_gpus: int = 1,
+        num_gpus: int,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
     ):
-        if num_gpus < 1:
-            raise ValueError(f"num_gpus must be >= 1, got {num_gpus}")
+        if num_gpus < 2:
+            raise ValueError(f"MultiGPUComputer requires num_gpus >= 2, got {num_gpus}")
 
         self._num_gpus = num_gpus
         self._device_type = device.split(":")[0]  # "cuda", "npu", "cpu"
@@ -152,9 +155,8 @@ class MultiGPUComputer:
         # Create instances cheaply — models are NOT loaded yet (lazy)
         self._computers: List[StandaloneRewardComputer] = []
         for i in range(num_gpus):
-            dev = f"{self._device_type}:{i}" if num_gpus > 1 else device
             self._computers.append(
-                StandaloneRewardComputer(reward_configs, device=dev, dtype=dtype)
+                StandaloneRewardComputer(reward_configs, device=f"{self._device_type}:{i}", dtype=dtype)
             )
 
     @property
@@ -169,9 +171,6 @@ class MultiGPUComputer:
         batch_size: int = 16,
     ) -> Dict[str, List[float]]:
         """Score (image, prompt) pairs, distributing work across GPUs."""
-        if self._num_gpus == 1:
-            return self._computers[0].compute(images, prompts, batch_size)
-
         # Split images evenly across GPUs
         n = self._num_gpus
         chunk_size = (len(images) + n - 1) // n
@@ -237,6 +236,10 @@ class _CLIPWrapper:
         self.model.to(device)
         self.model.eval()
         self.device = device
+        self._autocast_kwargs = {
+            "device_type": device.split(":")[0],
+            "dtype": dtype,
+        }
 
     @torch.no_grad()
     def __call__(
@@ -253,8 +256,9 @@ class _CLIPWrapper:
                 padding=True,
                 truncation=True,
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            outputs = self.model(**inputs)
+            inputs = {k: v.to(device=self.device) for k, v in inputs.items()}
+            with torch.autocast(**self._autocast_kwargs):
+                outputs = self.model(**inputs)
             img = F.normalize(outputs.image_embeds, p=2, dim=-1)
             txt = F.normalize(outputs.text_embeds, p=2, dim=-1)
             batch_scores = (img * txt).sum(dim=-1)
@@ -276,6 +280,10 @@ class _PickScoreWrapper:
         self.model.to(device)
         self.model.eval()
         self.device = device
+        self._autocast_kwargs = {
+            "device_type": device.split(":")[0],
+            "dtype": dtype,
+        }
 
     @torch.no_grad()
     def __call__(
@@ -291,19 +299,19 @@ class _PickScoreWrapper:
                 images=batch_images, padding=True, truncation=True,
                 max_length=77, return_tensors="pt",
             )
-            img_inputs = {k: v.to(self.device) for k, v in img_inputs.items()}
+            img_inputs = {k: v.to(device=self.device) for k, v in img_inputs.items()}
 
             txt_inputs = self.processor(
                 text=batch_prompts, padding=True, truncation=True,
                 max_length=77, return_tensors="pt",
             )
-            txt_inputs = {k: v.to(self.device) for k, v in txt_inputs.items()}
+            txt_inputs = {k: v.to(device=self.device) for k, v in txt_inputs.items()}
 
-            img_emb = _extract_feature_tensor(self.model.get_image_features(**img_inputs))
-            img_emb = img_emb / img_emb.norm(p=2, dim=-1, keepdim=True)
-
-            txt_emb = _extract_feature_tensor(self.model.get_text_features(**txt_inputs))
-            txt_emb = txt_emb / txt_emb.norm(p=2, dim=-1, keepdim=True)
+            with torch.autocast(**self._autocast_kwargs):
+                img_emb = _extract_feature_tensor(self.model.get_image_features(**img_inputs))
+                img_emb = img_emb / img_emb.norm(p=2, dim=-1, keepdim=True)
+                txt_emb = _extract_feature_tensor(self.model.get_text_features(**txt_inputs))
+                txt_emb = txt_emb / txt_emb.norm(p=2, dim=-1, keepdim=True)
 
             batch_scores = logit_scale * (txt_emb * img_emb).sum(dim=-1)
             batch_scores = batch_scores / 26  # normalize to [0, 1]
