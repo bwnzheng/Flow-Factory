@@ -17,7 +17,7 @@ import os
 import re
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, ClassVar, Optional, Tuple, List, Union, Literal, Iterable, Set
+from typing import Dict, Any, ClassVar, Optional, Tuple, List, Union, Literal, Iterable, Set, cast
 from dataclasses import dataclass, field, asdict, fields
 from contextlib import contextmanager, nullcontext, ExitStack
 import logging
@@ -65,6 +65,7 @@ from ..utils.checkpoint import (
 )
 from ..samples import BaseSample
 from .latent_geometry import LatentAxes, infer_latent_axes
+from .model_bundle import RoutedComponentProxy
 from ..ema import EMAModuleWrapper
 from ..scheduler import (
     load_scheduler as _load_scheduler,
@@ -236,16 +237,37 @@ class BaseAdapter(ABC):
 
     # ============================== Component Accessors ==============================
     # ---------------------------------- Wrappers ----------------------------------
-    def _unwrap(self, model: torch.nn.Module) -> torch.nn.Module:
-        """Get the unwrapped model from accelerator."""
+    def _unwrap(self, model: Union[torch.nn.Module, RoutedComponentProxy]) -> torch.nn.Module:
+        """Get the unwrapped model.
+
+        Peels a `RoutedComponentProxy` to its inner module first (the proxy is
+        installed as a component after `accelerator.prepare`), then strips the
+        accelerator wrapper (DDP/FSDP/DeepSpeed).
+        """
+        if isinstance(model, RoutedComponentProxy):
+            model = model.inner
         return self.accelerator.unwrap_model(model)
 
-    def set_component(self, name: str, module: torch.nn.Module):
-        """Set a component, storing it in the cache (maybe prepared) and keeping original in pipeline."""
-        self._components[name] = module
+    def set_component(self, name: str, module: Union[torch.nn.Module, RoutedComponentProxy]):
+        """Cache a component for this name.
+
+        Accepts either a real ``nn.Module`` (a prepared module, a freshly loaded
+        checkpoint module, etc.) or a transparent ``RoutedComponentProxy``
+        installed after ``accelerator.prepare``. The proxy is stored as an
+        ``nn.Module`` stand-in (it duck-types one), so the cast is the single,
+        encapsulated acknowledgement of that contract; readers via
+        ``get_component`` see a plain ``nn.Module``.
+        """
+        self._components[name] = cast(torch.nn.Module, module)
     
     def get_component(self, name: str) -> torch.nn.Module:
-        """Get a component, preferring the prepared version if available."""
+        """Get a component, preferring the prepared version if available.
+
+        After `accelerator.prepare`, trainable/bundled components resolve to a
+        transparent `RoutedComponentProxy` (a duck-typed nn.Module stand-in)
+        that routes forwards through the prepared root; use ``_unwrap`` to recover
+        the real module.
+        """
         return self._components.get(name) or getattr(self.pipeline, name)
 
     def get_component_unwrapped(self, name: str) -> torch.nn.Module:
@@ -1148,7 +1170,7 @@ class BaseAdapter(ABC):
             else:
                 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
-                state_dict = clone_tensors_for_torch_save(self.accelerator.unwrap_model(model).state_dict())
+                state_dict = clone_tensors_for_torch_save(self._unwrap(model).state_dict())
         elif self.accelerator.is_fsdp2:
             # FSDP/FSDP2
             from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
@@ -1194,7 +1216,7 @@ class BaseAdapter(ABC):
                 state_dict = model.state_dict()
         else:
             if unwrap:
-                model = self.accelerator.unwrap_model(model)
+                model = self._unwrap(model)
             state_dict = model.state_dict()
 
         # Filter by keys.
@@ -1233,7 +1255,7 @@ class BaseAdapter(ABC):
         save_directory: str,
     ) -> None:
         """Save LoRA adapter with distributed training support."""        
-        unwrapped = self.accelerator.unwrap_model(model)
+        unwrapped = self._unwrap(model)
         
         if not isinstance(unwrapped, PeftModel):
             logger.warning(f"Model is not a PeftModel, falling back to full save.")
@@ -1289,7 +1311,7 @@ class BaseAdapter(ABC):
                 'float32': torch.float32,
             }.get(dtype.lower(), torch.bfloat16)
 
-        unwrapped = self.accelerator.unwrap_model(model)
+        unwrapped = self._unwrap(model)
 
         # Check if casting is needed
         cast_needed = False
@@ -1460,7 +1482,11 @@ class BaseAdapter(ABC):
                     logger.info(f"No target modules applied to {comp_name}, skip saving")
                     continue
 
-                component = self.get_component(comp_name)
+                # Peel the RoutedComponentProxy to the inner module so the save
+                # path operates on the real diffusers/PeftModel (the prepared root
+                # is the ModelBundle; FSDP/DeepSpeed gathering happens inside
+                # get_state_dict on this member's params).
+                component = self._unwrap(self.get_component(comp_name))
                 
                 # Determine save path
                 comp_path = (
@@ -1594,7 +1620,7 @@ class BaseAdapter(ABC):
                 else path
             )
             
-            unwrapped = self.accelerator.unwrap_model(component)
+            unwrapped = self._unwrap(component)
             
             # Auto-detect checkpoint format
             adapter_config_path = os.path.join(comp_path, LORA_ADAPTER_CONFIG_NAME)
@@ -1693,7 +1719,7 @@ class BaseAdapter(ABC):
                 else path
             )
             
-            unwrapped = self.accelerator.unwrap_model(component)
+            unwrapped = self._unwrap(component)
             component_class = unwrapped.__class__
         
             # Try from_pretrained first
@@ -1811,7 +1837,7 @@ class BaseAdapter(ABC):
         """
         for comp_name in self.model_args.target_components:
             component = self.get_component(comp_name)
-            unwrapped = self.accelerator.unwrap_model(component)
+            unwrapped = self._unwrap(component)
 
             if isinstance(unwrapped, PeftModel):
                 merged = unwrapped.merge_and_unload()
