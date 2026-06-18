@@ -977,11 +977,17 @@ def _compute_pareto_front(points: np.ndarray) -> np.ndarray:
 
 
 def _hypervolume(pareto: np.ndarray, ref: np.ndarray) -> float:
-    """Exact hypervolume via recursive dimension reduction.
+    """Exact hypervolume indicator (Zitzler & Thiele, 1999) via HSO recursion.
 
-    For 2D: sort by x desc, sum rectangular slices.
-    For N>2: sort by first dim desc, for each point recurse on remaining
-    dims with the set of points above it.
+    Computes the Lebesgue measure of the union of axis-aligned orthants from
+    each Pareto point to the reference point:
+
+        HV = Λ( ⋃_{a∈A} [r₁,a₁] × [r₂,a₂] × … × [r_d,a_d] )
+
+    Implementation: sort by first dimension ascending, sweep left to right.
+    At each point i, the vertical slice ``(x_i − x_{i-1})`` is multiplied by
+    the (d−1)-dimensional hypervolume of the points at or to its right
+    (``pts[i:]``), per the Hypervolume by Slicing Objectives (HSO) scheme.
     """
     if len(pareto) == 0:
         return 0.0
@@ -990,8 +996,8 @@ def _hypervolume(pareto: np.ndarray, ref: np.ndarray) -> float:
     if dim == 1:
         return max(pareto[:, 0].max() - ref[0], 0.0)
 
-    # Sort by first dimension descending
-    pts = pareto[np.argsort(-pareto[:, 0])]
+    # Sort by first dimension ascending (sweep left to right)
+    pts = pareto[np.argsort(pareto[:, 0])]
     hv = 0.0
     prev_x = ref[0]
 
@@ -999,8 +1005,11 @@ def _hypervolume(pareto: np.ndarray, ref: np.ndarray) -> float:
         x = pt[0]
         if x <= prev_x:
             continue
-        # Slice: points above this one in remaining dims
-        remaining = pts[: i + 1, 1:]  # include current point
+        # Take points at or to the right of the current one (pts[i:]).
+        # As we sweep left→right, the "height" of each vertical slice is
+        # determined by the best remaining (rightward) points in all other
+        # dimensions, not the already-processed leftward ones.
+        remaining = pts[i:, 1:]
         # Filter: only points that dominate ref in remaining dims
         mask = np.all(remaining >= ref[1:], axis=1)
         if mask.sum() > 0:
@@ -1032,6 +1041,17 @@ def plot_pareto_front_evolution(
     if len(steps) == 0:
         return
 
+    # --- Compute global reference point once from all steps ---
+    global_pts_list = []
+    for step in steps:
+        pts = all_steps.get(step, {}).get("points")
+        if pts is not None and pts.shape[1] >= dim and len(pts) > 0:
+            global_pts_list.append(pts[:, :dim])
+    if global_pts_list:
+        global_ref = np.vstack(global_pts_list).min(axis=0) - 0.01
+    else:
+        global_ref = np.zeros(dim)
+
     cumulative = []  # list of (N, D) arrays
     pareto_counts = []
     hypervolumes = []
@@ -1050,8 +1070,7 @@ def plot_pareto_front_evolution(
         pareto_counts.append(len(pareto))
 
         if len(pareto) > 0:
-            ref = all_pts.min(axis=0) - 0.01
-            hv = _hypervolume(pareto, ref)
+            hv = _hypervolume(pareto, global_ref)
         else:
             hv = 0.0
         hypervolumes.append(hv)
