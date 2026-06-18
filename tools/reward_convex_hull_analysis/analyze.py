@@ -67,6 +67,19 @@ from tools.reward_convex_hull_analysis.rewards_reader import (
 
 @dataclass
 class AnalysisConfig:
+    # Sensible defaults for pipeline kwargs so users don't have to specify
+    # every field in gen_kwargs.  Merged with YAML values in _parse_config.
+    GEN_DEFAULTS: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "num_inference_steps": 50,
+            "guidance_scale": 1.0,
+            "height": 512,
+            "width": 512,
+        },
+        init=False,
+        repr=False,
+    )
+
     run_name: str = ""
     save_dir: str = "saves"
 
@@ -115,7 +128,7 @@ def _parse_config(path: str) -> AnalysisConfig:
         max_prompts=ev.get("max_prompts", 0),
         num_samples=ev.get("num_samples", 4),
         gen_batch_size=ev.get("gen_batch_size", 16),
-        gen_kwargs=ev.get("gen_kwargs", {}),
+        gen_kwargs={**AnalysisConfig.GEN_DEFAULTS, **ev.get("gen_kwargs", {})},
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
         dtype=model.get("dtype", "bfloat16"),
         device=model.get("device", "cuda"),
@@ -343,6 +356,7 @@ def _dispatch_plots(
                     "output_path": os.path.join(out_dir, "reward_percentiles.png"),
                     "title": f"{title_prefix} Reward Percentile Trends",
                     "label_name": label_name,
+                    "window_size": window_size,
                 },
             ),
             (
@@ -378,6 +392,7 @@ def _dispatch_plots(
                         "output_path": os.path.join(out_dir, "reward_percentiles.png"),
                         "title": f"{title_prefix} Reward Percentile Trends",
                         "label_name": label_name,
+                        "window_size": window_size,
                     },
                 ),
                 (
@@ -408,12 +423,15 @@ def _run_images_analysis(
     reward_names: List[str],
     dataset_filter: List[str],
     output_subdir: str,
+    preloaded_images: Optional[Dict[int, List[Dict[str, Any]]]] = None,
 ) -> Optional[Dict[int, Dict[str, Any]]]:
     """Read rollout images from media.jsonl, score with reward models, plot.
 
     Args:
         dataset_filter: e.g. ``["train"]`` or ``["eval"]``.
         output_subdir: e.g. ``"train_images"`` or ``"eval_images"``.
+        preloaded_images: If provided, skip ``load_media_samples`` and reuse
+            this data (avoids duplicate I/O from ``_check_cache``).
     """
     label = output_subdir.replace("_", " ").title()
     log_dir = os.path.join(config.save_dir, run_name, "logs")
@@ -421,18 +439,22 @@ def _run_images_analysis(
         print(f"[{label}] Logs directory not found: {log_dir} — skipping")
         return None
 
-    print(
-        f"[{label}] Loading samples from {log_dir}/media.jsonl " f"(datasets={dataset_filter}) ..."
-    )
-    try:
-        images_by_step = load_media_samples(
-            log_dir,
-            datasets=dataset_filter,
-            max_per_step=config.images_max_images_per_step,
+    if preloaded_images is not None:
+        images_by_step = preloaded_images
+    else:
+        print(
+            f"[{label}] Loading samples from {log_dir}/media.jsonl "
+            f"(datasets={dataset_filter}) ..."
         )
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"  [ERROR] {exc}")
-        return None
+        try:
+            images_by_step = load_media_samples(
+                log_dir,
+                datasets=dataset_filter,
+                max_per_step=config.images_max_images_per_step,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"  [ERROR] {exc}")
+            return None
 
     if not images_by_step:
         print(f"  No images found for dataset filter {dataset_filter}.")
@@ -491,11 +513,11 @@ def _run_images_analysis(
             chunk_images = [Image.open(path) for path, _, _ in chunk_entries]
             chunk_prompts = [prompt for _, prompt, _ in chunk_entries]
 
-            chunk_rewards = _score_images(computer, chunk_images, chunk_prompts)
-
-            # Close file handles promptly
-            for img in chunk_images:
-                img.close()
+            try:
+                chunk_rewards = _score_images(computer, chunk_images, chunk_prompts)
+            finally:
+                for img in chunk_images:
+                    img.close()
 
             # Scatter back to per-step buffers
             for i, (_, _, step) in enumerate(chunk_entries):
@@ -583,8 +605,10 @@ def _run_evaluation(
     all_epochs = [e for e, _ in checkpoints]
 
     print(f"[Evaluation] Found {len(checkpoints)} checkpoints: {all_epochs}")
-    print(f"  Prompts: {len(prompts)}, samples per prompt: {config.num_samples}"
-          f" → {expected_per_ckpt} images per checkpoint")
+    print(
+        f"  Prompts: {len(prompts)}, samples per prompt: {config.num_samples}"
+        f" → {expected_per_ckpt} images per checkpoint"
+    )
 
     ev_out = os.path.join(output_dir, "evaluation")
     os.makedirs(ev_out, exist_ok=True)
@@ -606,8 +630,10 @@ def _run_evaluation(
     uncached_epochs = [e for e in all_epochs if e not in cached_epochs]
 
     if cached_epochs:
-        print(f"  Reward cache hit for epochs {sorted(cached_epochs)}"
-              f" — skipping generation + scoring for these.")
+        print(
+            f"  Reward cache hit for epochs {sorted(cached_epochs)}"
+            f" — skipping generation + scoring for these."
+        )
 
     if not uncached_epochs:
         print(f"  All {len(all_epochs)} checkpoints fully cached.")
@@ -616,24 +642,30 @@ def _run_evaluation(
         # --- 2. Generate images for uncached checkpoints ---
         if config.num_gpus > 1:
             gen_runner = MultiGPUEvaluationRunner(
-                config.base_model, config.dtype,
-                num_gpus=config.num_gpus, device=config.device,
+                config.base_model,
+                config.dtype,
+                num_gpus=config.num_gpus,
+                device=config.device,
             )
-            print(f"  Using {config.num_gpus}-GPU generation"
-                  f" (batch size={config.gen_batch_size})")
+            print(
+                f"  Using {config.num_gpus}-GPU generation" f" (batch size={config.gen_batch_size})"
+            )
         else:
-            gen_runner = EvaluationRunner(config.base_model, config.dtype,
-                                          device=config.device)
+            gen_runner = EvaluationRunner(config.base_model, config.dtype, device=config.device)
 
         for epoch, ckpt_path in checkpoints:
             if epoch in cached_epochs:
                 continue
             print(f"  [Gen] Epoch={epoch}: generating images ...")
             gen_runner.generate_for_checkpoint(
-                ckpt_path, prompts, gen_dir, epoch,
+                ckpt_path,
+                prompts,
+                gen_dir,
+                epoch,
                 num_samples=config.num_samples,
                 gen_kwargs=config.gen_kwargs,
                 gen_batch_size=config.gen_batch_size,
+                base_seed=config.gen_kwargs.get("seed", 42),
             )
 
         # --- 3. Free generation pipelines ---
@@ -652,30 +684,28 @@ def _run_evaluation(
             start = len(all_images)
             for pi, p in enumerate(prompts):
                 for si in range(config.num_samples):
-                    full = os.path.join(gen_dir, f"checkpoint_{epoch}",
-                                        f"p{pi}_s{si}.png")
+                    full = os.path.join(gen_dir, f"checkpoint_{epoch}", f"p{pi}_s{si}.png")
                     all_images.append(Image.open(full))
                     all_prompt_texts.append(p)
             ckpt_image_ranges[epoch] = (start, len(all_images))
 
         total_images = len(all_images)
-        print(f"  Scoring {total_images} images across {len(uncached_epochs)}"
-              f" checkpoints ...")
+        print(f"  Scoring {total_images} images across {len(uncached_epochs)}" f" checkpoints ...")
 
         if all_images:
-            all_rewards = _score_images(computer, all_images, all_prompt_texts)
-            for img in all_images:
-                img.close()
-            # Split flat results back per checkpoint
-            for epoch in uncached_epochs:
-                start, end = ckpt_image_ranges[epoch]
-                epoch_rewards = {
-                    name: vals[start:end] for name, vals in all_rewards.items()
-                }
-                epoch_prompts = all_prompt_texts[start:end]
-                all_epoch_data[epoch] = _build_step_data(
-                    epoch, epoch_rewards, reward_names, epoch_prompts
-                )
+            try:
+                all_rewards = _score_images(computer, all_images, all_prompt_texts)
+                # Split flat results back per checkpoint
+                for epoch in uncached_epochs:
+                    start, end = ckpt_image_ranges[epoch]
+                    epoch_rewards = {name: vals[start:end] for name, vals in all_rewards.items()}
+                    epoch_prompts = all_prompt_texts[start:end]
+                    all_epoch_data[epoch] = _build_step_data(
+                        epoch, epoch_rewards, reward_names, epoch_prompts
+                    )
+            finally:
+                for img in all_images:
+                    img.close()
 
         # --- 5. Merge into cache ---
         _save_reward_cache(ev_out, all_epoch_data, reward_names)
@@ -888,11 +918,13 @@ def main(config_path: str):
     eval_cached = False
     ev_cached = False
 
-    def _check_cache(subdir: str, datasets: List[str]) -> bool:
+    # (cached, preloaded_images) — preloaded_images is reused to avoid a second
+    # load_media_samples() call inside _run_images_analysis.
+    def _check_cache(subdir: str, datasets: List[str]) -> Tuple[bool, Optional[Dict[int, Any]]]:
         out_dir = os.path.join(output_dir, subdir)
         log_dir = os.path.join(config.save_dir, run_name, "logs")
         if not os.path.isdir(log_dir):
-            return False
+            return False, None
         try:
             images_by_step = load_media_samples(
                 log_dir,
@@ -901,22 +933,24 @@ def main(config_path: str):
             )
             steps = sorted(images_by_step.keys())
             if not steps:
-                return False
+                return False, None
             cached_all = _load_reward_cache(out_dir, steps, reward_names)
             if cached_all is None or set(steps) != set(cached_all.keys()):
-                return False
+                return False, images_by_step
             for step in steps:
                 expected = len(images_by_step.get(step, []))
                 actual = cached_all[step].get("n_total", 0)
                 if expected != actual:
-                    return False
-            return True
+                    return False, images_by_step
+            return True, None  # cache valid, no need to keep loaded data
         except (FileNotFoundError, ValueError):
-            return False
+            return False, None
 
+    train_preloaded = None
+    eval_preloaded = None
     if config.images_analysis_enabled:
-        train_cached = _check_cache("train_images", ["train"])
-        eval_cached = _check_cache("eval_images", ["eval"])
+        train_cached, train_preloaded = _check_cache("train_images", ["train"])
+        eval_cached, eval_preloaded = _check_cache("eval_images", ["eval"])
 
     if config.evaluation_enabled:
         ev_out = os.path.join(output_dir, "evaluation")
@@ -976,6 +1010,7 @@ def main(config_path: str):
             reward_names,
             dataset_filter=["train"],
             output_subdir="train_images",
+            preloaded_images=train_preloaded,
         )
         print(f"  [Timing] Train images analysis: {time.time() - t0:.1f}s")
 
@@ -991,6 +1026,7 @@ def main(config_path: str):
             reward_names,
             dataset_filter=["eval"],
             output_subdir="eval_images",
+            preloaded_images=eval_preloaded,
         )
         print(f"  [Timing] Eval images analysis: {time.time() - t0:.1f}s")
 

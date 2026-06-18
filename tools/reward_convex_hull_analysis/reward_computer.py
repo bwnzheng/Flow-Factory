@@ -92,7 +92,12 @@ class StandaloneRewardComputer:
                 dtype=self.dtype,
             )
         if rtype == "PickScore":
-            return _PickScoreWrapper(device=self.device, dtype=self.dtype)
+            return _PickScoreWrapper(
+                device=self.device,
+                dtype=self.dtype,
+                processor_name=cfg.get("processor_name", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"),
+                model_name=cfg.get("model_name", "yuvalkirstain/PickScore_v1"),
+            )
         raise ValueError(f"Unknown reward type: {rtype}")
 
     @torch.no_grad()
@@ -116,9 +121,9 @@ class StandaloneRewardComputer:
         """
         self._ensure_loaded()
         assert self._models is not None
-        assert len(images) == len(prompts), (
-            f"Mismatch: {len(images)} images vs {len(prompts)} prompts"
-        )
+        assert len(images) == len(
+            prompts
+        ), f"Mismatch: {len(images)} images vs {len(prompts)} prompts"
         results: Dict[str, List[float]] = {}
         for name in self._names:
             results[name] = self._models[name](images, prompts, batch_size)
@@ -156,7 +161,9 @@ class MultiGPUComputer:
         self._computers: List[StandaloneRewardComputer] = []
         for i in range(num_gpus):
             self._computers.append(
-                StandaloneRewardComputer(reward_configs, device=f"{self._device_type}:{i}", dtype=dtype)
+                StandaloneRewardComputer(
+                    reward_configs, device=f"{self._device_type}:{i}", dtype=dtype
+                )
             )
 
     @property
@@ -183,13 +190,19 @@ class MultiGPUComputer:
                 break
             chunks.append((i, images[start:end], prompts[start:end]))
 
+        if not chunks:
+            return {rname: [] for rname in self.reward_names}
+
         # Parallel scoring
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
             futures = {
                 executor.submit(
-                    self._score_chunk, gpu_idx,
+                    self._score_chunk,
+                    gpu_idx,
                     self._computers[gpu_idx],
-                    chunk_images, chunk_prompts, batch_size,
+                    chunk_images,
+                    chunk_prompts,
+                    batch_size,
                 ): gpu_idx
                 for gpu_idx, chunk_images, chunk_prompts in chunks
             }
@@ -247,8 +260,8 @@ class _CLIPWrapper:
     ) -> List[float]:
         scores: List[float] = []
         for i in range(0, len(images), batch_size):
-            batch_images = images[i:i + batch_size]
-            batch_prompts = prompts[i:i + batch_size]
+            batch_images = images[i : i + batch_size]
+            batch_prompts = prompts[i : i + batch_size]
             inputs = self.processor(
                 text=batch_prompts,
                 images=batch_images,
@@ -272,11 +285,15 @@ class _CLIPWrapper:
 
 
 class _PickScoreWrapper:
-    def __init__(self, device: str, dtype: torch.dtype):
-        processor_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
-        model_path = "yuvalkirstain/PickScore_v1"
-        self.processor = CLIPProcessor.from_pretrained(processor_path)
-        self.model = CLIPModel.from_pretrained(model_path, torch_dtype=dtype)
+    def __init__(
+        self,
+        device: str,
+        dtype: torch.dtype,
+        processor_name: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+        model_name: str = "yuvalkirstain/PickScore_v1",
+    ):
+        self.processor = CLIPProcessor.from_pretrained(processor_name)
+        self.model = CLIPModel.from_pretrained(model_name, torch_dtype=dtype)
         self.model.to(device)
         self.model.eval()
         self.device = device
@@ -292,18 +309,24 @@ class _PickScoreWrapper:
         logit_scale = self.model.logit_scale.exp()
         scores: List[float] = []
         for i in range(0, len(images), batch_size):
-            batch_images = images[i:i + batch_size]
-            batch_prompts = prompts[i:i + batch_size]
+            batch_images = images[i : i + batch_size]
+            batch_prompts = prompts[i : i + batch_size]
 
             img_inputs = self.processor(
-                images=batch_images, padding=True, truncation=True,
-                max_length=77, return_tensors="pt",
+                images=batch_images,
+                padding=True,
+                truncation=True,
+                max_length=77,
+                return_tensors="pt",
             )
             img_inputs = {k: v.to(device=self.device) for k, v in img_inputs.items()}
 
             txt_inputs = self.processor(
-                text=batch_prompts, padding=True, truncation=True,
-                max_length=77, return_tensors="pt",
+                text=batch_prompts,
+                padding=True,
+                truncation=True,
+                max_length=77,
+                return_tensors="pt",
             )
             txt_inputs = {k: v.to(device=self.device) for k, v in txt_inputs.items()}
 

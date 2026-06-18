@@ -12,12 +12,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-from diffusers import StableDiffusion3Pipeline
 from peft import PeftModel
 from PIL import Image
 
+from diffusers import StableDiffusion3Pipeline
 from flow_factory.scheduler import FlowMatchEulerDiscreteSDEScheduler
-
 
 # ---------------------------------------------------------------------------
 # Checkpoint discovery
@@ -56,6 +55,7 @@ def _resolve_dtype(dtype_str: str) -> torch.dtype:
 
 _pipe_load_lock = threading.Lock()
 
+
 def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
     """Load SD3.5 pipeline with FlowMatch ODE scheduler.
 
@@ -66,10 +66,12 @@ def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
     dtype = _resolve_dtype(dtype_str)
     with _pipe_load_lock:
         pipe = StableDiffusion3Pipeline.from_pretrained(
-            base_model, torch_dtype=dtype,
+            base_model,
+            torch_dtype=dtype,
         )
         scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
-            pipe.scheduler.config, dynamics_type="ODE",
+            pipe.scheduler.config,
+            dynamics_type="ODE",
         )
         scheduler.eval()
         pipe.scheduler = scheduler
@@ -80,7 +82,9 @@ def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
 def apply_lora(pipe, checkpoint_path: str, dtype: torch.dtype):
     """Load LoRA weights as a PEFT adapter (no merge)."""
     pipe.transformer = PeftModel.from_pretrained(
-        pipe.transformer, checkpoint_path, torch_dtype=dtype,
+        pipe.transformer,
+        checkpoint_path,
+        torch_dtype=dtype,
     )
 
 
@@ -114,12 +118,10 @@ def _scan_missing_images(
             rel = f"checkpoint_{epoch}/p{pi}_s{si}.png"
             full = os.path.join(output_dir, rel)
             paths.append(rel)
-            if os.path.isfile(full):
-                sample_idx += 1
-            else:
+            if not os.path.isfile(full):
                 seed = base_seed + sample_idx
                 missing.append((pi, si, seed))
-                sample_idx += 1
+            sample_idx += 1
     return paths, missing
 
 
@@ -136,6 +138,8 @@ def _generate_batches(
     dev_type = runner.device.split(":")[0] if ":" in runner.device else runner.device
     use_autocast = dev_type in ("cuda", "npu")
 
+    # Drop "seed" from pipeline kwargs — per-image seeds are set explicitly
+    # via torch.Generator, so a global "seed" key would be ignored or conflict.
     pipe_kwargs = {k: v for k, v in gen_kwargs.items() if k != "seed"}
     pipe_kwargs["output_type"] = "pil"
 
@@ -144,8 +148,7 @@ def _generate_batches(
         batch = missing[batch_start : batch_start + gen_batch_size]
         batch_prompts = [prompts[pi] for pi, _, _ in batch]
         batch_generators = [
-            torch.Generator(device=runner.device).manual_seed(seed)
-            for _, _, seed in batch
+            torch.Generator(device=runner.device).manual_seed(seed) for _, _, seed in batch
         ]
 
         pipe_kwargs["generator"] = batch_generators
@@ -199,6 +202,7 @@ class EvaluationRunner:
         num_samples: int = 4,
         gen_kwargs: Optional[Dict[str, Any]] = None,
         gen_batch_size: int = 16,
+        base_seed: int = 42,
     ) -> List[str]:
         """Load LoRA, generate images with batched inference, save to disk.
 
@@ -207,43 +211,48 @@ class EvaluationRunner:
         generated in batches — one ``pipe()`` call produces up to
         *gen_batch_size* images in a single forward pass.
 
+        Args:
+            base_seed: Deterministic seed offset; the seed for image slot *k*
+                is ``base_seed + k`` regardless of which images already exist
+                on disk (ensures idempotent resume).
+
         Returns:
             List of relative file paths.
         """
         if gen_kwargs is None:
             gen_kwargs = {}
-        defaults = {
-            "num_inference_steps": 50,
-            "guidance_scale": 1.0,
-            "height": 512,
-            "width": 512,
-        }
-        kw = {**defaults, **gen_kwargs}
 
         ckpt_dir = os.path.join(output_dir, f"checkpoint_{epoch}")
         os.makedirs(ckpt_dir, exist_ok=True)
 
         # --- Scan disk for already-existing images (resume) ---
         paths, missing = _scan_missing_images(
-            output_dir, epoch, prompts, num_samples,
-            base_seed=kw.get("seed", 42),
+            output_dir,
+            epoch,
+            prompts,
+            num_samples,
+            base_seed=base_seed,
         )
 
         if not missing:
             print(f"      All {len(paths)} images already generated — skipping.")
             return paths
 
-        print(f"      Generating {len(missing)}/{len(paths)} images "
-              f"(batch size={gen_batch_size}) ...")
+        print(
+            f"      Generating {len(missing)}/{len(paths)} images "
+            f"(batch size={gen_batch_size}) ..."
+        )
 
         # --- Load LoRA onto the pipeline → batch inference → unload ---
         apply_lora(self.pipe, checkpoint_path, self.dtype)
-        _generate_batches(self, prompts, output_dir, epoch, kw, gen_batch_size, missing)
-        self._unload_lora()
+        try:
+            _generate_batches(self, prompts, output_dir, epoch, gen_kwargs, gen_batch_size, missing)
+        finally:
+            self.unload_lora()
 
         return paths
 
-    def _unload_lora(self):
+    def unload_lora(self):
         """Unload LoRA adapter, keeping the base pipeline loaded."""
         if self._pipe is not None:
             unload_lora(self._pipe)
@@ -312,6 +321,7 @@ class MultiGPUEvaluationRunner:
         num_samples: int = 4,
         gen_kwargs: Optional[Dict[str, Any]] = None,
         gen_batch_size: int = 16,
+        base_seed: int = 42,
     ) -> List[str]:
         """Generate images, distributing work across GPUs.
 
@@ -325,8 +335,11 @@ class MultiGPUEvaluationRunner:
         os.makedirs(os.path.join(output_dir, f"checkpoint_{epoch}"), exist_ok=True)
 
         paths, missing = _scan_missing_images(
-            output_dir, epoch, prompts, num_samples,
-            base_seed=gen_kwargs.get("seed", 42),
+            output_dir,
+            epoch,
+            prompts,
+            num_samples,
+            base_seed=base_seed,
         )
 
         if not missing:
@@ -343,8 +356,10 @@ class MultiGPUEvaluationRunner:
                 chunks.append((gpu, chunk))
 
         total_missing = len(missing)
-        print(f"      Generating {total_missing}/{len(paths)} images "
-              f"({self._num_gpus} GPUs, batch size={gen_batch_size}) ...")
+        print(
+            f"      Generating {total_missing}/{len(paths)} images "
+            f"({self._num_gpus} GPUs, batch size={gen_batch_size}) ..."
+        )
 
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
             futures = {}
@@ -396,5 +411,7 @@ class MultiGPUEvaluationRunner:
 
         # Load LoRA → batch inference → unload
         apply_lora(runner.pipe, checkpoint_path, runner.dtype)
-        _generate_batches(runner, prompts, output_dir, epoch, gen_kwargs, gen_batch_size, chunk)
-        runner._unload_lora()
+        try:
+            _generate_batches(runner, prompts, output_dir, epoch, gen_kwargs, gen_batch_size, chunk)
+        finally:
+            runner.unload_lora()

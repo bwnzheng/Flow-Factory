@@ -38,14 +38,10 @@ def andrews_monotone_chain(points: np.ndarray) -> np.ndarray:
     if n <= 2:
         return points.copy()
 
-    # Remove duplicate points
-    pts = np.unique(points, axis=0)
-    if len(pts) <= 2:
-        return pts
-
-    # Sort by x, then y
-    idx = np.lexsort((pts[:, 1], pts[:, 0]))
-    pts = pts[idx]
+    # Sort by x, then y (duplicates are harmless — collinear points are
+    # naturally popped by the cross-product <= 0 check).
+    idx = np.lexsort((points[:, 1], points[:, 0]))
+    pts = points[idx]
 
     lower: List[int] = []
     for i in range(len(pts)):
@@ -114,8 +110,11 @@ def plot_convex_hulls_2d(
     )
 
     steps = sorted(all_steps.keys())
+    if not steps:
+        plt.close(fig)
+        return
     cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=min(steps), vmax=max(steps)) if steps else plt.Normalize(0, 1)
+    norm = plt.Normalize(vmin=min(steps), vmax=max(steps))
 
     for pair_idx, (di, dj) in enumerate(pairs):
         ax = axes[pair_idx // cols][pair_idx % cols]
@@ -125,7 +124,7 @@ def plot_convex_hulls_2d(
         for step in steps:
             data = all_steps[step]
             pts = data.get("points")
-            if pts is None or len(pts) < di or len(pts) < dj:
+            if pts is None or pts.shape[1] <= max(di, dj) or len(pts) == 0:
                 continue
             color = cmap(norm(step))
             xy = np.column_stack([pts[:, di], pts[:, dj]])
@@ -227,7 +226,7 @@ def plot_combined_convex_hulls_2d(
             for step in steps:
                 data = src_data[step]
                 pts = data.get("points")
-                if pts is None:
+                if pts is None or pts.shape[1] <= max(di, dj) or len(pts) == 0:
                     continue
                 color = cmap(norm(step))
                 xy = np.column_stack([pts[:, di], pts[:, dj]])
@@ -302,13 +301,16 @@ def plot_distribution_1d(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     steps = sorted(all_steps.keys())
-    cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=min(steps), vmax=max(steps)) if steps else plt.Normalize(0, 1)
+    if not steps:
+        return
 
     # Strip plot
     fig, (ax_strip, ax_dist) = plt.subplots(
         2, 1, figsize=(10, 8), gridspec_kw={"height_ratios": [1, 2]}
     )
+
+    cmap = plt.cm.viridis
+    norm = plt.Normalize(vmin=min(steps), vmax=max(steps))
 
     # Upper panel: strip + range bar per step
     for step in steps:
@@ -395,6 +397,9 @@ def plot_convex_hulls_faceted(
         lo, hi = step_range
         steps = [s for s in steps if lo <= s <= hi]
 
+    if not steps:
+        return
+
     if len(steps) > max_steps:
         stride = max(len(steps) // max_steps, 1)
         selected = steps[::stride][:max_steps]
@@ -425,7 +430,7 @@ def plot_convex_hulls_faceted(
         rows, cols, figsize=(3.5 * cols, 3.2 * rows), squeeze=False, sharex=True, sharey=True
     )
     cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=min(steps), vmax=max(steps)) if steps else plt.Normalize(0, 1)
+    norm = plt.Normalize(vmin=min(steps), vmax=max(steps))
 
     for pi, step in enumerate(selected):
         ax = axes[pi // cols][pi % cols]
@@ -441,9 +446,9 @@ def plot_convex_hulls_faceted(
 
         # Different marker per prompt
         if prompt_idx is not None and len(prompt_idx) == len(xy):
-            for pi in sorted(set(prompt_idx.tolist())):
-                mask = prompt_idx == pi
-                marker = _PROMPT_MARKERS[pi % len(_PROMPT_MARKERS)]
+            for prompt_i in sorted(set(prompt_idx.tolist())):
+                mask = prompt_idx == prompt_i
+                marker = _PROMPT_MARKERS[prompt_i % len(_PROMPT_MARKERS)]
                 ax.scatter(
                     xy[mask, 0],
                     xy[mask, 1],
@@ -452,7 +457,7 @@ def plot_convex_hulls_faceted(
                     s=8,
                     marker=marker,
                     edgecolors="none",
-                    label=f"P{pi}" if pi < 8 else None,
+                    label=f"P{prompt_i}" if prompt_i < 8 else None,
                 )
         else:
             ax.scatter(xy[:, 0], xy[:, 1], color=color, alpha=0.55, s=8, edgecolors="none")
@@ -475,18 +480,10 @@ def plot_convex_hulls_faceted(
     for pi in range(n, rows * cols):
         axes[pi // cols][pi % cols].set_visible(False)
 
-    # Apply unified axis limits (sharex/sharey propagates from first visible subplot)
+    # sharex/sharey=True propagates limits to all subplots — setting on any is enough
     if xlim is not None:
-        for row in range(rows):
-            for col in range(cols):
-                ax = axes[row][col]
-                if ax.get_visible():
-                    ax.set_xlim(xlim)
-                    ax.set_ylim(ylim)
-                    break
-            else:
-                continue
-            break
+        axes[0][0].set_xlim(xlim)
+        axes[0][0].set_ylim(ylim)
 
     fig.supxlabel(reward_names[di], fontsize=10)
     fig.supylabel(reward_names[dj], fontsize=10)
@@ -530,6 +527,9 @@ def plot_hull_area_curve(
 
     fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 4 * rows), squeeze=False)
     steps = sorted(all_steps.keys())
+    if not steps:
+        plt.close(fig)
+        return
 
     for pi, (di, dj) in enumerate(pairs):
         ax = axes[pi // cols][pi % cols]
@@ -591,6 +591,8 @@ def plot_convex_hulls_windows(
         windows.append((mid, w_steps))
         lo = hi
     nw = len(windows)
+    if nw == 0:
+        return
 
     dim = len(reward_names)
     pairs = [(i, j) for i in range(dim) for j in range(i + 1, dim)]
@@ -635,16 +637,27 @@ def plot_convex_hulls_windows(
             ax.set_xlim(x0, x1)
             ax.set_ylim(y0, y1)
 
-        for wi, (mid, w_steps) in enumerate(windows):
+        # --- Pre-pool points per window (reused for hull + centroid) ---
+        window_xy: List[Optional[np.ndarray]] = []
+        for _wi, (_mid, w_steps) in enumerate(windows):
             pool = []
             for s in w_steps:
                 pts = all_steps.get(s, {}).get("points")
                 if pts is not None and pts.shape[1] > max(di, dj) and len(pts) > 0:
                     pool.append(pts)
-            if not pool:
+            if pool:
+                combined = np.vstack(pool)
+                window_xy.append(np.column_stack([combined[:, di], combined[:, dj]]))
+            else:
+                window_xy.append(None)
+
+        # --- Draw hulls + centroids in one pass ---
+        centroids: List[Tuple[Optional[float], Optional[float]]] = []
+        for wi, (_mid, w_steps) in enumerate(windows):
+            xy = window_xy[wi]
+            if xy is None:
+                centroids.append((None, None))
                 continue
-            combined = np.vstack(pool)
-            xy = np.column_stack([combined[:, di], combined[:, dj]])
 
             c = colors[wi]
             label = f"{w_steps[0]}-{w_steps[-1]}"
@@ -663,29 +676,15 @@ def plot_convex_hulls_windows(
                         alpha=0.85,
                     )
 
-        fontsize = 6 if nw <= 20 else 5
-        ax.legend(fontsize=fontsize, loc="best", title="Window", title_fontsize=7)
-
-        # --- Draw centroid drift lines ---
-        centroids = []
-        for wi, (mid, w_steps) in enumerate(windows):
-            pool = []
-            for s in w_steps:
-                pts = all_steps.get(s, {}).get("points")
-                if pts is not None and pts.shape[1] > max(di, dj) and len(pts) > 0:
-                    pool.append(pts)
-            if not pool:
-                centroids.append((None, None))
-                continue
-            combined = np.vstack(pool)
-            cx = np.mean(combined[:, di])
-            cy = np.mean(combined[:, dj])
+            cx = np.mean(xy[:, 0])
+            cy = np.mean(xy[:, 1])
             centroids.append((cx, cy))
-            # Mark centroid with a small dot
-            c = colors[wi]
             ax.plot(
                 cx, cy, "o", color=c, markersize=6, markeredgecolor="white", markeredgewidth=0.5
             )
+
+        fontsize = 6 if nw <= 20 else 5
+        ax.legend(fontsize=fontsize, loc="best", title="Window", title_fontsize=7)
 
         # Connect consecutive valid centroids with dashed lines
         valid = [(cx, cy) for cx, cy in centroids if cx is not None]
@@ -896,6 +895,8 @@ def plot_reward_percentiles(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     steps = sorted(all_steps.keys())
+    if not steps:
+        return
 
     # Build windows — or fall back to per-step when forced or too few steps
     windows: List[Tuple[float, List[int]]] = []
@@ -937,8 +938,8 @@ def plot_reward_percentiles(
         ax.fill_between(xs, q25s, q75s, alpha=0.25, color="#2196F3", label="25%-75%")
         ax.plot(xs, medians, "o-", color="#1565C0", linewidth=1.5, markersize=4, label="Median")
         ax.plot(xs, means, "s-", color="#0D47A1", linewidth=1.2, markersize=4, label="Mean")
-        ax.plot(xs, mins, "--", color="#90CAF9", linewidth=0.7, label="Min")
-        ax.plot(xs, maxs, "--", color="#90CAF9", linewidth=0.7, label="Max")
+        ax.plot(xs, mins, ":", color="#90CAF9", linewidth=0.7, label="Min")
+        ax.plot(xs, maxs, "--", color="#FFAB91", linewidth=0.7, label="Max")
 
         ax.set_ylabel(rname)
         ax.grid(True, alpha=0.3)

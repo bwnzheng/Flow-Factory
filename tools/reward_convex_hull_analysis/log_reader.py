@@ -3,7 +3,7 @@
 Reads ``logs/media.jsonl`` from a training run directory.  Each line is a JSON
 object with keys: ``step``, ``key``, ``path``, ``prompt``, ``reward``.
 
-The ``path`` field is relative to ``{log_dir}/images/``.
+The ``path`` field is relative to ``{log_dir}`` (e.g. ``images/step_0.png``).
 """
 
 from __future__ import annotations
@@ -85,12 +85,14 @@ def load_media_samples(
 
             if step not in grouped:
                 grouped[step] = []
-            grouped[step].append({
-                "image_path": img_path,
-                "prompt": prompt,
-                "tag_idx": tag_idx,
-                "dataset": dataset,
-            })
+            grouped[step].append(
+                {
+                    "image_path": img_path,
+                    "prompt": prompt,
+                    "tag_idx": tag_idx,
+                    "dataset": dataset,
+                }
+            )
             step_counts[step] = step_counts.get(step, 0) + 1
 
     # Sort within each step by tag_idx
