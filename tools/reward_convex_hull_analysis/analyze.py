@@ -26,7 +26,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import yaml
@@ -69,16 +69,12 @@ from tools.reward_convex_hull_analysis.rewards_reader import (
 class AnalysisConfig:
     # Sensible defaults for pipeline kwargs so users don't have to specify
     # every field in gen_kwargs.  Merged with YAML values in _parse_config.
-    GEN_DEFAULTS: Dict[str, Any] = field(
-        default_factory=lambda: {
-            "num_inference_steps": 50,
-            "guidance_scale": 1.0,
-            "height": 512,
-            "width": 512,
-        },
-        init=False,
-        repr=False,
-    )
+    GEN_DEFAULTS: ClassVar[Dict[str, Any]] = {
+        "num_inference_steps": 50,
+        "guidance_scale": 1.0,
+        "height": 512,
+        "width": 512,
+    }
 
     run_name: str = ""
     save_dir: str = "saves"
