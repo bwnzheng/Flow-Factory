@@ -67,56 +67,65 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
     # =========================== Sampling ==================================
 
     def sample(self) -> List[BaseSample]:
-        self.reward_buffer.clear()
         if not self._crossover_enabled:
             return self.generate_samples(
                 reward_buffer=self.reward_buffer,
                 compute_log_prob=False,
                 trajectory_indices=[-1],
             )
+
+        # Union of all possible crossover step positions — same pattern as
+        # GRPO-Guard.  Enables batched inference via generate_samples().
         num_steps = self.training_args.num_inference_steps
         cxo_cfg = self.training_args.crossover
+        lo = (
+            int(cxo_cfg.step_range[0] * num_steps)
+            if cxo_cfg.step_sampling != "fixed"
+            else (
+                int(cxo_cfg.step * num_steps) if isinstance(cxo_cfg.step, float) else cxo_cfg.step
+            )
+        )
+        hi = int(cxo_cfg.step_range[1] * num_steps) if cxo_cfg.step_sampling != "fixed" else lo
+        lo, hi = max(1, lo), min(num_steps - 1, hi)
+        ext_idx = sorted(set(range(lo, hi + 1)) | {num_steps})
+
+        # Reuse the standard sampling pipeline — generate_samples() handles
+        # adapter.rollout(), dataloader.set_epoch(), the inference loop,
+        # metadata injection, and CPU offloading.  Per-prompt cxo_step
+        # assignment is injected via the sample_batch() override below.
+        return self.generate_samples(
+            reward_buffer=self.reward_buffer,
+            compute_log_prob=False,
+            trajectory_indices=ext_idx,
+        )
+
+    def sample_batch(
+        self, batch: Dict[str, Any], reward_buffer=None, **extra_inference_kwargs
+    ) -> List[BaseSample]:
+        """Like the base implementation, but also assigns per-prompt cxo_step."""
+        cxo_cfg = self.training_args.crossover
         base_seed = self.training_args.seed + self.epoch
+        num_steps = self.training_args.num_inference_steps
 
-        samples: List[BaseSample] = []
-        data_iter = iter(self.dataloader)
-        with torch.no_grad(), self.autocast():
-            for _ in tqdm(
-                range(self.training_args.num_batches_per_epoch),
-                desc=f"Epoch {self.epoch} Sampling (crossover-nft)",
-                disable=not self.show_progress_bar,
-            ):
-                batch = next(data_iter)
-                prompts = batch.get("prompt")
-                B = len(prompts) if prompts is not None and isinstance(prompts, list) else 1
+        prompts = batch.get("prompt")
+        B = len(prompts) if prompts is not None and isinstance(prompts, list) else 1
 
-                for i in range(B):
-                    p = prompts[i] if prompts is not None and isinstance(prompts, list) else str(i)
-                    h = int(hashlib.sha256(p.encode()).hexdigest()[:8], 16)
-                    gen = create_generator((base_seed + h) % (2**31), device="cpu")
-                    cxo_step = sample_crossover_step(cxo_cfg, num_steps, generator=gen)
+        cxo_steps: List[int] = []
+        for i in range(B):
+            p = prompts[i] if prompts is not None and isinstance(prompts, list) else str(i)
+            h = int(hashlib.sha256(p.encode()).hexdigest()[:8], 16)
+            gen = create_generator((base_seed + h) % (2**31), device="cpu")
+            cxo_steps.append(sample_crossover_step(cxo_cfg, num_steps, generator=gen))
 
-                    single = {
-                        k: v[i : i + 1] if isinstance(v, torch.Tensor) else v
-                        for k, v in batch.items()
-                    }
-                    single["prompt"] = [p] if prompts is not None else None
-                    kwargs = filter_kwargs(
-                        self.adapter.inference,
-                        **{
-                            **self.training_args,
-                            "compute_log_prob": False,
-                            "trajectory_indices": [cxo_step, -1],
-                            **single,
-                        },
-                    )
-                    parents = self.adapter.inference(**kwargs)
-                    for s in parents:
-                        s.extra_kwargs["_cxo_step"] = cxo_step
-                    self._inject_batch_metadata(parents, single)
-                    self._maybe_offload_samples_to_cpu(parents)
-                    samples.extend(parents)
-                    self.reward_buffer.add_samples(parents)
+        # Standard batched inference (uses trajectory_indices from extra_inference_kwargs)
+        samples = super().sample_batch(batch, reward_buffer=reward_buffer, **extra_inference_kwargs)
+
+        # Assign per-prompt cxo_step to each of the K group members
+        K = self.training_args.group_size
+        expanded_steps = [s for s in cxo_steps for _ in range(K)]
+        for s, step in zip(samples, expanded_steps):
+            s.extra_kwargs["_cxo_step"] = step
+
         return samples
 
     # =========================== Feedback =================================
