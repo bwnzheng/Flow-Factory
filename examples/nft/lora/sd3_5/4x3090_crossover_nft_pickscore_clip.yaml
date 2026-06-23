@@ -118,7 +118,7 @@ train:
     include_parents: true         # Keep original parents alongside children
     # Selection & filtering
     selective_crossover: true     # Only crossover non-dominated parents
-    pareto_filter: true           # Remove dominated samples before optimize
+    pareto_filter: false           # Remove dominated samples before optimize
     log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration

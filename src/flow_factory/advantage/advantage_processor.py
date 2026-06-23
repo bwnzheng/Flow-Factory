@@ -99,6 +99,7 @@ class AdvantageProcessor:
 
         # Crossover / Pareto state
         self._pareto_enabled = pareto_config is not None and pareto_config.get("enabled", False)
+        self._log_crossover_rewards: bool = False  # set by crossover trainers via log_rewards option
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
 
@@ -583,7 +584,7 @@ class AdvantageProcessor:
         reward_keys = list(gathered_rewards.keys())
 
         # ---- Crossover stats (before any filtering) ----
-        if self._pareto_enabled:
+        if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
         # ---- Pareto filtering ----
@@ -735,7 +736,7 @@ class AdvantageProcessor:
         reward_keys = list(gathered_rewards.keys())
 
         # ---- Crossover stats ----
-        if self._pareto_enabled:
+        if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
         # ---- Pareto filtering ----

@@ -54,9 +54,15 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 **cxo_args.strategy_kwargs,
             )
             self._selective = getattr(cxo_args, "selective_crossover", False)
+            self._include_parents = getattr(cxo_args, "include_parents", True)
             if getattr(cxo_args, "pareto_filter", False):
                 self.advantage_processor._pareto_enabled = True
-            logger.info(f"CrossoverNFT: strategy={cxo_args.strategy} selective={self._selective}")
+            if getattr(cxo_args, "log_rewards", True):
+                self.advantage_processor._log_crossover_rewards = True
+            logger.info(
+                f"CrossoverNFT: strategy={cxo_args.strategy} selective={self._selective} "
+                f"include_parents={self._include_parents}"
+            )
 
     # =========================== Sampling ==================================
 
@@ -121,11 +127,15 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         if self._crossover_enabled:
             children, child_rewards = self._crossover_augment(samples, rewards)
             if children:
-                samples.extend(children)
-                rewards = {
-                    k: torch.cat([rewards[k].to(device), child_rewards[k].to(device)], dim=0)
-                    for k in rewards
-                }
+                if self._include_parents:
+                    samples.extend(children)
+                    rewards = {
+                        k: torch.cat([rewards[k].to(device), child_rewards[k].to(device)], dim=0)
+                        for k in rewards
+                    }
+                else:
+                    samples[:] = children
+                    rewards = {k: v.to(device) for k, v in child_rewards.items()}
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()
         if stats:
@@ -303,9 +313,15 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(
             my_children, store_to_samples=False, split="pointwise"
         )
+        # Build local_child_gids matching the same ci formula used in the
+        # denoising loop above.  _filter_children uses these to index into
+        # my_children / child_rewards_dict (both local, length ≈ chunk).
+        local_child_gids = [
+            child_gids[min(rank * chunk + i, M - 1)] for i in range(len(my_children))
+        ]
         # Keep only non-dominated children (per group, vs parents)
         my_children, child_rewards_dict = self._filter_children(
-            my_children, child_gids, child_rewards_dict, g_rewards, g_ids
+            my_children, local_child_gids, child_rewards_dict, g_rewards, g_ids
         )
         child_rewards = {
             k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
