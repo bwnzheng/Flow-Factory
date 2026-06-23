@@ -288,26 +288,24 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             al = final.expand(n_stored, *final.shape[1:]).clone()
             lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
             lmap[-1] = n_stored - 1
-            child = BaseSample(
-                timesteps=tpl.timesteps.clone() if tpl.timesteps is not None else None,
-                all_latents=al,
-                latent_index_map=lmap,
-                image=imgs,
-                prompt=tpl.prompt,
-                prompt_ids=tpl.prompt_ids,
-                prompt_embeds=tpl.prompt_embeds,
-                negative_prompt=tpl.negative_prompt,
-                negative_prompt_ids=tpl.negative_prompt_ids,
-                negative_prompt_embeds=tpl.negative_prompt_embeds,
-                height=tpl.height,
-                width=tpl.width,
-                source=tpl.source,
-                source_id=tpl.source_id,
-            )
-            child.extra_kwargs["is_crossover_child"] = True
-            child.extra_kwargs["crossover_step"] = step
-            if getattr(tpl, "pooled_prompt_embeds", None) is not None:
-                child.extra_kwargs["pooled_prompt_embeds"] = tpl.pooled_prompt_embeds
+            # Inherit all parent fields (including model-specific ones like
+            # pooled_prompt_embeds) via to_dict/from_dict, overriding only
+            # the fields that differ for the child.
+            parent_dict = tpl.to_dict()
+            parent_dict["all_latents"] = al
+            parent_dict["latent_index_map"] = lmap
+            parent_dict["image"] = imgs
+            parent_dict["log_probs"] = None
+            parent_dict["log_prob_index_map"] = None
+            parent_dict["_unique_id"] = None  # recompute from child content
+            parent_dict["applicable_rewards"] = set()
+
+            extra = parent_dict.get("extra_kwargs", {})
+            extra["is_crossover_child"] = True
+            extra["crossover_step"] = step
+            parent_dict["extra_kwargs"] = extra
+
+            child = type(tpl).from_dict(parent_dict)
             my_children.append(child)
 
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(

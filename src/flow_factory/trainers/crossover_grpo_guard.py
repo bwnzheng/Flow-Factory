@@ -440,27 +440,24 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                     pos += 1
         merged_lp = torch.stack(lp_list) if lp_list else torch.empty(0, device=device)
 
-        child = BaseSample(
-            timesteps=parent.timesteps.clone() if parent.timesteps is not None else None,
-            all_latents=merged_al,
-            latent_index_map=lm,
-            log_probs=merged_lp,
-            log_prob_index_map=lpm2,
-            image=image,
-            prompt=parent.prompt,
-            prompt_ids=parent.prompt_ids,
-            prompt_embeds=parent.prompt_embeds,
-            negative_prompt=parent.negative_prompt,
-            negative_prompt_ids=parent.negative_prompt_ids,
-            negative_prompt_embeds=parent.negative_prompt_embeds,
-            height=parent.height,
-            width=parent.width,
-            source=parent.source,
-            source_id=parent.source_id,
-        )
-        child.extra_kwargs["is_crossover_child"] = True
-        child.extra_kwargs["crossover_step"] = cxo_step
-        child.extra_kwargs["next_latents_mean"] = _merge_cb("next_latents_mean")
-        if getattr(parent, "pooled_prompt_embeds", None) is not None:
-            child.extra_kwargs["pooled_prompt_embeds"] = parent.pooled_prompt_embeds
+        # Inherit all parent fields (including model-specific ones) via
+        # to_dict/from_dict, overriding only the fields that differ.
+        parent_dict = parent.to_dict()
+        parent_dict["all_latents"] = merged_al
+        parent_dict["latent_index_map"] = lm
+        parent_dict["log_probs"] = merged_lp
+        parent_dict["log_prob_index_map"] = lpm2
+        parent_dict["image"] = image
+        parent_dict["_unique_id"] = None  # recompute from child content
+        parent_dict["applicable_rewards"] = set()
+
+        extra = parent_dict.get("extra_kwargs", {})
+        extra["is_crossover_child"] = True
+        extra["crossover_step"] = cxo_step
+        merged_nlm = _merge_cb("next_latents_mean")
+        if merged_nlm is not None:
+            extra["next_latents_mean"] = merged_nlm
+        parent_dict["extra_kwargs"] = extra
+
+        child = type(parent).from_dict(parent_dict)
         return child
