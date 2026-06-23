@@ -1,0 +1,161 @@
+# Crossover GRPO-Guard with SD3.5 on 4x3090
+# Based on 4xnpu_guard_pickscore_clip.yaml, adding crossover augmentation.
+#
+# Usage:
+#   ff-train examples/grpo/lora/sd3_5/4xnpu_crossover_guard_pickscore_clip.yaml
+
+# Environment Configuration
+launcher: "accelerate"  # Options: accelerate
+config_file: config/deepspeed/deepspeed_zero2.yaml  # Path to distributed config file (optional)
+num_processes: 4  # Number of processes to launch (overrides config file)
+main_process_port: 29500
+mixed_precision: "bf16"  # Options: no, fp16, bf16
+
+# Data Configuration
+data:
+  datasets:
+    - name: default  # Unique identifier (used in metrics, caching, reward routing)
+      dataset_dir: "dataset/pickscore"  # Folder with train.jsonl / test.jsonl
+      train:  # Training participation config
+        weight: 1  # Mixing weight (integer); ratio with other sources determines batch allocation
+        max_dataset_size: 1024  # Cap on number of training samples for this source
+      eval: {}  # Eval participation (inherits shared `eval:` section settings)
+  preprocessing_batch_size: 8  # Batch size for preprocessing
+  dataloader_num_workers: 16  # Number of workers for DataLoader
+  force_reprocess: false  # Force reprocessing of the dataset
+  cache_dir: "~/.cache/flow_factory/datasets" # Cache directory for preprocessed datasets
+  sampler_type: "auto"  # Options: auto, distributed_k_repeat, group_contiguous
+
+# Model Configuration
+model:
+  finetune_type: 'lora' # Options: full, lora
+  lora_rank : 32
+  lora_alpha : 64
+  target_modules: "default" # Options: all, default, or list of module names like ["to_k", "to_q", "to_v", "to_out.0"]
+  model_name_or_path: "stabilityai/stable-diffusion-3.5-medium"  # HuggingFace model ID or local path
+  model_type: "sd3-5"
+  resume_path: null # Local path or HF repo id (e.g. 'owner/repo[/subdir][@rev]') for previous checkpoint/lora adapter
+  resume_type: null # Options: lora, full, state. Null to auto-detect based on `finetune_type`
+  # attn_backend: '_flash_3_hub' # Attention backend for training.
+
+log:
+  run_name: null  # Run name (auto: {model_type}_{finetune_type}_{trainer_type}_{timestamp})
+  project: "Flow-Factory"  # Project name for logging
+  logging_backend: "tensorboard"  # Options: wandb, swanlab, tensorboard, none
+  save_dir: "saves/"  # Directory to save model checkpoints and logs
+  save_freq: 20  # Save frequency in epochs (0 to disable)
+  save_model_only: true  # Save only the model weights (not optimizer, scheduler, etc.)
+
+# Training Configuration
+train:
+  # Trainer settings
+  trainer_type: 'crossover-grpo-guard' # ← CHANGED from 'grpo-guard'
+  advantage_aggregation: 'sum' # Options: 'sum', 'gdpo' (GRPO-Guard: matched to upstream, standard GRPO advantage)
+  # Clipping
+  clip_range: 2.0e-6  # PPO/GRPO clipping range (GRPO-Guard: tighter due to RatioNorm)
+  adv_clip_range: 5.0  # Advantage clipping range
+  # KL div
+  kl_type: 'v-based' # Options: 'x-based', 'v-based'
+  kl_beta: 0 # KL divergence coefficient - 0 to disable and save memory. Set ~1e-2 for 'x-based' and ~1e-3 for 'v-based'.
+  ref_param_device: 'cuda' # Options: cpu, cuda ('cuda' means use accelerator device; 'npu' is NOT a valid value)
+
+  # Sampling settings
+  resolution: 512  # Can be int or [height, width]
+  num_inference_steps: 10  # Number of timesteps
+  guidance_scale: 4.5  # Guidance scale for sampling
+
+  # Batch and sampling
+  per_device_batch_size: 1  # Batch size per device
+  group_size: 8  # Group size for GRPO sampling
+  global_std: false  # Use global std for advantage normalization (GRPO-Guard: per-group std with RatioNorm)
+  unique_sample_num_per_epoch: 48  # Unique samples per group
+  gradient_step_per_epoch: 2  # Gradient steps per epoch
+  gradient_accumulation_steps: auto  # Options: auto, or positive integer. When set, `gradient_step_per_epoch` is ignored.
+
+  # Optimization
+  learning_rate: 1.0e-4  # Initial learning rate
+  adam_weight_decay: 1.0e-4  # AdamW weight decay
+  adam_betas: [0.9, 0.999]  # AdamW betas
+  adam_epsilon: 1.0e-8  # AdamW epsilon
+  max_grad_norm: 1.0  # Max gradient norm for clipping
+
+  # EMA
+  ema_decay: 0.99  # EMA decay rate (0 to disable)
+  ema_update_interval: 4  # EMA update interval (in epochs)
+  ema_device: "cuda"  # Device to store EMA model (options: cpu, cuda)
+
+  # Gradient checkpointing
+  enable_gradient_checkpointing: true  # Save memory during optimize forward
+
+  # Seed
+  seed: 42  # Random seed
+
+  # Stopping
+  max_epochs: 101
+
+  # ---- Crossover configuration ----
+  crossover:
+    enabled: true                 # false → fall back to standard GRPO-Guard
+    # Step sampling
+    step_sampling: "uniform"      # 'fixed': use `step`; 'uniform': sample from `step_range`
+    step: 0.5                     # Used when step_sampling='fixed'
+    step_range: [0.3, 0.6]        # Narrow range → fewer stored positions, less GPU memory
+    # Crossover strategy
+    strategy: "block"             # 'uniform' | 'convex' | 'block'
+    augmentation_factor: 1.25      # M/K ratio: ceil(K * factor) children from non-dominated parents
+    strategy_kwargs:
+      mixing_ratio: 0.3           # Fraction of blocks from primary parent
+      block_size: 8               # Spatial block size (H, W)
+      block_size_c: 4             # Channel block size (C). 1=no ch split, 4=blocks of 4ch
+    include_parents: true         # Keep original parents alongside children
+    # Selection & filtering
+    selective_crossover: true     # Only crossover non-dominated parents
+    pareto_filter: true           # Remove dominated samples before optimize
+    log_rewards: true             # Log per-reward parent vs child stats
+
+# Scheduler Configuration
+scheduler:
+  dynamics_type: "Flow-SDE"  # Options: Flow-SDE, Dance-SDE, CPS, ODE
+  noise_level: 0.8  # Noise level for sampling
+  num_sde_steps: 2  # Number of noise steps
+  seed: 42  # Scheduler seed (for noise step selection)
+
+# Evaluation settings
+eval:
+  debug_eval: true 
+  resolution: 512  # Evaluation resolution
+  per_device_batch_size: 2  # Eval batch size
+  guidance_scale: 4.5  # Guidance scale for sampling
+  num_inference_steps: 40  # Number of eval timesteps
+  eval_freq: 20  # Eval frequency in epochs (0 to disable)
+  seed: 42  # Eval seed
+
+# Reward Model Configuration
+rewards:
+  - name: "pick_score"
+    reward_model: "PickScore"
+    weight: 0.5
+    batch_size: 16
+    device: "cuda"
+    dtype: bfloat16
+  - name: "alignment"
+    reward_model: "CLIP"
+    weight: 1.0
+    batch_size: 16
+    device: "cuda"
+    dtype: bfloat16
+
+# Optional Evaluation Reward Models, default to all training reward models if not specified
+eval_rewards:
+  - name: "pick_score"
+    reward_model: "PickScore"
+    weight: 0.5
+    batch_size: 8
+    device: "cuda"
+    dtype: bfloat16
+  - name: "alignment"
+    reward_model: "CLIP"
+    weight: 1.0
+    batch_size: 8
+    device: "cuda"
+    dtype: bfloat16

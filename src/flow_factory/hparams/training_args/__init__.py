@@ -29,6 +29,11 @@ from .awm import AWMTrainingArguments
 from .dpo import DPOTrainingArguments
 from .dgpo import DGPOTrainingArguments
 from .crd import CRDTrainingArguments
+from .crossover import (
+    CrossoverArguments,
+    CrossoverGRPOGuardTrainingArguments,
+    CrossoverNFTTrainingArguments,
+)
 from .opd import DiffusionOPDTrainingArguments, TeacherConfig
 
 __all__ = [
@@ -41,6 +46,9 @@ __all__ = [
     "DPOTrainingArguments",
     "DGPOTrainingArguments",
     "CRDTrainingArguments",
+    "CrossoverArguments",
+    "CrossoverGRPOGuardTrainingArguments",
+    "CrossoverNFTTrainingArguments",
     "DiffusionOPDTrainingArguments",
     "TeacherConfig",
     "get_training_args_class",

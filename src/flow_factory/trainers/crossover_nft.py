@@ -1,0 +1,344 @@
+# Copyright 2026 Jayce-Ping
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# ...
+
+# src/flow_factory/trainers/crossover_nft.py
+"""
+CrossoverNFT — DiffusionNFT trainer with global-group crossover augmentation.
+
+Parents generated during ``sample()`` store crossover-step latents.  In
+``prepare_feedback()``, rewards are gathered globally, non-dominated parents
+identified per group, and crossover children generated with equal share across
+all ranks.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections import defaultdict
+from typing import Any, Dict, List
+
+import numpy as np
+import torch
+import tqdm as tqdm_
+
+from ..hparams import CrossoverNFTTrainingArguments
+from ..samples import BaseSample
+from ..utils.base import create_generator, filter_kwargs
+from ..utils.logger_utils import setup_logger
+from .crossover import (
+    compute_pareto_mask,
+    create_crossover_strategy,
+    run_denoising_phase,
+    sample_crossover_step,
+    select_non_dominated_parents,
+)
+from .nft import DiffusionNFTTrainer
+
+tqdm = tqdm_.tqdm
+logger = setup_logger(__name__)
+
+
+class CrossoverNFTTrainer(DiffusionNFTTrainer):
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.training_args: CrossoverNFTTrainingArguments
+        cxo_args = self.training_args.crossover
+        self._crossover_enabled = cxo_args.enabled
+        if self._crossover_enabled:
+            self._crossover_strategy = create_crossover_strategy(
+                name=cxo_args.strategy,
+                augmentation_factor=cxo_args.augmentation_factor,
+                **cxo_args.strategy_kwargs,
+            )
+            self._selective = getattr(cxo_args, "selective_crossover", False)
+            if getattr(cxo_args, "pareto_filter", False):
+                self.advantage_processor._pareto_enabled = True
+            logger.info(f"CrossoverNFT: strategy={cxo_args.strategy} selective={self._selective}")
+
+    # =========================== Sampling ==================================
+
+    def sample(self) -> List[BaseSample]:
+        self.reward_buffer.clear()
+        if not self._crossover_enabled:
+            return self.generate_samples(
+                reward_buffer=self.reward_buffer,
+                compute_log_prob=False,
+                trajectory_indices=[-1],
+            )
+        num_steps = self.training_args.num_inference_steps
+        cxo_cfg = self.training_args.crossover
+        base_seed = self.training_args.seed + self.epoch
+
+        samples: List[BaseSample] = []
+        data_iter = iter(self.dataloader)
+        with torch.no_grad(), self.autocast():
+            for _ in tqdm(
+                range(self.training_args.num_batches_per_epoch),
+                desc=f"Epoch {self.epoch} Sampling (crossover-nft)",
+                disable=not self.show_progress_bar,
+            ):
+                batch = next(data_iter)
+                prompts = batch.get("prompt")
+                B = len(prompts) if prompts is not None and isinstance(prompts, list) else 1
+
+                for i in range(B):
+                    p = prompts[i] if prompts is not None and isinstance(prompts, list) else str(i)
+                    h = int(hashlib.sha256(p.encode()).hexdigest()[:8], 16)
+                    gen = create_generator((base_seed + h) % (2**31), device="cpu")
+                    cxo_step = sample_crossover_step(cxo_cfg, num_steps, generator=gen)
+
+                    single = {
+                        k: v[i : i + 1] if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
+                    single["prompt"] = [p] if prompts is not None else None
+                    kwargs = filter_kwargs(
+                        self.adapter.inference,
+                        **{
+                            **self.training_args,
+                            "compute_log_prob": False,
+                            "trajectory_indices": [cxo_step, -1],
+                            **single,
+                        },
+                    )
+                    parents = self.adapter.inference(**kwargs)
+                    for s in parents:
+                        s.extra_kwargs["_cxo_step"] = cxo_step
+                    self._inject_batch_metadata(parents, single)
+                    self._maybe_offload_samples_to_cpu(parents)
+                    samples.extend(parents)
+                    self.reward_buffer.add_samples(parents)
+        return samples
+
+    # =========================== Feedback =================================
+
+    def prepare_feedback(self, samples: List[BaseSample]) -> None:
+        device = self.accelerator.device
+        rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
+        if self._crossover_enabled:
+            children, child_rewards = self._crossover_augment(samples, rewards)
+            if children:
+                samples.extend(children)
+                rewards = {
+                    k: torch.cat([rewards[k].to(device), child_rewards[k].to(device)], dim=0)
+                    for k in rewards
+                }
+        self.compute_advantages(samples, rewards, store_to_samples=True)
+        stats = self.advantage_processor.pop_all_stats()
+        if stats:
+            self.log_data(stats, step=self.step)
+
+    # ======================================================================
+    # Crossover augmentation (global gather → per-group → distributed)
+    # ======================================================================
+
+    @torch.no_grad()
+    def _crossover_augment(
+        self, parent_samples: List[BaseSample], parent_rewards: Dict[str, torch.Tensor]
+    ) -> tuple:
+        device = self.accelerator.device
+        num_steps = self.training_args.num_inference_steps
+        rank = self.accelerator.process_index
+        world = self.accelerator.num_processes
+        B = len(parent_samples)
+
+        # 1. Gather rewards + unique_ids globally (same pattern as collect_group_rewards)
+        reward_keys = sorted(parent_rewards.keys())
+        packed = torch.stack(
+            [torch.as_tensor(parent_rewards[k], device=device) for k in reward_keys]
+            + [
+                torch.as_tensor(
+                    [s.unique_id for s in parent_samples], dtype=torch.float32, device=device
+                )
+            ],
+            dim=1,
+        )
+        gathered = self.accelerator.gather(packed)
+        g_rewards = {k: gathered[:, i].cpu().numpy() for i, k in enumerate(reward_keys)}
+        g_ids = gathered[:, -1].cpu().numpy().astype(np.int64)
+
+        # 2. Non-dominated parents per group (global)
+        if self._selective:
+            nondom = select_non_dominated_parents(
+                {k: torch.from_numpy(v) for k, v in g_rewards.items()}, g_ids.tolist()
+            )
+        else:
+            nondom = np.ones(len(g_ids), dtype=bool)
+
+        # 3. All_gather (latent, gid, step) of non-dominated parents
+        local_nondom = nondom[rank * B : (rank + 1) * B]
+        local_latents, local_gids, local_steps = [], [], []
+        for i, s in enumerate(parent_samples):
+            if local_nondom[i]:
+                step = s.extra_kwargs["_cxo_step"]
+                idx = int(s.latent_index_map[step])
+                local_latents.append(s.all_latents[idx].to(device))
+                local_gids.append(s.unique_id)
+                local_steps.append(step)
+
+        cnt_t = torch.tensor([len(local_latents)], device=device)
+        max_cnt = max(self.accelerator.gather(cnt_t).max().item(), 1)
+        dummy = (
+            torch.zeros_like(local_latents[0]) if local_latents else torch.zeros(1, device=device)
+        )
+        padded_l = (
+            (local_latents + [dummy] * (max_cnt - len(local_latents)))
+            if local_latents
+            else [dummy] * max_cnt
+        )
+        all_lat = self.accelerator.gather(torch.stack(padded_l))
+        all_gid = (
+            self.accelerator.gather(
+                torch.tensor(
+                    local_gids + [-1] * (max_cnt - len(local_gids)), dtype=torch.long, device=device
+                )
+            )
+            .cpu()
+            .tolist()
+        )
+        all_step = (
+            self.accelerator.gather(
+                torch.tensor(
+                    local_steps + [-1] * (max_cnt - len(local_steps)),
+                    dtype=torch.long,
+                    device=device,
+                )
+            )
+            .cpu()
+            .tolist()
+        )
+        all_cnt = self.accelerator.gather(cnt_t).cpu().tolist()
+
+        entries = []  # (latent, gid, step)
+        off = 0
+        for cnt in all_cnt:
+            for j in range(cnt):
+                entries.append((all_lat[off + j], all_gid[off + j], all_step[off + j]))
+            off += max_cnt
+
+        # 4. Per-group crossover
+        groups: Dict[tuple, List[torch.Tensor]] = defaultdict(list)
+        for latent, gid, step in entries:
+            groups[(gid, step)].append(latent)
+
+        child_latents, child_steps, child_gids = [], [], []
+        for (gid, step), gl in groups.items():
+            if len(gl) < 2:
+                continue
+            gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
+            out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
+            child_latents.append(out.child_latents)
+            child_steps.extend([step] * out.child_latents.shape[0])
+            child_gids.extend([gid] * out.child_latents.shape[0])
+
+        if not child_latents:
+            empty = {k: torch.zeros(0, device=device) for k in reward_keys}
+            return [], empty
+
+        child_latents = torch.cat(child_latents, dim=0).float()
+        M = child_latents.shape[0]
+
+        # 5. Distributed denoising: each rank generates ceil(M/W) children
+        chunk = int(np.ceil(M / world))
+        my_children: List[BaseSample] = []
+        tpl = parent_samples[0]
+        n_stored = tpl.all_latents.shape[0]
+        timesteps = tpl.timesteps.to(device)
+        batch = {
+            k: getattr(tpl, k, None).to(device)
+            for k in ("prompt_embeds", "prompt_ids", "pooled_prompt_embeds")
+            if getattr(tpl, k, None) is not None
+        }
+
+        for i in tqdm(
+            range(chunk),
+            desc=f"Child denoising (rank {rank})",
+            disable=not self.show_progress_bar,
+        ):
+            ci = min(rank * chunk + i, M - 1)
+            step = child_steps[ci]
+            with self.sampling_context():
+                final, _, _, _ = run_denoising_phase(
+                    adapter=self.adapter,
+                    accelerator=self.accelerator,
+                    autocast_ctx=self.autocast,
+                    latents=child_latents[ci : ci + 1],
+                    timesteps=timesteps,
+                    start_idx=step,
+                    end_idx=num_steps,
+                    batch=batch,
+                    training_args=self.training_args,
+                    compute_log_prob=False,
+                    collect_trajectory=False,
+                )
+            imgs = self.adapter.decode_latents(final)
+            al = final.expand(n_stored, *final.shape[1:]).clone()
+            lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
+            lmap[-1] = n_stored - 1
+            child = BaseSample(
+                timesteps=tpl.timesteps.clone() if tpl.timesteps is not None else None,
+                all_latents=al,
+                latent_index_map=lmap,
+                image=imgs,
+                prompt=tpl.prompt,
+                prompt_ids=tpl.prompt_ids,
+                prompt_embeds=tpl.prompt_embeds,
+                negative_prompt=tpl.negative_prompt,
+                negative_prompt_ids=tpl.negative_prompt_ids,
+                negative_prompt_embeds=tpl.negative_prompt_embeds,
+                height=tpl.height,
+                width=tpl.width,
+                source=tpl.source,
+                source_id=tpl.source_id,
+            )
+            child.extra_kwargs["is_crossover_child"] = True
+            child.extra_kwargs["crossover_step"] = step
+            if getattr(tpl, "pooled_prompt_embeds", None) is not None:
+                child.extra_kwargs["pooled_prompt_embeds"] = tpl.pooled_prompt_embeds
+            my_children.append(child)
+
+        child_rewards_dict = self.reward_buffer.rp.compute_rewards(
+            my_children, store_to_samples=False, split="pointwise"
+        )
+        # Keep only non-dominated children (per group, vs parents)
+        my_children, child_rewards_dict = self._filter_children(
+            my_children, child_gids, child_rewards_dict, g_rewards, g_ids
+        )
+        child_rewards = {
+            k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
+        }
+
+        logger.info(
+            f"Crossover: {len(groups)} groups, {len(entries)} parents "
+            f"→ {M} raw children, {len(my_children)} kept after filter (rank {rank})"
+        )
+        return my_children, child_rewards
+
+    # ======================================================================
+    # Child filtering
+
+    def _filter_children(self, children, child_gids, child_rewards_dict, g_rewards, g_ids):
+        """Keep only non-dominated children within each parent group."""
+        if not children:
+            return children, child_rewards_dict
+        reward_keys = list(g_rewards.keys())
+        child_gids_arr = np.array(child_gids, dtype=np.int64)
+        keep = np.ones(len(children), dtype=bool)
+        for gid in np.unique(child_gids_arr):
+            c_idx = np.where(child_gids_arr == gid)[0]
+            p_idx = np.where(g_ids == gid)[0]
+            if len(p_idx) == 0 or len(c_idx) == 0:
+                continue
+            # Build combined matrix: parents first, then children
+            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)
+            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])
+            combined = np.vstack([p_mat, c_mat])
+            pareto = compute_pareto_mask(combined)
+            # Children are the last len(c_idx) entries
+            keep[c_idx] = pareto[len(p_idx) :]
+        filtered_children = [c for i, c in enumerate(children) if keep[i]]
+        filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
+        return filtered_children, filtered_rewards

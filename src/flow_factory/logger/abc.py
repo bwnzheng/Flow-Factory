@@ -170,11 +170,28 @@ class Logger(ABC):
             if scalar is not None:
                 record[k] = scalar
             elif isinstance(v, (list, dict)):
-                record[k] = v
+                # Recursively strip non-serializable objects
+                cleaned = self._strip_media(v)
+                if cleaned is not None:
+                    record[k] = cleaned
         if len(record) > 1:
             filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
             with open(filepath, 'a') as f:
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    def _strip_media(self, value: Any) -> Any:
+        """Strip LogImage/LogVideo from nested structures, returning None for empty."""
+        if isinstance(value, (LogImage, LogVideo)):
+            return None
+        if isinstance(value, list):
+            result = [self._strip_media(v) for v in value]
+            result = [v for v in result if v is not None]
+            return result if result else None
+        if isinstance(value, dict):
+            result = {k: self._strip_media(v) for k, v in value.items()}
+            result = {k: v for k, v in result.items() if v is not None}
+            return result if result else None
+        return value
 
     # ---- main log flow ----
 

@@ -743,6 +743,11 @@ class BaseTrainer(ABC):
                     continue
                 buffer.clear()
                 all_samples: List[BaseSample] = []
+                debug_eval_enabled = getattr(self.eval_args, 'debug_eval', False)
+                if debug_eval_enabled:
+                    logger.info(
+                        f"Debug eval enabled: limiting to first 5 prompts for dataset '{dataset_name}'."
+                    )
 
                 # Merge per-dataset eval overrides with shared eval_args
                 ed_config = self._eval_dataset_configs[dataset_name]
@@ -768,6 +773,13 @@ class BaseTrainer(ABC):
                         **eval_kwargs,
                     )
                     all_samples.extend(samples)
+
+                    if debug_eval_enabled and len(all_samples) >= 5:
+                        all_samples = all_samples[:5]
+                        logger.info(
+                            f"Debug eval: reached 5 prompts, stopping evaluation for dataset '{dataset_name}'."
+                        )
+                        break
 
                 rewards = buffer.finalize(store_to_samples=True, split='pointwise')
 

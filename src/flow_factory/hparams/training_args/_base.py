@@ -59,6 +59,10 @@ class EvaluationArguments(ArgABC):
         default=10,
         metadata={"help": "Evaluation frequency (in epochs). 0 for no evaluation."},
     )
+    debug_eval: bool = field(
+        default=False,
+        metadata={"help": "If True, limit evaluation to the first 5 prompts only."},
+    )
 
     def __post_init__(self):
         if not self.resolution:
