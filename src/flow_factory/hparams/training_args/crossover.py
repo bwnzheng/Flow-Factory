@@ -108,6 +108,16 @@ class CrossoverArguments(ArgABC):
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
+    child_advantage_warmup_epochs: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Number of epochs over which to linearly warm up child advantages.  "
+                "At epoch 0, children have zero influence; after warmup_epochs they have "
+                "full influence.  Default 0 = no warmup (full influence from the start)."
+            )
+        },
+    )
 
 
 # ============================================================================

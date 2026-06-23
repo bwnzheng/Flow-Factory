@@ -102,6 +102,7 @@ class AdvantageProcessor:
         self._log_crossover_rewards: bool = False  # set by crossover trainers via log_rewards option
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
+        self._child_advantage_scale: float = 1.0  # set by crossover trainers for warmup
 
     # ------------------------------------------------------------------
     # Public API
@@ -592,6 +593,7 @@ class AdvantageProcessor:
         # None → all samples participate in mean/std (original behavior).
         pareto_mask: Optional[np.ndarray] = None
         norm_mask: Optional[np.ndarray] = None
+        child_mask: Optional[np.ndarray] = None
         crossover_active = self._pareto_enabled or self._log_crossover_rewards
         if crossover_active:
             child_mask = self._build_child_mask(samples, group_indices)
@@ -707,6 +709,10 @@ class AdvantageProcessor:
             reward_keys=reward_keys,
         )
 
+        # Scale child advantages for warmup (logged values remain unscaled).
+        if child_mask is not None and self._child_advantage_scale != 1.0:
+            advantages[child_mask] *= self._child_advantage_scale
+
         # Scatter & store
         advantages = self._to_local(advantages)
         if store_to_samples:
@@ -767,6 +773,7 @@ class AdvantageProcessor:
         # None → all samples participate in mean/std (original behavior).
         pareto_mask: Optional[np.ndarray] = None
         norm_mask: Optional[np.ndarray] = None
+        child_mask: Optional[np.ndarray] = None
         crossover_active = self._pareto_enabled or self._log_crossover_rewards
         if crossover_active:
             child_mask = self._build_child_mask(samples, group_indices)
@@ -846,6 +853,10 @@ class AdvantageProcessor:
             reward_keys=reward_keys,
             all_reward_advantages=all_reward_advantages,
         )
+
+        # Scale child advantages for warmup (logged values remain unscaled).
+        if child_mask is not None and self._child_advantage_scale != 1.0:
+            advantages[child_mask] *= self._child_advantage_scale
 
         # Scatter & store (GDPO)
         advantages = self._to_local(advantages)

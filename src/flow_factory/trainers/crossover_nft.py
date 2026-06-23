@@ -154,6 +154,14 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
 
+        # ---- Child advantage warmup ----
+        warmup_epochs = getattr(self.training_args.crossover, "child_advantage_warmup_epochs", 0)
+        if warmup_epochs > 0 and self._crossover_enabled:
+            scale = min(1.0, self.epoch / max(warmup_epochs, 1))
+            self.advantage_processor._child_advantage_scale = scale
+        else:
+            self.advantage_processor._child_advantage_scale = 1.0
+
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()
         if stats:
