@@ -587,11 +587,26 @@ class AdvantageProcessor:
         if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
-        # ---- Pareto filtering ----
+        # ---- Pareto filtering & child-mask (crossover-only paths) ----
+        # Non-crossover training: none of these gates activate, norm_mask stays
+        # None → all samples participate in mean/std (original behavior).
         pareto_mask: Optional[np.ndarray] = None
-        child_mask: Optional[np.ndarray] = None
-        if self._pareto_enabled:
-            pareto_mask, child_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+        norm_mask: Optional[np.ndarray] = None
+        crossover_active = self._pareto_enabled or self._log_crossover_rewards
+        if crossover_active:
+            child_mask = self._build_child_mask(samples, group_indices)
+            if self._pareto_enabled:
+                pareto_mask = self._filter_pareto(gathered_rewards, group_indices, child_mask)
+            # Children receive advantage values but do NOT participate in mean/std
+            # computation, so parent-only statistics are used for normalization.
+            if pareto_mask is not None:
+                norm_mask = pareto_mask & ~child_mask
+            else:
+                norm_mask = ~child_mask
+            # Safety: if norm_mask would exclude everything (e.g. children-only
+            # batch with include_parents=False), fall back to all samples.
+            if not norm_mask.any():
+                norm_mask = np.ones(len(group_indices), dtype=bool)
 
         # ---- Per-child reward details (after filtering decision) ----
         if self._log_crossover_rewards:
@@ -638,17 +653,19 @@ class AdvantageProcessor:
                 "at least one reward must apply to every source."
             )
 
-        # Group-normalise (vectorized via bincount), using only kept samples
+        # Group-normalise (vectorized via bincount).  When *norm_mask* is None
+        # (non-crossover training), all samples participate in mean/std.
+        # When set, children and/or dominated samples are excluded.
         if self.global_std:
-            if pareto_mask is not None:
-                _, std = self._global_mean_std(aggregated_rewards[pareto_mask])
-            else:
-                _, std = self._global_mean_std(aggregated_rewards)
+            values_for_std = (
+                aggregated_rewards if norm_mask is None else aggregated_rewards[norm_mask]
+            )
+            _, std = self._global_mean_std(values_for_std)
             num_groups = group_indices.max() + 1
             kept_w = (
-                pareto_mask.astype(np.float64)
-                if pareto_mask is not None
-                else np.ones(len(group_indices), dtype=np.float64)
+                np.ones(len(group_indices), dtype=np.float64)
+                if norm_mask is None
+                else norm_mask.astype(np.float64)
             )
             sums = np.bincount(
                 group_indices, weights=aggregated_rewards * kept_w, minlength=num_groups
@@ -658,7 +675,7 @@ class AdvantageProcessor:
             advantages = (aggregated_rewards - means[group_indices]) / std
         else:
             advantages = self._group_normalize_with_mask(
-                aggregated_rewards, group_indices, pareto_mask
+                aggregated_rewards, group_indices, norm_mask
             )
 
         all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
@@ -745,11 +762,26 @@ class AdvantageProcessor:
         if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
-        # ---- Pareto filtering ----
+        # ---- Pareto filtering & child-mask (crossover-only paths) ----
+        # Non-crossover training: none of these gates activate, norm_mask stays
+        # None → all samples participate in mean/std (original behavior).
         pareto_mask: Optional[np.ndarray] = None
-        child_mask: Optional[np.ndarray] = None
-        if self._pareto_enabled:
-            pareto_mask, child_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+        norm_mask: Optional[np.ndarray] = None
+        crossover_active = self._pareto_enabled or self._log_crossover_rewards
+        if crossover_active:
+            child_mask = self._build_child_mask(samples, group_indices)
+            if self._pareto_enabled:
+                pareto_mask = self._filter_pareto(gathered_rewards, group_indices, child_mask)
+            # Children receive advantage values but do NOT participate in mean/std
+            # computation, so parent-only statistics are used for normalization.
+            if pareto_mask is not None:
+                norm_mask = pareto_mask & ~child_mask
+            else:
+                norm_mask = ~child_mask
+            # Safety: if norm_mask would exclude everything (e.g. children-only
+            # batch with include_parents=False), fall back to all samples.
+            if not norm_mask.any():
+                norm_mask = np.ones(len(group_indices), dtype=bool)
 
         # ---- Per-child reward details (after filtering decision) ----
         if self._log_crossover_rewards:
@@ -764,17 +796,18 @@ class AdvantageProcessor:
         stack = np.stack([gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=0)
         self._assert_no_nan_at_applicable(stack, reward_keys, applicable, label="GDPO")
 
-        # Per-reward group-wise normalisation, restricted to applicable samples.
+        # Per-reward group-wise normalisation.  When *norm_mask* is None
+        # (non-crossover training), all applicable samples participate.
         all_reward_advantages = []
         for r_idx, key in enumerate(reward_keys):
             reward_array = gathered_rewards[key].astype(np.float64)
-            r_applicable = applicable[r_idx]
-            if pareto_mask is not None:
-                r_applicable = r_applicable & pareto_mask
+            r_applicable = (
+                applicable[r_idx] if norm_mask is None else applicable[r_idx] & norm_mask
+            )
             reward_adv = self._group_normalize(reward_array, group_indices, mask=r_applicable)
             all_reward_advantages.append(reward_adv * weight_matrix[r_idx])
 
-        # Combine and batch normalise (only over kept samples).
+        # Combine and batch normalise.
         weight_per_s = (applicable * weight_matrix).sum(axis=0)
         if pareto_mask is not None:
             kept_w = weight_per_s[pareto_mask]
@@ -789,10 +822,10 @@ class AdvantageProcessor:
             )
 
         combined_advantages = np.sum(all_reward_advantages, axis=0)
-        if pareto_mask is not None:
-            bn_mean, bn_std = self._global_mean_std(combined_advantages[pareto_mask])
-        else:
-            bn_mean, bn_std = self._global_mean_std(combined_advantages)
+        values_for_bn = (
+            combined_advantages if norm_mask is None else combined_advantages[norm_mask]
+        )
+        bn_mean, bn_std = self._global_mean_std(values_for_bn)
         advantages = (combined_advantages - bn_mean) / bn_std
 
         all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
@@ -864,20 +897,14 @@ class AdvantageProcessor:
         Independent of ``pareto_filter`` — gated solely by ``log_rewards``.
         When *pareto_mask* is None, all children are treated as kept.
         """
-        child_mask = np.array(
-            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
-            dtype=bool,
-        )
+        child_mask = self._build_child_mask(samples, group_indices)
         if not child_mask.any():
             return
 
+        # In distributed mode, gather sample metadata so
+        # _build_child_reward_details can index into the global arrays.
         gathered_len = len(group_indices)
-        if len(child_mask) < gathered_len:
-            # Distributed mode: gather child_mask and sample metadata so
-            # _build_child_reward_details can index into the global arrays.
-            local_flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
-            gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
-            child_mask = gathered_flag.astype(bool)
+        if len(samples) < gathered_len:
             samples = self._gather_sample_meta(samples, gathered_len)
 
         keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
@@ -964,19 +991,7 @@ class AdvantageProcessor:
             self._pending_crossover_stats = None
             return
 
-        child_mask = np.array(
-            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
-            dtype=bool,
-        )
-        # For distributed mode, gathered samples include all ranks → we only
-        # tag local samples.  Extend child_mask to gathered size.
-        gathered_len = len(group_indices)
-        if len(child_mask) < gathered_len:
-            # In distributed mode we don't have per-rank child tags for the
-            # gathered set.  Collect local child tags and gather them.
-            local_flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
-            gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
-            child_mask = gathered_flag.astype(bool)
+        child_mask = self._build_child_mask(samples, group_indices)
         parent_mask = ~child_mask
 
         stats: Dict[str, Any] = {}
@@ -1073,35 +1088,53 @@ class AdvantageProcessor:
                 float(child_disc.mean()) if nd > 0 else 0.0
             )
 
-    def _filter_pareto(
+    def _build_child_mask(
         self,
-        gathered_rewards: Dict[str, np.ndarray],
-        group_indices: np.ndarray,
         samples: List[BaseSample],
+        group_indices: np.ndarray,
     ) -> np.ndarray:
-        """Apply Pareto filtering and return a keep mask.
+        """Build a boolean mask identifying crossover child samples.
 
-        Returns:
-            ``(S,)`` bool — ``True`` for non-dominated (keep).
+        Returns ``(S,)`` bool array where ``True`` = child sample.
+        Handles both ``group_contiguous`` (local) and distributed modes.
         """
-        from ..trainers.crossover.pareto import filter_by_group
-
-        # Build parent mask for stats
         child_mask = np.array(
             [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
             dtype=bool,
         )
         gathered_len = len(group_indices)
         if len(child_mask) < gathered_len:
-            local_flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
+            local_flag = torch.tensor(
+                child_mask.astype(np.float32), device=self.accelerator.device
+            )
             gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
             child_mask = gathered_flag.astype(bool)
-        parent_mask = ~child_mask
+        return child_mask
 
+    def _filter_pareto(
+        self,
+        gathered_rewards: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+        child_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Apply Pareto filtering and return a keep mask.
+
+        Args:
+            gathered_rewards: Per-reward scores gathered across all ranks.
+            group_indices: ``(S,)`` integer group assignments.
+            child_mask: ``(S,)`` boolean — ``True`` for child samples
+                (pre-computed by caller via :meth:`_build_child_mask`).
+
+        Returns:
+            ``(S,)`` bool — ``True`` for non-dominated (keep).
+        """
+        from ..trainers.crossover.pareto import filter_by_group
+
+        parent_mask = ~child_mask
         pareto_mask, stats = filter_by_group(gathered_rewards, group_indices, parent_mask)
         self._pending_pareto_stats = {f"pareto/{k}": v for k, v in stats.items()}
 
-        return pareto_mask, child_mask
+        return pareto_mask
 
     def _mark_dominated_samples(
         self,
