@@ -801,9 +801,7 @@ class AdvantageProcessor:
         all_reward_advantages = []
         for r_idx, key in enumerate(reward_keys):
             reward_array = gathered_rewards[key].astype(np.float64)
-            r_applicable = (
-                applicable[r_idx] if norm_mask is None else applicable[r_idx] & norm_mask
-            )
+            r_applicable = applicable[r_idx] if norm_mask is None else applicable[r_idx] & norm_mask
             reward_adv = self._group_normalize(reward_array, group_indices, mask=r_applicable)
             all_reward_advantages.append(reward_adv * weight_matrix[r_idx])
 
@@ -822,9 +820,7 @@ class AdvantageProcessor:
             )
 
         combined_advantages = np.sum(all_reward_advantages, axis=0)
-        values_for_bn = (
-            combined_advantages if norm_mask is None else combined_advantages[norm_mask]
-        )
+        values_for_bn = combined_advantages if norm_mask is None else combined_advantages[norm_mask]
         bn_mean, bn_std = self._global_mean_std(values_for_bn)
         advantages = (combined_advantages - bn_mean) / bn_std
 
@@ -894,23 +890,29 @@ class AdvantageProcessor:
     ) -> None:
         """Log per-child reward details (kept vs discarded) for JSONL / pkl.
 
-        Independent of ``pareto_filter`` — gated solely by ``log_rewards``.
-        When *pareto_mask* is None, all children are treated as kept.
+        Always gathers child data across ranks — in any sampler mode children
+        are distributed by the denoising step, so a single rank only sees a
+        biased subset.
         """
-        child_mask = self._build_child_mask(samples, group_indices)
+        # Build local mask, then always gather so child records are complete.
+        local_mask = np.array(
+            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
+            dtype=bool,
+        )
+        gathered_len = len(group_indices)
+        if gathered_len > 0:
+            local_flag = torch.tensor(local_mask.astype(np.float32), device=self.accelerator.device)
+            gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
+            child_mask = gathered_flag.astype(bool)
+            samples = self._gather_sample_meta(samples, gathered_len)
+        else:
+            child_mask = local_mask
+
         if not child_mask.any():
             return
 
-        # In distributed mode, gather sample metadata so
-        # _build_child_reward_details can index into the global arrays.
-        gathered_len = len(group_indices)
-        if len(samples) < gathered_len:
-            samples = self._gather_sample_meta(samples, gathered_len)
-
         keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
-        self._build_child_reward_details(
-            gathered_rewards, child_mask, keep_mask, samples, group_indices
-        )
+        self._build_child_reward_details(gathered_rewards, child_mask, keep_mask, samples)
 
     def _gather_sample_meta(
         self, samples: List[BaseSample], gathered_len: int
@@ -1022,7 +1024,6 @@ class AdvantageProcessor:
         child_mask: np.ndarray,
         pareto_mask: np.ndarray,
         samples: List[BaseSample],
-        group_indices: np.ndarray,
     ) -> None:
         """Record per-child rewards with keep/discard status.
 
@@ -1039,9 +1040,18 @@ class AdvantageProcessor:
         child_indices = np.where(child_mask)[0]
         reward_keys = sorted(gathered_rewards.keys())
 
+        # Build prompt_idx from gathered metadata: sequential index per
+        # unique prompt (stable across calls because samples are sorted
+        # by unique_id).
+        seen: Dict[str, int] = {}
+        prompt_indices: List[int] = []
+        for s in samples:
+            p = s["prompt"] if isinstance(s, dict) else s.prompt
+            if p not in seen:
+                seen[p] = len(seen)
+            prompt_indices.append(seen[p])
+
         # ---- Per-child records (prompt index + crossover provenance) ----
-        # *samples* may be BaseSample objects (local) or lightweight dicts
-        # (gathered via _gather_sample_meta in distributed mode).
         child_records: List[Dict[str, Any]] = []
         for ci in child_indices:
             meta = samples[ci]
@@ -1056,7 +1066,7 @@ class AdvantageProcessor:
 
             record: Dict[str, Any] = {
                 "kept": bool(pareto_mask[ci]),
-                "prompt_idx": int(group_indices[ci]),
+                "prompt_idx": prompt_indices[ci],
                 "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
             }
             if cxo_step is not None:
@@ -1104,9 +1114,7 @@ class AdvantageProcessor:
         )
         gathered_len = len(group_indices)
         if len(child_mask) < gathered_len:
-            local_flag = torch.tensor(
-                child_mask.astype(np.float32), device=self.accelerator.device
-            )
+            local_flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
             gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
             child_mask = gathered_flag.astype(bool)
         return child_mask
