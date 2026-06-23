@@ -145,6 +145,15 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 else:
                     samples[:] = children
                     rewards = {k: v.to(device) for k, v in child_rewards.items()}
+
+                # Sort by unique_id so children are interleaved with their
+                # parent groups — advantage grouping is keyed on unique_id,
+                # and logging (train_samples) now covers children evenly.
+                uids = [s.unique_id for s in samples]
+                perm = sorted(range(len(samples)), key=lambda i: uids[i])
+                samples[:] = [samples[i] for i in perm]
+                rewards = {k: v[perm].to(device) for k, v in rewards.items()}
+
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()
         if stats:
@@ -243,15 +252,25 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         for latent, gid, step in entries:
             groups[(gid, step)].append(latent)
 
-        child_latents, child_steps, child_gids = [], [], []
+        child_latents, child_steps, child_gids, child_metas = [], [], [], []
         for (gid, step), gl in groups.items():
             if len(gl) < 2:
                 continue
             gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
             out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
+            Mg = out.child_latents.shape[0]
             child_latents.append(out.child_latents)
-            child_steps.extend([step] * out.child_latents.shape[0])
-            child_gids.extend([gid] * out.child_latents.shape[0])
+            child_steps.extend([step] * Mg)
+            child_gids.extend([gid] * Mg)
+            # Per-child provenance: parent indices + strategy params / sampled values
+            for m in range(Mg):
+                meta: Dict[str, Any] = {
+                    "parent_i": int(out.parent_indices_i[m]),
+                    "parent_j": int(out.parent_indices_j[m]),
+                }
+                for mk, mv in out.metadata.items():
+                    meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
+                child_metas.append(meta)
 
         if not child_latents:
             empty = {k: torch.zeros(0, device=device) for k in reward_keys}
@@ -312,6 +331,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             extra = parent_dict.get("extra_kwargs", {})
             extra["is_crossover_child"] = True
             extra["crossover_step"] = step
+            extra["crossover_strategy"] = self.training_args.crossover.strategy
+            extra["crossover_meta"] = child_metas[ci]
             parent_dict["extra_kwargs"] = extra
 
             child = type(tpl).from_dict(parent_dict)

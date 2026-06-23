@@ -36,14 +36,15 @@ class CrossoverOutput:
     Attributes:
         child_latents: Tensor of shape ``(M, *latent_dims)`` — the M child latents
             produced by crossover.
-        parent_indices: LongTensor of shape ``(M,)`` mapping each child to its
+        parent_indices_i: LongTensor of shape ``(M,)`` mapping each child to its
             primary parent index (0-based within the parent group).
         metadata: Optional dict of debug/logging information (e.g., alpha values,
             mixing ratios).
     """
 
     child_latents: torch.Tensor
-    parent_indices: torch.Tensor
+    parent_indices_i: torch.Tensor
+    parent_indices_j: torch.Tensor = field(default_factory=lambda: torch.empty(0, dtype=torch.long))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

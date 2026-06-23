@@ -589,8 +589,14 @@ class AdvantageProcessor:
 
         # ---- Pareto filtering ----
         pareto_mask: Optional[np.ndarray] = None
+        child_mask: Optional[np.ndarray] = None
         if self._pareto_enabled:
-            pareto_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+            pareto_mask, child_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+
+        # ---- Per-child reward details (after filtering decision) ----
+        if self._log_crossover_rewards:
+            keep_mask = pareto_mask if pareto_mask is not None else None
+            self._log_child_details(gathered_rewards, group_indices, samples, keep_mask)
 
         applicable, weight_matrix = self.build_source_aware_matrices(
             samples, reward_keys, source_ids
@@ -741,8 +747,14 @@ class AdvantageProcessor:
 
         # ---- Pareto filtering ----
         pareto_mask: Optional[np.ndarray] = None
+        child_mask: Optional[np.ndarray] = None
         if self._pareto_enabled:
-            pareto_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+            pareto_mask, child_mask = self._filter_pareto(gathered_rewards, group_indices, samples)
+
+        # ---- Per-child reward details (after filtering decision) ----
+        if self._log_crossover_rewards:
+            keep_mask = pareto_mask if pareto_mask is not None else None
+            self._log_child_details(gathered_rewards, group_indices, samples, keep_mask)
 
         applicable, weight_matrix = self.build_source_aware_matrices(
             samples, reward_keys, source_ids
@@ -840,6 +852,101 @@ class AdvantageProcessor:
             out.update(adv)
         return out
 
+    def _log_child_details(
+        self,
+        gathered_rewards: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+        samples: List[BaseSample],
+        pareto_mask: Optional[np.ndarray],
+    ) -> None:
+        """Log per-child reward details (kept vs discarded) for JSONL / pkl.
+
+        Independent of ``pareto_filter`` — gated solely by ``log_rewards``.
+        When *pareto_mask* is None, all children are treated as kept.
+        """
+        child_mask = np.array(
+            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
+            dtype=bool,
+        )
+        if not child_mask.any():
+            return
+
+        gathered_len = len(group_indices)
+        if len(child_mask) < gathered_len:
+            # Distributed mode: gather child_mask and sample metadata so
+            # _build_child_reward_details can index into the global arrays.
+            local_flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
+            gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
+            child_mask = gathered_flag.astype(bool)
+            samples = self._gather_sample_meta(samples, gathered_len)
+
+        keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
+        self._build_child_reward_details(
+            gathered_rewards, child_mask, keep_mask, samples, group_indices
+        )
+
+    def _gather_sample_meta(
+        self, samples: List[BaseSample], gathered_len: int
+    ) -> List[Dict[str, Any]]:
+        """Gather per-sample crossover metadata (prompt, step, strategy) across ranks.
+
+        Returns a list of *gathered_len* lightweight dicts so that
+        ``_build_child_reward_details`` can read metadata for every sample
+        in the global reward array.
+        """
+        device = self.accelerator.device
+        B = len(samples)
+
+        # -- crossover_step: int → tensor --
+        steps = torch.tensor(
+            [s.extra_kwargs.get("crossover_step", -1) for s in samples],
+            dtype=torch.long,
+            device=device,
+        )
+        all_steps = self.accelerator.gather(steps).cpu().tolist()
+
+        # -- crossover_strategy: short string → padded tensor --
+        strat_bytes = [
+            (s.extra_kwargs.get("crossover_strategy") or "").encode("utf-8") for s in samples
+        ]
+        max_sl = max((len(b) for b in strat_bytes), default=0)
+        max_sl_t = torch.tensor([max_sl], dtype=torch.long, device=device)
+        global_max_sl = int(self.accelerator.gather(max_sl_t).max().item())
+        spadded = torch.tensor(
+            [b + b"\x00" * (global_max_sl - len(b)) for b in strat_bytes],
+            dtype=torch.uint8,
+            device=device,
+        )
+        all_strat = [
+            bytes(row).rstrip(b"\x00").decode("utf-8") or None
+            for row in self.accelerator.gather(spadded).cpu().numpy()
+        ]
+
+        # -- prompt: string → padded tensor (same as _gather_for_logging) --
+        prompt_bytes = [(s.prompt or "").encode("utf-8") for s in samples]
+        max_pl = max((len(b) for b in prompt_bytes), default=0)
+        max_pl_t = torch.tensor([max_pl], dtype=torch.long, device=device)
+        global_max_pl = int(self.accelerator.gather(max_pl_t).max().item())
+        ppadded = torch.tensor(
+            [b + b"\x00" * (global_max_pl - len(b)) for b in prompt_bytes],
+            dtype=torch.uint8,
+            device=device,
+        )
+        all_prompts = [
+            bytes(row).rstrip(b"\x00").decode("utf-8") or None
+            for row in self.accelerator.gather(ppadded).cpu().numpy()
+        ]
+
+        # Assemble lightweight dict per global sample
+        return [
+            {
+                "prompt": all_prompts[i],
+                "crossover_step": all_steps[i],
+                "crossover_strategy": all_strat[i],
+            }
+            for i in range(gathered_len)
+        ]
+
     def _build_crossover_stats(
         self,
         gathered_rewards: Dict[str, np.ndarray],
@@ -899,24 +1006,72 @@ class AdvantageProcessor:
         gathered_rewards: Dict[str, np.ndarray],
         child_mask: np.ndarray,
         pareto_mask: np.ndarray,
+        samples: List[BaseSample],
+        group_indices: np.ndarray,
     ) -> None:
-        """Record per-sample child rewards, split by kept vs discarded.
+        """Record per-child rewards with keep/discard status.
 
-        Results are stored in ``_pending_crossover_stats`` under
-        ``crossover/children_rewards`` as a nested dict.  Dict/list values
-        are written to JSONL but filtered from TensorBoard/WandB.
+        * Per-child list → ``crossover/children_rewards`` (JSONL / pkl).
+        * Per-reward scalar aggregates → ``crossover/child_kept_{rw}_mean`` etc.
+          (TensorBoard / WandB).
         """
         if not child_mask.any():
             return
-        details: Dict[str, Dict[str, list]] = {}
-        for key in sorted(gathered_rewards.keys()):
-            arr = gathered_rewards[key]
-            child_kept = arr[child_mask & pareto_mask].tolist()
-            child_disc = arr[child_mask & ~pareto_mask].tolist()
-            details[key] = {"kept": child_kept, "discarded": child_disc}
+
         if self._pending_crossover_stats is None:
             self._pending_crossover_stats = {}
-        self._pending_crossover_stats["crossover/children_rewards"] = details
+
+        child_indices = np.where(child_mask)[0]
+        reward_keys = sorted(gathered_rewards.keys())
+
+        # ---- Per-child records (prompt index + crossover provenance) ----
+        # *samples* may be BaseSample objects (local) or lightweight dicts
+        # (gathered via _gather_sample_meta in distributed mode).
+        child_records: List[Dict[str, Any]] = []
+        for ci in child_indices:
+            meta = samples[ci]
+            if isinstance(meta, dict):
+                cxo_step = meta["crossover_step"]
+                cxo_strategy = meta["crossover_strategy"]
+                cxo_meta = None  # gathered dicts don't carry full crossover_meta
+            else:
+                cxo_step = meta.extra_kwargs.get("crossover_step")
+                cxo_strategy = meta.extra_kwargs.get("crossover_strategy")
+                cxo_meta = meta.extra_kwargs.get("crossover_meta")
+
+            record: Dict[str, Any] = {
+                "kept": bool(pareto_mask[ci]),
+                "prompt_idx": int(group_indices[ci]),
+                "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
+            }
+            if cxo_step is not None:
+                record["crossover_step"] = cxo_step
+            if cxo_strategy is not None:
+                record["crossover_strategy"] = cxo_strategy
+            if cxo_meta is not None:
+                record["crossover_meta"] = cxo_meta
+            child_records.append(record)
+        self._pending_crossover_stats["crossover/children_rewards"] = child_records
+        self._pending_crossover_stats["crossover/child_kept_total"] = sum(
+            1 for r in child_records if r["kept"]
+        )
+        self._pending_crossover_stats["crossover/child_disc_total"] = sum(
+            1 for r in child_records if not r["kept"]
+        )
+
+        # ---- Per-reward mean summaries (mean is reward-specific; count is not) ----
+        for key in reward_keys:
+            arr = gathered_rewards[key]
+            child_kept = arr[child_mask & pareto_mask]
+            child_disc = arr[child_mask & ~pareto_mask]
+
+            nk, nd = len(child_kept), len(child_disc)
+            self._pending_crossover_stats[f"crossover/child_kept_{key}_mean"] = (
+                float(child_kept.mean()) if nk > 0 else 0.0
+            )
+            self._pending_crossover_stats[f"crossover/child_disc_{key}_mean"] = (
+                float(child_disc.mean()) if nd > 0 else 0.0
+            )
 
     def _filter_pareto(
         self,
@@ -946,10 +1101,7 @@ class AdvantageProcessor:
         pareto_mask, stats = filter_by_group(gathered_rewards, group_indices, parent_mask)
         self._pending_pareto_stats = {f"pareto/{k}": v for k, v in stats.items()}
 
-        # Per-child reward details (kept vs discarded) for JSONL
-        self._build_child_reward_details(gathered_rewards, child_mask, pareto_mask)
-
-        return pareto_mask
+        return pareto_mask, child_mask
 
     def _mark_dominated_samples(
         self,

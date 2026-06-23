@@ -98,7 +98,8 @@ class UniformCrossover(BaseCrossover):
 
         return CrossoverOutput(
             child_latents=children,
-            parent_indices=idx_i,
+            parent_indices_i=idx_i,
+            parent_indices_j=idx_j,
             metadata={"alpha": alpha.flatten().tolist()},
         )
 
@@ -159,7 +160,8 @@ class ConvexCrossover(BaseCrossover):
 
         return CrossoverOutput(
             child_latents=children,
-            parent_indices=idx_i,
+            parent_indices_i=idx_i,
+            parent_indices_j=idx_j,
             metadata={"alpha": alpha.flatten().tolist()},
         )
 
@@ -259,7 +261,8 @@ class BlockCrossover(BaseCrossover):
 
         return CrossoverOutput(
             child_latents=children,
-            parent_indices=idx_i,
+            parent_indices_i=idx_i,
+            parent_indices_j=idx_j,
             metadata={
                 "mixing_ratio": self.mixing_ratio,
                 "block_size": self.block_size,
