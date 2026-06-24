@@ -913,20 +913,19 @@ class AdvantageProcessor:
     ) -> None:
         """Log per-child reward details (kept vs discarded) for JSONL / pkl.
 
-        Always gathers child data across ranks — in any sampler mode children
-        are distributed by the denoising step, so a single rank only sees a
-        biased subset.
+        Gathers child data across ranks only in distributed mode, matching
+        the logic in :meth:`_build_child_mask`.
         """
-        # Build local mask, then always gather so records cover all ranks.
         local_mask = np.array(
             [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
             dtype=bool,
         )
-        if len(samples) > 0:
-            global_size = self.accelerator.num_processes * len(samples)
+        gathered_len = len(group_indices)
+        if len(local_mask) < gathered_len:
+            # Distributed mode: gather child flags and metadata across ranks.
             local_flag = torch.tensor(local_mask.astype(np.float32), device=self.accelerator.device)
             child_mask = self.accelerator.gather(local_flag).cpu().numpy().astype(bool)
-            samples = self._gather_sample_meta(samples, global_size)
+            samples = self._gather_sample_meta(samples, gathered_len)
         else:
             child_mask = local_mask
 
