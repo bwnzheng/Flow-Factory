@@ -178,148 +178,54 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         device = self.accelerator.device
         num_steps = self.training_args.num_inference_steps
         rank = self.accelerator.process_index
-        world = self.accelerator.num_processes
-        B = len(parent_samples)
-
-        # 1. Gather rewards + unique_ids globally (same pattern as collect_group_rewards)
         reward_keys = sorted(parent_rewards.keys())
-        packed = torch.stack(
-            [torch.as_tensor(parent_rewards[k], device=device) for k in reward_keys]
-            + [
-                torch.as_tensor(
-                    [s.unique_id for s in parent_samples], dtype=torch.float32, device=device
-                )
-            ],
-            dim=1,
-        )
-        gathered = self.accelerator.gather(packed)
-        g_rewards = {k: gathered[:, i].cpu().numpy() for i, k in enumerate(reward_keys)}
-        g_ids = gathered[:, -1].cpu().numpy().astype(np.int64)
 
-        # 2. Non-dominated parents per group (global)
+        # 1. Build local reward arrays + unique_ids for Pareto & child filtering.
+        #    In group_contiguous mode all K copies of a prompt share the same
+        #    rank, so every group is complete locally — no communication needed.
+        local_g_rewards = {
+            k: torch.as_tensor(v).cpu().numpy() for k, v in parent_rewards.items()
+        }
+        local_g_ids = np.array([s.unique_id for s in parent_samples], dtype=np.int64)
+
+        # 2. Non-dominated parents per group (local).
         if self._selective:
             nondom = select_non_dominated_parents(
-                {k: torch.from_numpy(v) for k, v in g_rewards.items()}, g_ids.tolist()
+                {k: torch.from_numpy(v) for k, v in local_g_rewards.items()},
+                local_g_ids.tolist(),
             )
         else:
-            nondom = np.ones(len(g_ids), dtype=bool)
+            nondom = np.ones(len(parent_samples), dtype=bool)
 
-        # 3. All_gather (latent, gid, step, prompt data) of non-dominated parents
-        local_nondom = nondom[rank * B : (rank + 1) * B]
-        local_latents, local_gids, local_steps = [], [], []
-        local_prompt_embeds, local_pooled, local_prompt_ids = [], [], []
+        # 3. Collect local non-dominated parent latents — no all_gather needed.
+        gid_to_parent_local: Dict[int, BaseSample] = {}
+        for s in parent_samples:
+            gid_to_parent_local.setdefault(s.unique_id, s)
+
+        entries: List[Tuple[torch.Tensor, int, int]] = []
         for i, s in enumerate(parent_samples):
-            if local_nondom[i]:
+            if nondom[i]:
                 step = s.extra_kwargs["_cxo_step"]
                 idx = int(s.latent_index_map[step])
-                local_latents.append(s.all_latents[idx].to(device))
-                local_gids.append(s.unique_id)
-                local_steps.append(step)
-                local_prompt_embeds.append(
-                    s.prompt_embeds.to(device)
-                    if s.prompt_embeds is not None
-                    else torch.zeros(1, device=device)
-                )
-                local_pooled.append(
-                    s.pooled_prompt_embeds.to(device)
-                    if s.pooled_prompt_embeds is not None
-                    else torch.zeros(1, device=device)
-                )
-                local_prompt_ids.append(
-                    s.prompt_ids.to(device)
-                    if s.prompt_ids is not None
-                    else torch.zeros(1, dtype=torch.long, device=device)
-                )
+                entries.append((s.all_latents[idx].to(device), s.unique_id, step))
 
-        cnt_t = torch.tensor([len(local_latents)], device=device)
-        max_cnt = max(self.accelerator.gather(cnt_t).max().item(), 1)
-        dummy = (
-            torch.zeros_like(local_latents[0]) if local_latents else torch.zeros(1, device=device)
-        )
-        padded_l = (
-            (local_latents + [dummy] * (max_cnt - len(local_latents)))
-            if local_latents
-            else [dummy] * max_cnt
-        )
-        all_lat = self.accelerator.gather(torch.stack(padded_l))
-        all_gid = (
-            self.accelerator.gather(
-                torch.tensor(
-                    local_gids + [-1] * (max_cnt - len(local_gids)), dtype=torch.long, device=device
-                )
-            )
-            .cpu()
-            .tolist()
-        )
-        all_step = (
-            self.accelerator.gather(
-                torch.tensor(
-                    local_steps + [-1] * (max_cnt - len(local_steps)),
-                    dtype=torch.long,
-                    device=device,
-                )
-            )
-            .cpu()
-            .tolist()
-        )
-        all_cnt = self.accelerator.gather(cnt_t).cpu().tolist()
-
-        # Gather prompt embeddings alongside latents — same padding pattern.
-        _pad = lambda lst, d: (lst + [d] * (max_cnt - len(lst)) if lst else [d] * max_cnt)
-        dummy_pe = (
-            torch.zeros_like(local_prompt_embeds[0])
-            if local_prompt_embeds
-            else torch.zeros(1, device=device)
-        )
-        dummy_pp = (
-            torch.zeros_like(local_pooled[0]) if local_pooled else torch.zeros(1, device=device)
-        )
-        dummy_pid = (
-            torch.zeros_like(local_prompt_ids[0])
-            if local_prompt_ids
-            else torch.zeros(1, dtype=torch.long, device=device)
-        )
-        all_pe = self.accelerator.gather(torch.stack(_pad(local_prompt_embeds, dummy_pe)))
-        all_pp = self.accelerator.gather(torch.stack(_pad(local_pooled, dummy_pp)))
-        all_pid = self.accelerator.gather(torch.stack(_pad(local_prompt_ids, dummy_pid)))
-
-        # Build gid → prompt data mapping from gathered data (first occurrence wins).
-        gid_to_batch: Dict[int, Dict[str, torch.Tensor]] = {}
-        off = 0
-        for cnt in all_cnt:
-            for j in range(cnt):
-                gid = all_gid[off + j]
-                if gid not in gid_to_batch and gid >= 0:
-                    gid_to_batch[gid] = {
-                        "prompt_embeds": all_pe[off + j],
-                        "pooled_prompt_embeds": all_pp[off + j],
-                        "prompt_ids": all_pid[off + j],
-                    }
-            off += max_cnt
-
-        entries = []  # (latent, gid, step)
-        off = 0
-        for cnt in all_cnt:
-            for j in range(cnt):
-                entries.append((all_lat[off + j], all_gid[off + j], all_step[off + j]))
-            off += max_cnt
-
-        # 4. Per-group crossover
+        # 4. Per-group crossover (local only).
         groups: Dict[tuple, List[torch.Tensor]] = defaultdict(list)
         for latent, gid, step in entries:
             groups[(gid, step)].append(latent)
 
-        child_latents, child_steps, child_gids, child_metas = [], [], [], []
+        # child_groups: (gid, step, parent, latents, metas) for each group
+        # that produces children; latents are stacked → batch denoising.
+        child_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict[str, Any]]]] = []
+
         for (gid, step), gl in groups.items():
-            if len(gl) < 2:
+            parent = gid_to_parent_local.get(gid)
+            if parent is None or len(gl) < 2:
                 continue
             gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
             out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
             Mg = out.child_latents.shape[0]
-            child_latents.append(out.child_latents)
-            child_steps.extend([step] * Mg)
-            child_gids.extend([gid] * Mg)
-            # Per-child provenance: parent indices + strategy params / sampled values
+            metas: List[Dict[str, Any]] = []
             for m in range(Mg):
                 meta: Dict[str, Any] = {
                     "parent_i": int(out.parent_indices_i[m]),
@@ -327,44 +233,42 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 }
                 for mk, mv in out.metadata.items():
                     meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
-                child_metas.append(meta)
+                metas.append(meta)
+            child_groups.append((gid, step, parent, out.child_latents.float(), metas))
 
-        if not child_latents:
+        if not child_groups:
             empty = {k: torch.zeros(0, device=device) for k in reward_keys}
             return [], empty
 
-        child_latents = torch.cat(child_latents, dim=0).float()
-        M = child_latents.shape[0]
+        # 5. Batched denoising — children from the same (gid, step) share
+        #    prompt data and denoising start, so they are batched together.
+        _p0 = parent_samples[0]
+        sample_cls = type(_p0)
+        n_stored = _p0.all_latents.shape[0]
+        timesteps = _p0.timesteps.to(device)
+        _shared_extra = dict(_p0.extra_kwargs) if _p0.extra_kwargs else {}
 
-        # 5. Distributed denoising: each rank generates ceil(M/W) children
-        chunk = int(np.ceil(M / world))
         my_children: List[BaseSample] = []
-        tpl = parent_samples[0]
-        n_stored = tpl.all_latents.shape[0]
-        timesteps = tpl.timesteps.to(device)
-        # Fallback batch from tpl (used when a child's gid isn't in the global map).
-        _fallback_batch = {
-            k: getattr(tpl, k, None).to(device)
-            for k in ("prompt_embeds", "prompt_ids", "pooled_prompt_embeds")
-            if getattr(tpl, k, None) is not None
-        }
+        my_child_gids_flat: List[int] = []
+        total_children = sum(lat.shape[0] for _, _, _, lat, _ in child_groups)
 
-        for i in tqdm(
-            range(chunk),
+        for gid, step, parent, child_latents_batch, metas in tqdm(
+            child_groups,
             desc=f"Child denoising (rank {rank})",
-            disable=not self.show_progress_bar,
+            disable=not self.log_args.verbose,
+            position=rank,
         ):
-            ci = min(rank * chunk + i, M - 1)
-            gid = child_gids[ci]
-            step = child_steps[ci]
-            # Use the correct prompt data for this child's parent group.
-            child_batch = gid_to_batch.get(gid, _fallback_batch)
+            child_batch = {
+                k: getattr(parent, k).to(device)
+                for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids")
+                if getattr(parent, k, None) is not None
+            }
             with self.sampling_context():
-                final, _, _, _ = run_denoising_phase(
+                finals, _, _, _ = run_denoising_phase(
                     adapter=self.adapter,
                     accelerator=self.accelerator,
                     autocast_ctx=self.autocast,
-                    latents=child_latents[ci : ci + 1],
+                    latents=child_latents_batch,
                     timesteps=timesteps,
                     start_idx=step,
                     end_idx=num_steps,
@@ -373,44 +277,47 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                     compute_log_prob=False,
                     collect_trajectory=False,
                 )
-            imgs = self.adapter.decode_latents(final)
-            al = final.expand(n_stored, *final.shape[1:]).clone()
-            lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
-            lmap[-1] = n_stored - 1
-            # Inherit all parent fields (including model-specific ones like
-            # pooled_prompt_embeds) via to_dict/from_dict, overriding only
-            # the fields that differ for the child.
-            parent_dict = tpl.to_dict()
-            parent_dict["all_latents"] = al
-            parent_dict["latent_index_map"] = lmap
-            parent_dict["image"] = imgs
-            parent_dict["log_probs"] = None
-            parent_dict["log_prob_index_map"] = None
-            parent_dict["_unique_id"] = child_gids[ci]  # assign to actual parent group
-            parent_dict["applicable_rewards"] = set()
+            Mg = child_latents_batch.shape[0]
+            for m in range(Mg):
+                final = finals[m : m + 1]
+                imgs = self.adapter.decode_latents(final)
+                al = final.expand(n_stored, *final.shape[1:]).clone()
+                lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
+                lmap[-1] = n_stored - 1
 
-            extra = parent_dict.get("extra_kwargs", {})
-            extra["is_crossover_child"] = True
-            extra["crossover_step"] = step
-            extra["crossover_strategy"] = self.training_args.crossover.strategy
-            extra["crossover_meta"] = child_metas[ci]
-            parent_dict["extra_kwargs"] = extra
-
-            child = type(tpl).from_dict(parent_dict)
-            my_children.append(child)
+                extra = dict(_shared_extra)
+                extra.update(
+                    is_crossover_child=True,
+                    crossover_step=step,
+                    crossover_strategy=self.training_args.crossover.strategy,
+                    crossover_meta=metas[m],
+                )
+                pooled = getattr(parent, "pooled_prompt_embeds", None)
+                if pooled is not None:
+                    extra["pooled_prompt_embeds"] = pooled
+                child = sample_cls(
+                    timesteps=timesteps,
+                    all_latents=al,
+                    latent_index_map=lmap,
+                    image=imgs,
+                    log_probs=None,
+                    log_prob_index_map=None,
+                    prompt=parent.prompt,
+                    prompt_ids=parent.prompt_ids,
+                    prompt_embeds=parent.prompt_embeds,
+                    negative_prompt=parent.negative_prompt,
+                    _unique_id=gid,
+                    applicable_rewards=set(),
+                    extra_kwargs=extra,
+                )
+                my_children.append(child)
+                my_child_gids_flat.append(gid)
 
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(
             my_children, store_to_samples=False, split="pointwise"
         )
-        # Build local_child_gids matching the same ci formula used in the
-        # denoising loop above.  _filter_children uses these to index into
-        # my_children / child_rewards_dict (both local, length ≈ chunk).
-        local_child_gids = [
-            child_gids[min(rank * chunk + i, M - 1)] for i in range(len(my_children))
-        ]
-        # Keep only non-dominated children (per group, vs parents)
         my_children, child_rewards_dict = self._filter_children(
-            my_children, local_child_gids, child_rewards_dict, g_rewards, g_ids
+            my_children, my_child_gids_flat, child_rewards_dict, local_g_rewards, local_g_ids
         )
         child_rewards = {
             k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
@@ -418,7 +325,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
 
         logger.info(
             f"Crossover: {len(groups)} groups, {len(entries)} parents "
-            f"→ {M} raw children, {len(my_children)} kept after filter (rank {rank})"
+            f"→ {total_children} raw children, {len(my_children)} kept after filter (rank {rank})"
         )
         return my_children, child_rewards
 

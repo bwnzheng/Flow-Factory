@@ -226,6 +226,29 @@ class AdvantageProcessor:
             source_ids = gathered[:, -1].astype(np.int64)
             return collected_rewards, group_indices, source_ids
 
+    def _gather_uneven(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Gather a tensor that may have different sizes across ranks.
+
+        Pads to ``max_len`` across ranks, calls :meth:`Accelerator.gather`,
+        then strips per-rank padding and concatenates only valid rows.
+        """
+        local_n = tensor.shape[0]
+        n_t = torch.tensor([local_n], device=self.accelerator.device)
+        all_n = self.accelerator.gather(n_t).cpu().tolist()
+        max_n = max(all_n)
+        if local_n < max_n:
+            pad = torch.zeros(
+                max_n - local_n, *tensor.shape[1:],
+                dtype=tensor.dtype, device=tensor.device,
+            )
+            tensor = torch.cat([tensor, pad], dim=0)
+        gathered = self.accelerator.gather(tensor)  # (W * max_n, ...)
+        parts = []
+        for rank_i, rank_n in enumerate(all_n):
+            if rank_n > 0:
+                parts.append(gathered[rank_i * max_n : rank_i * max_n + rank_n])
+        return torch.cat(parts, dim=0) if parts else gathered[:0]
+
     def _gather_for_logging(
         self,
         samples: List[BaseSample],
@@ -241,20 +264,20 @@ class AdvantageProcessor:
         reward_keys = list(gathered_rewards.keys())
         R = len(reward_keys)
 
-        # Gather prompts
+        # Gather prompts (pad both str-length and batch-count dims)
         prompts_bytes = [s.prompt.encode("utf-8") for s in samples]
-        max_len = max((len(b) for b in prompts_bytes), default=0)
-        max_len_t = torch.tensor([max_len], dtype=torch.long, device=device)
-        synced = self.accelerator.gather(max_len_t)
-        global_max_len = int(synced.max().item()) if synced.numel() > 0 else 0
-        if global_max_len > 0:
-            padded = torch.tensor(
-                [b + b"\x00" * (global_max_len - len(b)) for b in prompts_bytes],
-                dtype=torch.uint8,
-                device=device,
-            )
-            gathered_p = self.accelerator.gather(padded).cpu().numpy()
-            all_prompts = [bytes(row).rstrip(b"\x00").decode("utf-8") for row in gathered_p]
+        max_str = max((len(b) for b in prompts_bytes), default=0)
+        max_str_t = torch.tensor([max_str], dtype=torch.long, device=device)
+        synced = self.accelerator.gather(max_str_t)
+        global_max_str = int(synced.max().item()) if synced.numel() > 0 else 0
+        if global_max_str > 0:
+            str_padded = [
+                list(b.ljust(global_max_str, b"\x00")) for b in prompts_bytes
+            ] or [[0] * global_max_str]
+            t = self._gather_uneven(
+                torch.tensor(str_padded, dtype=torch.uint8, device=device)
+            ).cpu().numpy()
+            all_prompts = [bytes(row).rstrip(b"\x00").decode("utf-8") for row in t]
         else:
             all_prompts = [""] * len(samples)
 
@@ -275,7 +298,9 @@ class AdvantageProcessor:
                 for r in range(R):
                     columns.append(torch.tensor(applicable[r], dtype=torch.float32, device=device))
             packed = torch.stack(columns, dim=1)
-            gathered = self.accelerator.gather(packed).cpu().numpy()
+
+            gathered = self._gather_uneven(packed).cpu().numpy()
+
             all_rewards = {k: gathered[:, i] for i, k in enumerate(reward_keys)}
             all_unique_ids = gathered[:, len(reward_keys)].astype(np.int64)
             col = len(reward_keys) + 1
@@ -699,7 +724,15 @@ class AdvantageProcessor:
             agg_t = torch.tensor(
                 aggregated_rewards, dtype=torch.float32, device=self.accelerator.device
             )
-            aggregated_rewards = self.accelerator.gather(agg_t).cpu().numpy()
+            aggregated_rewards = self._gather_uneven(agg_t).cpu().numpy()
+
+        # stat_mask needs to match gathered rewards in group_contiguous mode.
+        if child_mask is not None and self.group_on_same_rank:
+            flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
+            log_child_mask = self._gather_uneven(flag).cpu().numpy().astype(bool)
+        else:
+            log_child_mask = child_mask
+        log_stat_mask = ~log_child_mask if log_child_mask is not None else None
 
         self._pending_advantage_metrics = self._build_weighted_sum_log_data(
             all_rewards,
@@ -710,6 +743,7 @@ class AdvantageProcessor:
             all_prompts,
             applicable=all_applicable,
             reward_keys=reward_keys,
+            stat_mask=log_stat_mask,
         )
 
         # Scale child advantages for warmup (logged values remain unscaled).
@@ -849,6 +883,14 @@ class AdvantageProcessor:
             )
         )
 
+        # stat_mask needs to match gathered rewards in group_contiguous mode.
+        if child_mask is not None and self.group_on_same_rank:
+            flag = torch.tensor(child_mask.astype(np.float32), device=self.accelerator.device)
+            log_child_mask = self._gather_uneven(flag).cpu().numpy().astype(bool)
+        else:
+            log_child_mask = child_mask
+        log_stat_mask = ~log_child_mask if log_child_mask is not None else None
+
         self._pending_advantage_metrics = self._build_gdpo_log_data(
             all_rewards,
             all_unique_ids,
@@ -860,6 +902,7 @@ class AdvantageProcessor:
             applicable=all_applicable,
             reward_keys=reward_keys,
             all_reward_advantages=all_reward_advantages,
+            stat_mask=log_stat_mask,
         )
 
         # Scale child advantages for warmup (logged values remain unscaled).
@@ -1196,12 +1239,17 @@ class AdvantageProcessor:
         group_indices: np.ndarray,
         applicable: Optional[np.ndarray],
         reward_keys: Optional[List[str]],
+        stat_mask: Optional[np.ndarray] = None,
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, bool]]]:
         """Shared boilerplate for both log-data builders.
 
         Returns (stat_arrays, r_applicable) where stat_arrays is ready
         for ``_batch_reduce_stats`` and r_applicable maps each reward
         key to its boolean mask over gathered samples.
+
+        When *stat_mask* is provided, reward statistics are further
+        restricted (e.g., parents only for comparable ``train/reward_*``
+        metrics).
         """
         keys_sorted = sorted(gathered_rewards.keys())
         if applicable is not None and reward_keys is not None:
@@ -1212,6 +1260,8 @@ class AdvantageProcessor:
         stat_arrays: Dict[str, np.ndarray] = {}
         for key in keys_sorted:
             mask_k = r_applicable[key]
+            if stat_mask is not None:
+                mask_k = mask_k & stat_mask
             masked_rewards = gathered_rewards[key][mask_k]
             masked_gids = group_indices[mask_k]
             stat_arrays[f"reward_{key}"] = masked_rewards
@@ -1253,9 +1303,10 @@ class AdvantageProcessor:
         all_prompts: List[str],
         applicable: Optional[np.ndarray] = None,
         reward_keys: Optional[List[str]] = None,
+        stat_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         stat_arrays, r_applicable = self._build_base_log_stats(
-            gathered_rewards, group_indices, applicable, reward_keys
+            gathered_rewards, group_indices, applicable, reward_keys, stat_mask=stat_mask
         )
 
         stat_arrays["reward_agg"] = aggregated_rewards
@@ -1299,7 +1350,7 @@ class AdvantageProcessor:
         _log_data["train/adv_zero_ratio"] = float(zero.sum() / n)
         _log_data["train/adv_pos_sum"] = float(advantages[pos].sum())
 
-        _log_data["train_samples"] = samples[: self.max_log_samples]
+        self._add_train_samples(_log_data, samples)
         return self._finalize_log_data(_log_data, gathered_rewards, group_indices, all_prompts)
 
     def _build_gdpo_log_data(
@@ -1314,9 +1365,10 @@ class AdvantageProcessor:
         applicable: Optional[np.ndarray] = None,
         reward_keys: Optional[List[str]] = None,
         all_reward_advantages: Optional[List[np.ndarray]] = None,
+        stat_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         stat_arrays, r_applicable = self._build_base_log_stats(
-            gathered_rewards, group_indices, applicable, reward_keys
+            gathered_rewards, group_indices, applicable, reward_keys, stat_mask=stat_mask
         )
 
         stat_arrays["adv"] = advantages
@@ -1341,9 +1393,9 @@ class AdvantageProcessor:
                 "train/adv_min": adv_stats["min"],
                 "train/adv_max": adv_stats["max"],
                 "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
-                "train_samples": samples[: self.max_log_samples],
             }
         )
+        self._add_train_samples(_log_data, samples)
         if all_reward_advantages is not None and reward_keys is not None:
             for r_idx, name in enumerate(reward_keys):
                 adv = all_reward_advantages[r_idx]
@@ -1376,6 +1428,36 @@ class AdvantageProcessor:
             for name in gathered_rewards:
                 groups[gid]["rewards"][name].append(float(gathered_rewards[name][i]))
         return list(groups.values())
+
+    def _add_train_samples(
+        self, log_data: Dict[str, Any], samples: List[BaseSample]
+    ) -> None:
+        """Split samples into parents and children, each capped separately.
+
+        Samples are grouped by ``unique_id`` (= group id) so the logger
+        includes the group id in saved filenames, e.g.
+        ``train_samples_g42_0_image.png``.
+        """
+        cap = self.max_log_samples
+        parents: Dict[str, List[BaseSample]] = {}
+        children: Dict[str, List[BaseSample]] = {}
+        n_parents = 0
+        n_children = 0
+        for s in samples:
+            gid = str(s.unique_id)
+            if s.extra_kwargs.get("is_crossover_child", False):
+                if cap is not None and n_children >= cap:
+                    continue
+                children.setdefault(gid, []).append(s)
+                n_children += 1
+            else:
+                if cap is not None and n_parents >= cap:
+                    continue
+                parents.setdefault(gid, []).append(s)
+                n_parents += 1
+        log_data["train_samples"] = parents
+        if children:
+            log_data["train_child_samples"] = children
 
     def _finalize_log_data(
         self,

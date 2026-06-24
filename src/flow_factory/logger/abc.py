@@ -128,7 +128,7 @@ class Logger(ABC):
 
         # Remove sample-list keys (now all-None after media extraction)
         for k in list(data.keys()):
-            if k == 'train_samples' or k.startswith('eval/') and k.endswith('/samples'):
+            if k in ('train_samples', 'train_child_samples') or (k.startswith('eval/') and k.endswith('/samples')):
                 del data[k]
 
         if entries:

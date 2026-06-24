@@ -215,10 +215,10 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         else:
             nondom = np.ones(len(g_ids), dtype=bool)
 
-        # 3. All_gather (latent, gid, step, prompt data) of non-dominated parents
+        # 3. All_gather (latent, gid, step) of non-dominated parents.
+        #    Prompt data is fetched from each child's local parent in step 5.
         local_nondom = nondom[rank * B : (rank + 1) * B]
         local_latents, local_gids, local_steps = [], [], []
-        local_prompt_embeds, local_pooled, local_prompt_ids = [], [], []
         for i, s in enumerate(parent_samples):
             if local_nondom[i]:
                 step = s.extra_kwargs["_cxo_step"]
@@ -226,21 +226,6 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 local_latents.append(s.all_latents[idx].to(device))
                 local_gids.append(s.unique_id)
                 local_steps.append(step)
-                local_prompt_embeds.append(
-                    s.prompt_embeds.to(device)
-                    if s.prompt_embeds is not None
-                    else torch.zeros(1, device=device)
-                )
-                local_pooled.append(
-                    s.pooled_prompt_embeds.to(device)
-                    if s.pooled_prompt_embeds is not None
-                    else torch.zeros(1, device=device)
-                )
-                local_prompt_ids.append(
-                    s.prompt_ids.to(device)
-                    if s.prompt_ids is not None
-                    else torch.zeros(1, dtype=torch.long, device=device)
-                )
 
         cnt_t = torch.tensor([len(local_latents)], device=device)
         max_cnt = max(self.accelerator.gather(cnt_t).max().item(), 1)
@@ -275,39 +260,6 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         )
         all_cnt = self.accelerator.gather(cnt_t).cpu().tolist()
 
-        # Gather prompt embeddings alongside latents — same padding pattern.
-        _pad = lambda lst, d: lst + [d] * (max_cnt - len(lst)) if lst else [d] * max_cnt
-        dummy_pe = (
-            torch.zeros_like(local_prompt_embeds[0])
-            if local_prompt_embeds
-            else torch.zeros(1, device=device)
-        )
-        dummy_pp = (
-            torch.zeros_like(local_pooled[0]) if local_pooled else torch.zeros(1, device=device)
-        )
-        dummy_pid = (
-            torch.zeros_like(local_prompt_ids[0])
-            if local_prompt_ids
-            else torch.zeros(1, dtype=torch.long, device=device)
-        )
-        all_pe = self.accelerator.gather(torch.stack(_pad(local_prompt_embeds, dummy_pe)))
-        all_pp = self.accelerator.gather(torch.stack(_pad(local_pooled, dummy_pp)))
-        all_pid = self.accelerator.gather(torch.stack(_pad(local_prompt_ids, dummy_pid)))
-
-        # Build gid → prompt data mapping from gathered data (first occurrence wins).
-        gid_to_batch: Dict[int, Dict[str, torch.Tensor]] = {}
-        off = 0
-        for cnt in all_cnt:
-            for j in range(cnt):
-                gid = all_gid[off + j]
-                if gid not in gid_to_batch and gid >= 0:
-                    gid_to_batch[gid] = {
-                        "prompt_embeds": all_pe[off + j],
-                        "pooled_prompt_embeds": all_pp[off + j],
-                        "prompt_ids": all_pid[off + j],
-                    }
-            off += max_cnt
-
         entries = []
         off = 0
         for cnt in all_cnt:
@@ -315,22 +267,32 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 entries.append((all_lat[off + j], all_gid[off + j], all_step[off + j]))
             off += max_cnt
 
-        # 4. Per-group crossover
+        # 4. Per-group crossover — each rank only processes children from its
+        #    own local groups so the actual parent Sample is always available.
         groups: Dict[tuple, List[torch.Tensor]] = defaultdict(list)
         for latent, gid, step in entries:
             groups[(gid, step)].append(latent)
+        gid_to_parent_local: Dict[int, BaseSample] = {}
+        for s in parent_samples:
+            gid_to_parent_local.setdefault(s.unique_id, s)
 
-        child_latents, child_steps, child_gids, child_metas = [], [], [], []
+        my_child_latents: List[torch.Tensor] = []
+        my_child_steps: List[int] = []
+        my_child_gids: List[int] = []
+        my_child_metas: List[Dict[str, Any]] = []
+        my_child_parents: List[BaseSample] = []
+
         for (gid, step), gl in groups.items():
-            if len(gl) < 2:
+            parent = gid_to_parent_local.get(gid)
+            if parent is None or len(gl) < 2:
                 continue
             gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
             out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
             Mg = out.child_latents.shape[0]
-            child_latents.append(out.child_latents)
-            child_steps.extend([step] * Mg)
-            child_gids.extend([gid] * Mg)
-            # Per-child provenance: parent indices + strategy params / sampled values
+            my_child_latents.append(out.child_latents)
+            my_child_steps.extend([step] * Mg)
+            my_child_gids.extend([gid] * Mg)
+            my_child_parents.extend([parent] * Mg)
             for m in range(Mg):
                 meta: Dict[str, Any] = {
                     "parent_i": int(out.parent_indices_i[m]),
@@ -338,43 +300,51 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 }
                 for mk, mv in out.metadata.items():
                     meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
-                child_metas.append(meta)
+                my_child_metas.append(meta)
 
-        if not child_latents:
+        if not my_child_latents:
             empty = {k: torch.zeros(0, device=device) for k in reward_keys}
             return [], empty
 
-        child_latents = torch.cat(child_latents, dim=0).float()
-        M = child_latents.shape[0]
+        my_child_latents_t = torch.cat(my_child_latents, dim=0).float()
 
-        # 5. Distributed denoising: each rank generates ceil(M/W) children
-        chunk = int(np.ceil(M / world))
+        # 5. Local denoising — each child uses its own parent for trajectory
+        #    and prompt data, no template needed.
+        _p0 = parent_samples[0]
+        timesteps = _p0.timesteps.to(device)
+
         my_children: List[BaseSample] = []
-        tpl = parent_samples[0]
-        timesteps = tpl.timesteps.to(device)
-        # Fallback batch from tpl (used when a child's gid isn't in the global map).
-        _fallback_batch = {
-            k: getattr(tpl, k, None).to(device)
-            for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids")
-            if getattr(tpl, k, None) is not None
-        }
-
-        my_children = []
-        for i in tqdm(
-            range(chunk),
+        for ci in tqdm(
+            range(len(my_child_latents_t)),
             desc=f"Child denoising (rank {rank})",
             disable=not self.show_progress_bar,
         ):
-            ci = min(rank * chunk + i, M - 1)
-            gid = child_gids[ci]
-            step = child_steps[ci]
-            # Use the correct prompt data for this child's parent group.
-            child_batch = gid_to_batch.get(gid, _fallback_batch)
+            gid = my_child_gids[ci]
+            step = my_child_steps[ci]
+            parent = my_child_parents[ci]
+
+            pooled = getattr(parent, "pooled_prompt_embeds", None)
+            child_batch = {
+                k: getattr(parent, k).to(device)
+                for k in ("prompt_embeds", "prompt_ids")
+                if getattr(parent, k, None) is not None
+            }
+            if pooled is not None:
+                child_batch["pooled_prompt_embeds"] = pooled.to(device)
+            missing = [
+                k for k in ("prompt_embeds", "pooled_prompt_embeds") if k not in child_batch
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"Child gid={gid} (ci={ci}) missing required prompt field(s) "
+                    f"{missing} from parent group. "
+                    f"Check that the parent sample stores pooled_prompt_embeds."
+                )
             final, post_lat, post_lp, post_cb = run_denoising_phase(
                 adapter=self.adapter,
                 accelerator=self.accelerator,
                 autocast_ctx=self.autocast,
-                latents=child_latents[ci : ci + 1],
+                latents=my_child_latents_t[ci : ci + 1],
                 timesteps=timesteps,
                 start_idx=step,
                 end_idx=num_steps,
@@ -387,7 +357,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             )
             imgs = self.adapter.decode_latents(final)
             child = self._build_child(
-                parent=tpl,
+                parent=parent,
                 post_latents=post_lat,
                 post_log_probs=post_lp,
                 post_callbacks=post_cb,
@@ -395,23 +365,15 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 cxo_step=step,
                 num_steps=num_steps,
             )
-            # Attach per-child crossover provenance
-            child.extra_kwargs["crossover_meta"] = child_metas[ci]
-            # Assign to actual parent group instead of inheriting tpl's identity
-            child._unique_id = child_gids[ci]
+            child.extra_kwargs["crossover_meta"] = my_child_metas[ci]
+            child._unique_id = gid
             my_children.append(child)
 
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(
             my_children, store_to_samples=False, split="pointwise"
         )
-        # Build local_child_gids matching the same ci formula used in the
-        # denoising loop above.  _filter_children uses these to index into
-        # my_children / child_rewards_dict (both local, length ≈ chunk).
-        local_child_gids = [
-            child_gids[min(rank * chunk + i, M - 1)] for i in range(len(my_children))
-        ]
         my_children, child_rewards_dict = self._filter_children(
-            my_children, local_child_gids, child_rewards_dict, g_rewards, g_ids
+            my_children, my_child_gids, child_rewards_dict, g_rewards, g_ids
         )
         child_rewards = {
             k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
@@ -419,7 +381,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
 
         logger.info(
             f"Crossover: {len(groups)} groups, {len(entries)} parents "
-            f"→ {M} raw children, {len(my_children)} kept after filter (rank {rank})"
+            f"→ {len(my_child_latents_t)} raw children, {len(my_children)} kept after filter (rank {rank})"
         )
         return my_children, child_rewards
 
