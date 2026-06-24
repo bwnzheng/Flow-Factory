@@ -108,7 +108,7 @@ class CrossoverArguments(ArgABC):
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
-    child_advantage_warmup_epochs: int = field(
+    child_warmup_epochs: int = field(
         default=0,
         metadata={
             "help": (

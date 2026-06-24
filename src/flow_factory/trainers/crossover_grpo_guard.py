@@ -147,6 +147,18 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         if self._crossover_enabled:
             children, child_rewards = self._crossover_augment(samples, rewards)
             if children:
+                # ---- Child count warmup: limit children in early epochs ----
+                warmup_epochs = getattr(
+                    self.training_args.crossover, "child_warmup_epochs", 0
+                )
+                if warmup_epochs > 0 and len(children) > 0:
+                    ratio = min(1.0, self.epoch / max(warmup_epochs, 1))
+                    target = max(1, int(len(children) * ratio))
+                    if target < len(children):
+                        idx = torch.randperm(len(children))[:target].tolist()
+                        children = [children[i] for i in idx]
+                        child_rewards = {k: v[idx] for k, v in child_rewards.items()}
+
                 if self._include_parents:
                     samples.extend(children)
                     rewards = {
@@ -165,13 +177,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
 
-        # ---- Child advantage warmup ----
-        warmup_epochs = getattr(self.training_args.crossover, "child_advantage_warmup_epochs", 0)
-        if warmup_epochs > 0 and self._crossover_enabled:
-            scale = min(1.0, self.epoch / max(warmup_epochs, 1))
-            self.advantage_processor._child_advantage_scale = scale
-        else:
-            self.advantage_processor._child_advantage_scale = 1.0
+        self.advantage_processor._child_advantage_scale = 1.0
 
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()

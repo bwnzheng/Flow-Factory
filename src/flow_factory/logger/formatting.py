@@ -915,6 +915,14 @@ class LogFormatter:
         if cls._is_sample_collection(value):
             return cls._process_sample_list(value)
 
+        # Rule 0.5: Recurse into dicts only when values are sample lists
+        # (e.g. train_samples = {gid: [SD3_5Sample, ...]}).  Other dicts
+        # like rewards_all = {name: [float]} must pass through unchanged.
+        if isinstance(value, dict) and any(
+            cls._is_sample_collection(v) for v in value.values()
+        ):
+            return {k: cls._process_value(v) for k, v in value.items()}
+
         # Rule 1: PIL Image
         if isinstance(value, Image.Image):
             return LogImage(value)

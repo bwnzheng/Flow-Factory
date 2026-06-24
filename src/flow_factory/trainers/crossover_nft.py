@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -136,6 +136,18 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         if self._crossover_enabled:
             children, child_rewards = self._crossover_augment(samples, rewards)
             if children:
+                # ---- Child count warmup: limit children in early epochs ----
+                warmup_epochs = getattr(
+                    self.training_args.crossover, "child_warmup_epochs", 0
+                )
+                if warmup_epochs > 0 and len(children) > 0:
+                    ratio = min(1.0, self.epoch / max(warmup_epochs, 1))
+                    target = max(1, int(len(children) * ratio))
+                    if target < len(children):
+                        idx = torch.randperm(len(children))[:target].tolist()
+                        children = [children[i] for i in idx]
+                        child_rewards = {k: v[idx] for k, v in child_rewards.items()}
+
                 if self._include_parents:
                     samples.extend(children)
                     rewards = {
@@ -154,21 +166,27 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
 
-        # ---- Child advantage warmup ----
-        warmup_epochs = getattr(self.training_args.crossover, "child_advantage_warmup_epochs", 0)
-        if warmup_epochs > 0 and self._crossover_enabled:
-            scale = min(1.0, self.epoch / max(warmup_epochs, 1))
-            self.advantage_processor._child_advantage_scale = scale
-        else:
-            self.advantage_processor._child_advantage_scale = 1.0
+        self.advantage_processor._child_advantage_scale = 1.0
 
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
 
+        # After crossover, ranks may have different sample counts, which
+        # would cause the optimize micro-batch loop to deadlock.  Pad to
+        # max across ranks by duplicating existing local samples.
+        if self._crossover_enabled:
+            n_t = torch.tensor([len(samples)], device=device)
+            all_n = self.accelerator.gather(n_t).cpu().tolist()
+            max_n = max(all_n)
+            local_n = len(samples)
+            if local_n < max_n:
+                for i in range(max_n - local_n):
+                    samples.append(samples[i % local_n])
+
     # ======================================================================
-    # Crossover augmentation (global gather → per-group → distributed)
+    # Crossover augmentation (local per-group → local denoising)
     # ======================================================================
 
     @torch.no_grad()
@@ -354,3 +372,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         filtered_children = [c for i, c in enumerate(children) if keep[i]]
         filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
         return filtered_children, filtered_rewards
+
+    # ======================================================================
+    # Sample redistribution for balanced training
+    # ======================================================================

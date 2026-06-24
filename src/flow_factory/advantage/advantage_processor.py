@@ -1434,8 +1434,7 @@ class AdvantageProcessor:
     ) -> None:
         """Split samples into parents and children, each capped separately.
 
-        Samples are grouped by ``unique_id`` (= group id) so the logger
-        includes the group id in saved filenames, e.g.
+        Grouped by ``unique_id`` so filenames include group id, e.g.
         ``train_samples_g42_0_image.png``.
         """
         cap = self.max_log_samples
