@@ -812,10 +812,6 @@ class AdvantageProcessor:
         all_reward_advantages = []
         for r_idx, key in enumerate(reward_keys):
             reward_array = gathered_rewards[key].astype(np.float64)
-            # Statistics from norm_mask only (parents, no children);
-            # _group_normalize normalizes ALL values using those statistics,
-            # so children automatically receive parent-anchored per-reward
-            # advantages that reflect their actual reward quality.
             r_applicable = (
                 applicable[r_idx] & norm_mask if norm_mask is not None else applicable[r_idx]
             )
@@ -933,7 +929,9 @@ class AdvantageProcessor:
             return
 
         keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
-        self._build_child_reward_details(gathered_rewards, child_mask, keep_mask, samples)
+        self._build_child_reward_details(
+            gathered_rewards, child_mask, keep_mask, samples, group_indices
+        )
 
     def _gather_sample_meta(
         self, samples: List[BaseSample], gathered_len: int
@@ -1045,12 +1043,17 @@ class AdvantageProcessor:
         child_mask: np.ndarray,
         pareto_mask: np.ndarray,
         samples: List[BaseSample],
+        group_indices: np.ndarray,
     ) -> None:
         """Record per-child rewards with keep/discard status.
 
         * Per-child list → ``crossover/children_rewards`` (JSONL / pkl).
         * Per-reward scalar aggregates → ``crossover/child_kept_{rw}_mean`` etc.
           (TensorBoard / WandB).
+
+        Uses *group_indices* to determine each child's prompt group rather
+        than relying on the child's ``prompt`` field, which may be inherited
+        from an unrelated template parent during crossover generation.
         """
         if not child_mask.any():
             return
@@ -1059,18 +1062,16 @@ class AdvantageProcessor:
             self._pending_crossover_stats = {}
 
         child_indices = np.where(child_mask)[0]
+        parent_mask = ~child_mask
         reward_keys = sorted(gathered_rewards.keys())
 
-        # Build prompt_idx from gathered metadata: sequential index per
-        # unique prompt (stable across calls because samples are sorted
-        # by unique_id).
-        seen: Dict[str, int] = {}
-        prompt_indices: List[int] = []
-        for s in samples:
-            p = s["prompt"] if isinstance(s, dict) else s.prompt
-            if p not in seen:
-                seen[p] = len(seen)
-            prompt_indices.append(seen[p])
+        # Build group_idx → sequential prompt_idx mapping using PARENTS only.
+        # Children may carry an incorrect prompt (inherited from the denoising
+        # template), but group_indices is always authoritative.
+        group_to_prompt_idx: Dict[int, int] = {}
+        for gi, is_parent in zip(group_indices, parent_mask):
+            if is_parent and gi not in group_to_prompt_idx:
+                group_to_prompt_idx[int(gi)] = len(group_to_prompt_idx)
 
         # ---- Per-child records (prompt index + crossover provenance) ----
         child_records: List[Dict[str, Any]] = []
@@ -1085,9 +1086,10 @@ class AdvantageProcessor:
                 cxo_strategy = meta.extra_kwargs.get("crossover_strategy")
                 cxo_meta = meta.extra_kwargs.get("crossover_meta")
 
+            gi = int(group_indices[ci])
             record: Dict[str, Any] = {
                 "kept": bool(pareto_mask[ci]),
-                "prompt_idx": prompt_indices[ci],
+                "prompt_idx": group_to_prompt_idx.get(gi, -1),
                 "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
             }
             if cxo_step is not None:

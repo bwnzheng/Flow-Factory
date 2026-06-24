@@ -344,6 +344,8 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             )
             # Attach per-child crossover provenance
             child.extra_kwargs["crossover_meta"] = child_metas[ci]
+            # Assign to actual parent group instead of inheriting tpl's identity
+            child._unique_id = child_gids[ci]
             my_children.append(child)
 
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(

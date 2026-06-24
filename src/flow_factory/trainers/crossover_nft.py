@@ -333,7 +333,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             parent_dict["image"] = imgs
             parent_dict["log_probs"] = None
             parent_dict["log_prob_index_map"] = None
-            parent_dict["_unique_id"] = None  # recompute from child content
+            parent_dict["_unique_id"] = child_gids[ci]  # assign to actual parent group
             parent_dict["applicable_rewards"] = set()
 
             extra = parent_dict.get("extra_kwargs", {})
