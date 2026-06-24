@@ -466,18 +466,20 @@ class AdvantageProcessor:
         Args:
             values: ``(S,)`` array of values to normalize.
             group_indices: ``(S,)`` integer group assignments.
-            mask: ``(S,)`` boolean; only masked-in positions participate.
-                ``None`` means all positions participate.
+            mask: ``(S,)`` boolean; only masked-in positions participate in
+                mean / std computation. ``None`` means all positions participate.
+                All samples receive normalized output regardless of *mask*.
             eps: Minimum std to avoid division by zero.
 
         Returns:
-            ``(S,)`` normalized values (0 at non-participating positions).
+            ``(S,)`` normalized values for all samples.
         """
         S = len(values)
         num_groups = group_indices.max() + 1
         if mask is None:
             mask = np.ones(S, dtype=bool)
 
+        # Statistics from *mask* only.
         masked_vals = np.where(mask, values, 0.0)
         counts = np.bincount(group_indices, weights=mask.astype(np.float64), minlength=num_groups)
         sums = np.bincount(group_indices, weights=masked_vals, minlength=num_groups)
@@ -489,9 +491,8 @@ class AdvantageProcessor:
         stds = np.sqrt(sq_sums / safe_counts)
         stds = np.maximum(stds, eps)
 
-        result = np.zeros(S, dtype=np.float64)
-        result[mask] = residuals[mask] / stds[group_indices[mask]]
-        return result
+        # Normalize all values using mask-derived statistics.
+        return (values - means[group_indices]) / stds[group_indices]
 
     @staticmethod
     def _group_normalize_with_mask(
@@ -503,7 +504,7 @@ class AdvantageProcessor:
         """Like :meth:`_group_normalize` but restricted to a keep mask.
 
         Only *keep_mask* = True samples participate in mean / std computation.
-        All samples still receive an output, but dominated ones get 0.
+        All samples still receive an output.
         """
         if keep_mask is None:
             return AdvantageProcessor._group_normalize(values, group_indices, mask=None, eps=eps)
@@ -676,8 +677,10 @@ class AdvantageProcessor:
             means = sums / np.maximum(counts, 1)
             advantages = (aggregated_rewards - means[group_indices]) / std
         else:
+            # norm_mask restricts statistics (mean/std), but all samples
+            # (including children) receive properly normalized output.
             advantages = self._group_normalize_with_mask(
-                aggregated_rewards, group_indices, norm_mask
+                aggregated_rewards, group_indices, keep_mask=norm_mask
             )
 
         all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
@@ -804,12 +807,21 @@ class AdvantageProcessor:
         self._assert_no_nan_at_applicable(stack, reward_keys, applicable, label="GDPO")
 
         # Per-reward group-wise normalisation.  When *norm_mask* is None
-        # (non-crossover training), all applicable samples participate.
+        # (non-crossover training), all applicable samples participate in both
+        # statistics and output.
         all_reward_advantages = []
         for r_idx, key in enumerate(reward_keys):
             reward_array = gathered_rewards[key].astype(np.float64)
-            r_applicable = applicable[r_idx] if norm_mask is None else applicable[r_idx] & norm_mask
+            # Statistics from norm_mask only (parents, no children);
+            # _group_normalize normalizes ALL values using those statistics,
+            # so children automatically receive parent-anchored per-reward
+            # advantages that reflect their actual reward quality.
+            r_applicable = (
+                applicable[r_idx] & norm_mask if norm_mask is not None else applicable[r_idx]
+            )
             reward_adv = self._group_normalize(reward_array, group_indices, mask=r_applicable)
+            # Zero out positions where this reward isn't applicable.
+            reward_adv[~applicable[r_idx]] = 0.0
             all_reward_advantages.append(reward_adv * weight_matrix[r_idx])
 
         # Combine and batch normalise.
