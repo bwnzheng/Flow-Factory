@@ -901,17 +901,25 @@ class AdvantageProcessor:
     ) -> None:
         """Log per-child reward details (kept vs discarded) for JSONL / pkl.
 
-        Independent of ``pareto_filter`` — gated solely by ``log_rewards``.
-        When *pareto_mask* is None, all children are treated as kept.
+        Always gathers child data across ranks — in any sampler mode children
+        are distributed by the denoising step, so a single rank only sees a
+        biased subset.
         """
-        child_mask = self._build_child_mask(samples, group_indices)
+        # Build local mask, then always gather so records cover all ranks.
+        local_mask = np.array(
+            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
+            dtype=bool,
+        )
+        if len(samples) > 0:
+            global_size = self.accelerator.num_processes * len(samples)
+            local_flag = torch.tensor(local_mask.astype(np.float32), device=self.accelerator.device)
+            child_mask = self.accelerator.gather(local_flag).cpu().numpy().astype(bool)
+            samples = self._gather_sample_meta(samples, global_size)
+        else:
+            child_mask = local_mask
+
         if not child_mask.any():
             return
-
-        # In distributed mode, gather sample metadata so that child indices
-        # from the global child_mask can be used to index into samples.
-        if len(samples) < len(child_mask):
-            samples = self._gather_sample_meta(samples, len(child_mask))
 
         keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
         self._build_child_reward_details(gathered_rewards, child_mask, keep_mask, samples)
