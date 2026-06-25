@@ -166,6 +166,11 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
 
+                # Remove dominated parents so total sample count stays at the
+                # original parent count — keeps gradient_accumulation_steps
+                # correct and avoids wasted / lost gradients.
+                self._remove_dominated_parents(samples, rewards)
+
         self.advantage_processor._child_advantage_scale = 1.0
 
         self.compute_advantages(samples, rewards, store_to_samples=True)
@@ -173,17 +178,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         if stats:
             self.log_data(stats, step=self.step)
 
-        # After crossover, ranks may have different sample counts, which
-        # would cause the optimize micro-batch loop to deadlock.  Pad to
-        # max across ranks by duplicating existing local samples.
-        if self._crossover_enabled:
-            n_t = torch.tensor([len(samples)], device=device)
-            all_n = self.accelerator.gather(n_t).cpu().tolist()
-            max_n = max(all_n)
-            local_n = len(samples)
-            if local_n < max_n:
-                for i in range(max_n - local_n):
-                    samples.append(samples[i % local_n])
+        # Per-group parent removal ensures all ranks have the same sample
+        # count — no padding needed.
 
     # ======================================================================
     # Crossover augmentation (local per-group → local denoising)
@@ -372,6 +368,94 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         filtered_children = [c for i, c in enumerate(children) if keep[i]]
         filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
         return filtered_children, filtered_rewards
+
+    # ======================================================================
+    # Dominated parent removal
+
+    def _remove_dominated_parents(
+        self,
+        samples: List[BaseSample],
+        rewards: Dict[str, torch.Tensor],
+    ) -> None:
+        """Remove dominated parents so total count stays at original parent count.
+
+        For each group, removes the N lowest-reward parents where N equals the
+        number of children in that group.  Parents on the Pareto front are
+        removed last — dominated parents are removed first.
+
+        This keeps ``len(samples)`` close to the original parent count,
+        preventing gradient accumulation steps from becoming misaligned.
+        """
+        if not samples:
+            return
+
+        device = rewards[next(iter(rewards.keys()))].device
+        reward_keys = sorted(rewards.keys())
+
+        # Build masks
+        is_child = torch.tensor(
+            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
+            dtype=torch.bool, device=device,
+        )
+        uids = torch.tensor(
+            [s.unique_id for s in samples], dtype=torch.long, device=device,
+        )
+
+        # Aggregated reward (simple sum for ranking)
+        agg = torch.zeros(len(samples), device=device)
+        for k in reward_keys:
+            agg += rewards[k].to(device)
+
+        remove = torch.zeros(len(samples), dtype=torch.bool, device=device)
+        child_gids = uids[is_child].unique()
+
+        for gid in child_gids:
+            c_mask = is_child & (uids == gid)
+            p_mask = ~is_child & (uids == gid)
+            n_children = int(c_mask.sum().item())
+            n_parents = int(p_mask.sum().item())
+
+            if n_children == 0 or n_parents <= 1:
+                # Keep at least 1 parent per group
+                continue
+
+            n_remove = min(n_children, n_parents - 1)
+            if n_remove <= 0:
+                continue
+
+            p_indices = p_mask.nonzero(as_tuple=True)[0]
+            p_rewards = agg[p_indices]
+
+            # Compute Pareto mask on parents to remove dominated first
+            p_rewards_np = torch.stack([rewards[k][p_indices] for k in reward_keys], dim=1).cpu().float().numpy()
+            p_pareto = compute_pareto_mask(p_rewards_np)
+            p_pareto_t = torch.from_numpy(p_pareto).to(device)
+
+            # Order: dominated parents first, then non-dominated (by lowest reward)
+            dominated_idx = p_indices[~p_pareto_t]
+            nondom_idx = p_indices[p_pareto_t]
+
+            # Sort each subset by reward ascending (remove worst first)
+            dominated_sorted = dominated_idx[agg[dominated_idx].argsort()]
+            nondom_sorted = nondom_idx[agg[nondom_idx].argsort()]
+
+            # Build ordered removal list
+            removal_order = torch.cat([dominated_sorted, nondom_sorted])
+            for idx in removal_order[:n_remove]:
+                remove[idx] = True
+
+        keep = ~remove
+        keep_indices = keep.nonzero(as_tuple=True)[0].tolist()
+        if len(keep_indices) < len(samples):
+            samples[:] = [samples[i] for i in keep_indices]
+            for k in rewards:
+                rewards[k] = rewards[k][keep_indices].to(device)
+
+            n_removed = int(remove.sum().item())
+            logger.info(
+                f"Crossover: removed {n_removed} dominated parents to balance "
+                f"{int(is_child.sum().item())} children (total now {len(samples)})"
+            )
 
     # ======================================================================
     # Sample redistribution for balanced training
