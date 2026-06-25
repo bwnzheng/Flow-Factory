@@ -59,6 +59,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 self.advantage_processor._pareto_enabled = True
             if getattr(cxo_args, "log_rewards", True):
                 self.advantage_processor._log_crossover_rewards = True
+            self.advantage_processor._child_in_norm = True
             logger.info(
                 f"CrossoverNFT: strategy={cxo_args.strategy} selective={self._selective} "
                 f"include_parents={self._include_parents}"
@@ -165,18 +166,16 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
 
+                # Remove neutral parents BEFORE advantage computation so
+                # advantages are computed once on the final trimmed set.
+                self._remove_neutral_parents(samples, rewards)
+
         self.advantage_processor._child_advantage_scale = 1.0
 
         self.compute_advantages(samples, rewards, store_to_samples=True)
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
-
-        # Remove neutral parents after advantage computation — uses the real
-        # |advantage| values stored on samples.  Total sample count stays at
-        # the original parent count.
-        if self._crossover_enabled and children:
-            self._remove_dominated_parents(samples, rewards)
 
     # ======================================================================
     # Crossover augmentation (local per-group → local denoising)
@@ -327,7 +326,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         child_rewards_dict = self.reward_buffer.rp.compute_rewards(
             my_children, store_to_samples=False, split="pointwise"
         )
-        my_children, child_rewards_dict = self._filter_children(
+        my_children, child_rewards_dict, filter_stats = self._filter_children(
             my_children, my_child_gids_flat, child_rewards_dict, local_g_rewards, local_g_ids
         )
         child_rewards = {
@@ -336,7 +335,9 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
 
         logger.info(
             f"Crossover: {len(groups)} groups, {len(entries)} parents "
-            f"→ {total_children} raw children, {len(my_children)} kept after filter (rank {rank})"
+            f"→ {total_children} raw children, {len(my_children)} kept "
+            f"(layer0={filter_stats['layer0']}, dominated_by_all={filter_stats['dominated_by_all']}, "
+            f"discarded={filter_stats['discarded']}) (rank {rank})"
         )
         return my_children, child_rewards
 
@@ -344,45 +345,72 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
     # Child filtering
 
     def _filter_children(self, children, child_gids, child_rewards_dict, g_rewards, g_ids):
-        """Keep only non-dominated children within each parent group."""
+        """Keep frontier children and fully-dominated children.
+
+        Layer 0 (non-dominated on combined parent+child set) expands the
+        Pareto frontier → positive signal.  Children dominated by ALL parents
+        (every parent >= child in every dimension, at least one >) → negative
+        signal.  Middle children are discarded.
+        """
+        empty_stats = {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
         if not children:
-            return children, child_rewards_dict
+            return children, child_rewards_dict, empty_stats
         reward_keys = list(g_rewards.keys())
         child_gids_arr = np.array(child_gids, dtype=np.int64)
-        keep = np.ones(len(children), dtype=bool)
+        keep = np.zeros(len(children), dtype=bool)
+        n_layer0 = n_dominated_by_all = n_discarded = 0
         for gid in np.unique(child_gids_arr):
             c_idx = np.where(child_gids_arr == gid)[0]
             p_idx = np.where(g_ids == gid)[0]
             if len(p_idx) == 0 or len(c_idx) == 0:
+                keep[c_idx] = True
+                n_layer0 += len(c_idx)
                 continue
-            # Build combined matrix: parents first, then children
-            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)
-            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])
+            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)  # (n_p, R)
+            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])  # (n_c, R)
             combined = np.vstack([p_mat, c_mat])
-            pareto = compute_pareto_mask(combined)
-            # Children are the last len(c_idx) entries
-            keep[c_idx] = pareto[len(p_idx) :]
+            n_p = len(p_idx)
+
+            # Layer 0: non-dominated on combined set
+            all_pareto = compute_pareto_mask(combined)
+            c_pareto = all_pareto[n_p:]  # (n_c,)
+
+            # Children dominated by ALL parents:
+            #   for every parent p: p >= c in all dims AND p > c in at least one dim
+            #   → dominated by each parent individually
+            dominated_by_all = np.ones(len(c_idx), dtype=bool)
+            for p in p_mat:
+                dom_by_p = (p >= c_mat).all(axis=1) & (p > c_mat).any(axis=1)
+                dominated_by_all &= dom_by_p
+
+            g_keep = c_pareto | dominated_by_all
+            keep[c_idx] = g_keep
+            n_layer0 += int(c_pareto.sum())
+            n_dominated_by_all += int(dominated_by_all.sum())
+            n_discarded += int((~g_keep).sum())
+
         filtered_children = [c for i, c in enumerate(children) if keep[i]]
         filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
-        return filtered_children, filtered_rewards
+        stats = {"layer0": n_layer0, "dominated_by_all": n_dominated_by_all, "discarded": n_discarded}
+        return filtered_children, filtered_rewards, stats
 
     # ======================================================================
     # Dominated parent removal
 
-    def _remove_dominated_parents(
+    def _remove_neutral_parents(
         self,
         samples: List[BaseSample],
         rewards: Dict[str, torch.Tensor],
     ) -> None:
         """Remove parents with |advantage| closest to 0 per group.
 
-        Requires that advantages have already been computed and stored in
-        ``sample.extra_kwargs["advantage"]`` on the full parent+child set.
+        Computes a lightweight per-group normalized advantage (weighted
+        reward, parent-only mean/std).  For each group, removes N parents
+        closest to zero advantage (dominated first, then non-dominated),
+        where N equals the number of children in that group.
 
-        For each group, removes N parents closest to zero advantage (dominated
-        first, then non-dominated), where N equals the number of children in
-        that group. Total sample count after removal equals the original parent
-        count.
+        Called BEFORE ``compute_advantages`` so the official advantage
+        computation runs on the final trimmed set.
         """
         if not samples:
             return
@@ -399,11 +427,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             [s.unique_id for s in samples], dtype=torch.long, device=device,
         )
 
-        # Read real advantages (computed in the first pass)
-        adv = torch.tensor(
-            [s.extra_kwargs.get("advantage", 0.0) for s in samples],
-            dtype=torch.float32, device=device,
-        )
+        # Weighted aggregated reward (matches GDPO weights)
+        rw = self.advantage_processor.reward_weights
+        agg = torch.zeros(len(samples), device=device)
+        for k in reward_keys:
+            w = next(iter(rw[k].values()))
+            agg += rewards[k].to(device) * w
 
         remove = torch.zeros(len(samples), dtype=torch.bool, device=device)
         child_gids = uids[is_child].unique()
@@ -424,6 +453,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             p_indices = p_mask.nonzero(as_tuple=True)[0]
             c_indices = c_mask.nonzero(as_tuple=True)[0]
 
+            # Lightweight per-group normalized advantage (parent-only mean/std)
+            p_agg = agg[p_indices]
+            group_mean = p_agg.mean()
+            group_std = p_agg.std()
+            p_adv = (p_agg - group_mean) / (group_std + 1e-6)
+
             # Pareto mask on parents+children combined
             all_indices = torch.cat([p_indices, c_indices])
             all_rewards_np = torch.stack(
@@ -438,7 +473,6 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             dom_mask = ~p_pareto_t
             nondom_mask = p_pareto_t
 
-            p_adv = adv[p_indices]
             dominated_by_adv = p_indices[dom_mask][p_adv[dom_mask].abs().argsort()]
             nondom_by_adv = p_indices[nondom_mask][p_adv[nondom_mask].abs().argsort()]
 

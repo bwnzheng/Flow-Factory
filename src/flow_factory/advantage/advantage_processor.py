@@ -103,6 +103,7 @@ class AdvantageProcessor:
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
         self._child_advantage_scale: float = 1.0  # set by crossover trainers for warmup
+        self._child_in_norm: bool = False  # set by crossover trainers to include children in mean/std
 
     # ------------------------------------------------------------------
     # Public API
@@ -625,15 +626,18 @@ class AdvantageProcessor:
             child_mask = self._build_child_mask(samples, group_indices)
             if self._pareto_enabled:
                 pareto_mask = self._filter_pareto(gathered_rewards, group_indices, child_mask)
-            # Children receive advantage values but do NOT participate in mean/std
-            # computation, so parent-only statistics are used for normalization.
+            # Build norm_mask.  When _child_in_norm is True, children
+            # participate in mean/std alongside parents.
             if pareto_mask is not None:
-                norm_mask = pareto_mask & ~child_mask
+                norm_mask = pareto_mask
             else:
-                norm_mask = ~child_mask
-            # Safety: if norm_mask would exclude everything (e.g. children-only
-            # batch with include_parents=False), fall back to all samples.
-            if not norm_mask.any():
+                norm_mask = None
+            if not self._child_in_norm and child_mask is not None:
+                norm_mask = (
+                    norm_mask & ~child_mask if norm_mask is not None else ~child_mask
+                )
+            # Safety: if norm_mask would exclude everything, fall back to all.
+            if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
 
         # ---- Per-child reward details (after filtering decision) ----
@@ -816,15 +820,18 @@ class AdvantageProcessor:
             child_mask = self._build_child_mask(samples, group_indices)
             if self._pareto_enabled:
                 pareto_mask = self._filter_pareto(gathered_rewards, group_indices, child_mask)
-            # Children receive advantage values but do NOT participate in mean/std
-            # computation, so parent-only statistics are used for normalization.
+            # Build norm_mask.  When _child_in_norm is True, children
+            # participate in mean/std alongside parents.
             if pareto_mask is not None:
-                norm_mask = pareto_mask & ~child_mask
+                norm_mask = pareto_mask
             else:
-                norm_mask = ~child_mask
-            # Safety: if norm_mask would exclude everything (e.g. children-only
-            # batch with include_parents=False), fall back to all samples.
-            if not norm_mask.any():
+                norm_mask = None
+            if not self._child_in_norm and child_mask is not None:
+                norm_mask = (
+                    norm_mask & ~child_mask if norm_mask is not None else ~child_mask
+                )
+            # Safety: if norm_mask would exclude everything, fall back to all.
+            if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
 
         # ---- Per-child reward details (after filtering decision) ----

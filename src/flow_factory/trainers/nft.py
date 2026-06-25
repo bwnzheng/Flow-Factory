@@ -377,6 +377,8 @@ class DiffusionNFTTrainer(BaseTrainer):
                         loss_info['policy_loss'].append(policy_loss.detach())
                         loss_info['unweighted_policy_loss'].append(ori_policy_loss.mean().detach())
                         loss_info['loss'].append(loss.detach())
+                        loss_info['policy_pos_loss_mean'].append((r.squeeze() * positive_loss).mean().detach())
+                        loss_info['policy_neg_loss_mean'].append(((1.0 - r.squeeze()) * negative_loss).mean().detach())
 
                         # 6. Backward and optimizer step
                         self.accelerator.backward(loss)
