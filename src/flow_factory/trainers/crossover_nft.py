@@ -424,23 +424,29 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 continue
 
             p_indices = p_mask.nonzero(as_tuple=True)[0]
-            p_rewards = agg[p_indices]
+            p_agg = agg[p_indices]
+            group_mean = p_agg.mean()
 
-            # Compute Pareto mask on parents to remove dominated first
-            p_rewards_np = torch.stack([rewards[k][p_indices] for k in reward_keys], dim=1).cpu().float().numpy()
+            # Distance to group mean — proxy for |advantage| (closer → more neutral)
+            dist = (p_agg - group_mean).abs()
+
+            # Compute Pareto mask on parents to identify dominated ones
+            p_rewards_np = torch.stack(
+                [rewards[k][p_indices] for k in reward_keys], dim=1
+            ).cpu().float().numpy()
             p_pareto = compute_pareto_mask(p_rewards_np)
             p_pareto_t = torch.from_numpy(p_pareto).to(device)
 
-            # Order: dominated parents first, then non-dominated (by lowest reward)
-            dominated_idx = p_indices[~p_pareto_t]
-            nondom_idx = p_indices[p_pareto_t]
+            # Order: dominated parents first, then non-dominated.
+            # Within each subset, sort by distance to mean (closest first —
+            # least informative signal, best candidates for replacement).
+            dom_mask = ~p_pareto_t
+            nondom_mask = p_pareto_t
 
-            # Sort each subset by reward ascending (remove worst first)
-            dominated_sorted = dominated_idx[agg[dominated_idx].argsort()]
-            nondom_sorted = nondom_idx[agg[nondom_idx].argsort()]
+            dominated_by_dist = p_indices[dom_mask][dist[dom_mask].argsort()]
+            nondom_by_dist = p_indices[nondom_mask][dist[nondom_mask].argsort()]
 
-            # Build ordered removal list
-            removal_order = torch.cat([dominated_sorted, nondom_sorted])
+            removal_order = torch.cat([dominated_by_dist, nondom_by_dist])
             for idx in removal_order[:n_remove]:
                 remove[idx] = True
 
