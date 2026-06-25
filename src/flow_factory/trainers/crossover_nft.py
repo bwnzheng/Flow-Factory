@@ -401,10 +401,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             [s.unique_id for s in samples], dtype=torch.long, device=device,
         )
 
-        # Aggregated reward (simple sum for ranking)
+        # Weighted aggregated reward (matches GDPO weighted sum)
+        reward_weights = self.advantage_processor.reward_weights
         agg = torch.zeros(len(samples), device=device)
         for k in reward_keys:
-            agg += rewards[k].to(device)
+            w = next(iter(reward_weights[k].values()))  # first dataset weight
+            agg += rewards[k].to(device) * w
 
         remove = torch.zeros(len(samples), dtype=torch.bool, device=device)
         child_gids = uids[is_child].unique()
