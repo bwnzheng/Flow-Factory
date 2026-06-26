@@ -99,11 +99,15 @@ class AdvantageProcessor:
 
         # Crossover / Pareto state
         self._pareto_enabled = pareto_config is not None and pareto_config.get("enabled", False)
-        self._log_crossover_rewards: bool = False  # set by crossover trainers via log_rewards option
+        self._log_crossover_rewards: bool = (
+            False  # set by crossover trainers via log_rewards option
+        )
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
         self._child_advantage_scale: float = 1.0  # set by crossover trainers for warmup
-        self._child_in_norm: bool = False  # set by crossover trainers to include children in mean/std
+        self._child_in_norm: bool = (
+            False  # set by crossover trainers to include children in mean/std
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -233,17 +237,27 @@ class AdvantageProcessor:
         Pads to ``max_len`` across ranks, calls :meth:`Accelerator.gather`,
         then strips per-rank padding and concatenates only valid rows.
         """
+        rank = self.accelerator.process_index
         local_n = tensor.shape[0]
         n_t = torch.tensor([local_n], device=self.accelerator.device)
+        logger.debug(f"[rank {rank}] _gather_uneven: gather sizes (local_n={local_n})")
         all_n = self.accelerator.gather(n_t).cpu().tolist()
         max_n = max(all_n)
+        logger.debug(f"[rank {rank}] _gather_uneven: sizes gathered, max_n={max_n}, all_n={all_n}")
         if local_n < max_n:
             pad = torch.zeros(
-                max_n - local_n, *tensor.shape[1:],
-                dtype=tensor.dtype, device=tensor.device,
+                max_n - local_n,
+                *tensor.shape[1:],
+                dtype=tensor.dtype,
+                device=tensor.device,
             )
             tensor = torch.cat([tensor, pad], dim=0)
+        logger.debug(
+            f"[rank {rank}] _gather_uneven: gather data "
+            f"(shape={tensor.shape}, dtype={tensor.dtype})"
+        )
         gathered = self.accelerator.gather(tensor)  # (W * max_n, ...)
+        logger.debug(f"[rank {rank}] _gather_uneven: data gathered, shape={gathered.shape}")
         parts = []
         for rank_i, rank_n in enumerate(all_n):
             if rank_n > 0:
@@ -266,18 +280,28 @@ class AdvantageProcessor:
         R = len(reward_keys)
 
         # Gather prompts (pad both str-length and batch-count dims)
+        rank = self.accelerator.process_index
         prompts_bytes = [s.prompt.encode("utf-8") for s in samples]
         max_str = max((len(b) for b in prompts_bytes), default=0)
         max_str_t = torch.tensor([max_str], dtype=torch.long, device=device)
+        logger.debug(
+            f"[rank {rank}] _gather_for_logging: gather max_str (local_max={max_str}, "
+            f"local_n={len(samples)})"
+        )
         synced = self.accelerator.gather(max_str_t)
         global_max_str = int(synced.max().item()) if synced.numel() > 0 else 0
+        logger.debug(
+            f"[rank {rank}] _gather_for_logging: max_str gathered, global_max={global_max_str}"
+        )
         if global_max_str > 0:
-            str_padded = [
-                list(b.ljust(global_max_str, b"\x00")) for b in prompts_bytes
-            ] or [[0] * global_max_str]
-            t = self._gather_uneven(
-                torch.tensor(str_padded, dtype=torch.uint8, device=device)
-            ).cpu().numpy()
+            str_padded = [list(b.ljust(global_max_str, b"\x00")) for b in prompts_bytes] or [
+                [0] * global_max_str
+            ]
+            t = (
+                self._gather_uneven(torch.tensor(str_padded, dtype=torch.uint8, device=device))
+                .cpu()
+                .numpy()
+            )
             all_prompts = [bytes(row).rstrip(b"\x00").decode("utf-8") for row in t]
         else:
             all_prompts = [""] * len(samples)
@@ -633,9 +657,7 @@ class AdvantageProcessor:
             else:
                 norm_mask = None
             if not self._child_in_norm and child_mask is not None:
-                norm_mask = (
-                    norm_mask & ~child_mask if norm_mask is not None else ~child_mask
-                )
+                norm_mask = norm_mask & ~child_mask if norm_mask is not None else ~child_mask
             # Safety: if norm_mask would exclude everything, fall back to all.
             if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
@@ -827,9 +849,7 @@ class AdvantageProcessor:
             else:
                 norm_mask = None
             if not self._child_in_norm and child_mask is not None:
-                norm_mask = (
-                    norm_mask & ~child_mask if norm_mask is not None else ~child_mask
-                )
+                norm_mask = norm_mask & ~child_mask if norm_mask is not None else ~child_mask
             # Safety: if norm_mask would exclude everything, fall back to all.
             if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
@@ -1436,9 +1456,7 @@ class AdvantageProcessor:
                 groups[gid]["rewards"][name].append(float(gathered_rewards[name][i]))
         return list(groups.values())
 
-    def _add_train_samples(
-        self, log_data: Dict[str, Any], samples: List[BaseSample]
-    ) -> None:
+    def _add_train_samples(self, log_data: Dict[str, Any], samples: List[BaseSample]) -> None:
         """Split samples into parents and children, each capped separately.
 
         Grouped by ``unique_id`` so filenames include group id, e.g.

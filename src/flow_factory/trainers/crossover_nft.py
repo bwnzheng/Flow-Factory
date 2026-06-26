@@ -25,7 +25,7 @@ import tqdm as tqdm_
 
 from ..hparams import CrossoverNFTTrainingArguments
 from ..samples import BaseSample
-from ..utils.base import create_generator, filter_kwargs
+from ..utils.base import create_generator
 from ..utils.logger_utils import setup_logger
 from .crossover import (
     compute_pareto_mask,
@@ -138,9 +138,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             children, child_rewards = self._crossover_augment(samples, rewards)
             if children:
                 # ---- Child count warmup: limit children in early epochs ----
-                warmup_epochs = getattr(
-                    self.training_args.crossover, "child_warmup_epochs", 0
-                )
+                warmup_epochs = getattr(self.training_args.crossover, "child_warmup_epochs", 0)
                 if warmup_epochs > 0 and len(children) > 0:
                     ratio = min(1.0, self.epoch / max(warmup_epochs, 1))
                     target = max(1, int(len(children) * ratio))
@@ -194,9 +192,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # 1. Build local reward arrays + unique_ids for Pareto & child filtering.
         #    In group_contiguous mode all K copies of a prompt share the same
         #    rank, so every group is complete locally — no communication needed.
-        local_g_rewards = {
-            k: torch.as_tensor(v).cpu().numpy() for k, v in parent_rewards.items()
-        }
+        local_g_rewards = {k: torch.as_tensor(v).cpu().numpy() for k, v in parent_rewards.items()}
         local_g_ids = np.array([s.unique_id for s in parent_samples], dtype=np.int64)
 
         # 2. Non-dominated parents per group (local).
@@ -269,7 +265,6 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # Current generation's latent groups: (gid, step, parent, latents, metas)
         current_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]] = child_groups
         all_children: List[BaseSample] = []
-        all_child_gids: List[int] = []
         total_raw = 0
         total_filter_stats = {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
 
@@ -378,7 +373,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                     self._build_child_crossover_groups(
                         gen_layer0, [c.unique_id for c in gen_layer0], gid_to_parent_local
                     )
-                    if gen_layer0 else []
+                    if gen_layer0
+                    else []
                 )
                 if not current_groups:
                     break
@@ -396,7 +392,6 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 )
 
             all_children.extend(gen_kept)
-            all_child_gids.extend([c.unique_id for c in gen_kept])
             total_raw += n_raw
 
         if all_children:
@@ -455,7 +450,9 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 n_layer0 += len(c_idx)
                 continue
             p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)  # (n_p, R)
-            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])  # (n_c, R)
+            c_mat = np.array(
+                [[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx]
+            )  # (n_c, R)
             combined = np.vstack([p_mat, c_mat])
             n_p = len(p_idx)
 
@@ -478,16 +475,21 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             n_discarded += int((~g_keep).sum())
 
         filtered_children = [c for i, c in enumerate(children) if keep[i]]
-        filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
-        stats = {"layer0": n_layer0, "dominated_by_all": n_dominated_by_all, "discarded": n_discarded}
-        return filtered_children, filtered_rewards, stats
+        stats = {
+            "layer0": n_layer0,
+            "dominated_by_all": n_dominated_by_all,
+            "discarded": n_discarded,
+        }
+        return filtered_children, {}, stats
 
-    def _filter_children_layer0(
-        self, children, child_gids, child_rewards_dict, g_rewards, g_ids
-    ):
+    def _filter_children_layer0(self, children, child_gids, child_rewards_dict, g_rewards, g_ids):
         """Keep only layer-0 (non-dominated) children for re-crossover."""
         if not children:
-            return children, child_rewards_dict, {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
+            return (
+                children,
+                child_rewards_dict,
+                {"layer0": 0, "dominated_by_all": 0, "discarded": 0},
+            )
         reward_keys = list(g_rewards.keys())
         child_gids_arr = np.array(child_gids, dtype=np.int64)
         keep = np.zeros(len(children), dtype=bool)
@@ -508,9 +510,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             keep[c_idx] = c_pareto
             n_layer0 += int(c_pareto.sum())
         filtered_children = [c for i, c in enumerate(children) if keep[i]]
-        filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
         stats = {"layer0": n_layer0, "dominated_by_all": 0, "discarded": 0}
-        return filtered_children, filtered_rewards, stats
+        return filtered_children, {}, stats
 
     def _build_child_crossover_groups(
         self,
@@ -591,10 +592,13 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # Build masks
         is_child = torch.tensor(
             [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
-            dtype=torch.bool, device=device,
+            dtype=torch.bool,
+            device=device,
         )
         uids = torch.tensor(
-            [s.unique_id for s in samples], dtype=torch.long, device=device,
+            [s.unique_id for s in samples],
+            dtype=torch.long,
+            device=device,
         )
 
         # Weighted aggregated reward (matches GDPO weights)
@@ -631,9 +635,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
 
             # Pareto mask on parents+children combined
             all_indices = torch.cat([p_indices, c_indices])
-            all_rewards_np = torch.stack(
-                [rewards[k][all_indices] for k in reward_keys], dim=1
-            ).cpu().float().numpy()
+            all_rewards_np = (
+                torch.stack([rewards[k][all_indices] for k in reward_keys], dim=1)
+                .cpu()
+                .float()
+                .numpy()
+            )
             all_pareto = compute_pareto_mask(all_rewards_np)
             all_pareto_t = torch.from_numpy(all_pareto).to(device)
             p_pareto_t = all_pareto_t[:n_parents]
