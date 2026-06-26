@@ -189,6 +189,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         num_steps = self.training_args.num_inference_steps
         rank = self.accelerator.process_index
         reward_keys = sorted(parent_rewards.keys())
+        cxo_cfg = self.training_args.crossover
 
         # 1. Build local reward arrays + unique_ids for Pareto & child filtering.
         #    In group_contiguous mode all K copies of a prompt share the same
@@ -244,102 +245,180 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 for mk, mv in out.metadata.items():
                     meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
                 metas.append(meta)
-            child_groups.append((gid, step, parent, out.child_latents.float(), metas))
+            # Apply mutation to initial crossover latents
+            latents = out.child_latents.float()
+            mutation_std = getattr(cxo_cfg, "mutation_std", 0.0)
+            if mutation_std > 0:
+                latents = latents + torch.randn_like(latents) * mutation_std
+            child_groups.append((gid, step, parent, latents, metas))
 
         if not child_groups:
             empty = {k: torch.zeros(0, device=device) for k in reward_keys}
             return [], empty
 
-        # 5. Batched denoising — children from the same (gid, step) share
-        #    prompt data and denoising start, so they are batched together.
+        # 5. Multi-generation evolutionary loop.
+        #    Evaluate with ODE (deterministic) for unbiased fitness comparison.
+        #    Selection: layer-0 latents survive.  Mutation: Gaussian noise on latents.
         _p0 = parent_samples[0]
         sample_cls = type(_p0)
         n_stored = _p0.all_latents.shape[0]
         timesteps = _p0.timesteps.to(device)
         _shared_extra = dict(_p0.extra_kwargs) if _p0.extra_kwargs else {}
+        n_generations = max(1, getattr(cxo_cfg, "evolution_generations", 1))
 
-        my_children: List[BaseSample] = []
-        my_child_gids_flat: List[int] = []
-        total_children = sum(lat.shape[0] for _, _, _, lat, _ in child_groups)
+        # Current generation's latent groups: (gid, step, parent, latents, metas)
+        current_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]] = child_groups
+        all_children: List[BaseSample] = []
+        all_child_gids: List[int] = []
+        total_raw = 0
+        total_filter_stats = {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
 
-        for gid, step, parent, child_latents_batch, metas in tqdm(
-            child_groups,
-            desc=f"Child denoising (rank {rank})",
-            disable=not self.log_args.verbose,
-            position=rank,
-        ):
-            child_batch = {
-                k: getattr(parent, k).to(device)
-                for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids")
-                if getattr(parent, k, None) is not None
+        for gen_idx in range(n_generations):
+            gen_children: List[BaseSample] = []
+            gen_gids: List[int] = []
+            n_raw = sum(lat.shape[0] for _, _, _, lat, _ in current_groups)
+
+            for gid, step, parent, child_latents_batch, metas in tqdm(
+                current_groups,
+                desc=f"Child denoising gen {gen_idx} (rank {rank})",
+                disable=not self.log_args.verbose,
+                position=rank,
+            ):
+                child_batch = {
+                    k: getattr(parent, k).to(device)
+                    for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids")
+                    if getattr(parent, k, None) is not None
+                }
+                Mg = child_latents_batch.shape[0]
+                for m in range(Mg):
+                    single_latent = child_latents_batch[m : m + 1]
+                    meta_m = metas[m]
+                    with self.sampling_context():
+                        finals, _, _, _ = run_denoising_phase(
+                            adapter=self.adapter,
+                            accelerator=self.accelerator,
+                            autocast_ctx=self.autocast,
+                            latents=single_latent,
+                            timesteps=timesteps,
+                            start_idx=step,
+                            end_idx=num_steps,
+                            batch=child_batch,
+                            training_args=self.training_args,
+                            compute_log_prob=False,
+                            collect_trajectory=False,
+                        )
+                    final = finals[0:1]
+                    imgs = self.adapter.decode_latents(final)
+                    al = final.expand(n_stored, *final.shape[1:]).clone()
+                    lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
+                    lmap[-1] = n_stored - 1
+
+                    extra = dict(_shared_extra)
+                    extra.update(
+                        is_crossover_child=True,
+                        crossover_step=step,
+                        crossover_strategy=cxo_cfg.strategy,
+                        crossover_meta=meta_m,
+                        generation=gen_idx,
+                    )
+                    pooled = getattr(parent, "pooled_prompt_embeds", None)
+                    if pooled is not None:
+                        extra["pooled_prompt_embeds"] = pooled
+                    # Store crossover latent for potential re-crossover (squeeze batch dim)
+                    extra["_cxo_latent"] = single_latent.detach().cpu().squeeze(0)
+                    child = sample_cls(
+                        timesteps=timesteps,
+                        all_latents=al,
+                        latent_index_map=lmap,
+                        image=imgs,
+                        log_probs=None,
+                        log_prob_index_map=None,
+                        prompt=parent.prompt,
+                        prompt_ids=parent.prompt_ids,
+                        prompt_embeds=parent.prompt_embeds,
+                        negative_prompt=parent.negative_prompt,
+                        _unique_id=gid,
+                        applicable_rewards=set(),
+                        extra_kwargs=extra,
+                    )
+                    gen_children.append(child)
+                    gen_gids.append(gid)
+
+            # Evaluate this generation (handle empty for ranks with no children)
+            if gen_children:
+                gen_rewards_dict = self.reward_buffer.rp.compute_rewards(
+                    gen_children, store_to_samples=False, split="pointwise"
+                )
+            else:
+                gen_rewards_dict = {k: np.array([]) for k in reward_keys}
+
+            n_before = len(gen_children)
+            # Full filter for training: keep layer-0 + dominated_by_all
+            gen_kept, _, fstats = self._filter_children(
+                gen_children, gen_gids, gen_rewards_dict, local_g_rewards, local_g_ids
+            )
+            for k in total_filter_stats:
+                total_filter_stats[k] += fstats[k]
+
+            # Build next generation from layer-0 children (including their latents)
+            if gen_idx < n_generations - 1:
+                gen_layer0, _, _ = self._filter_children_layer0(
+                    gen_children, gen_gids, gen_rewards_dict, local_g_rewards, local_g_ids
+                )
+                current_groups = (
+                    self._build_child_crossover_groups(
+                        gen_layer0, [c.unique_id for c in gen_layer0], gid_to_parent_local
+                    )
+                    if gen_layer0 else []
+                )
+                if not current_groups:
+                    break
+                logger.info(
+                    f"Evolution gen {gen_idx}: {n_before} children → "
+                    f"{fstats['layer0']} layer-0 + {fstats['dominated_by_all']} dominated "
+                    f"= {len(gen_kept)} kept ({len(current_groups)} groups for next) "
+                    f"(rank {rank})"
+                )
+            else:
+                logger.info(
+                    f"Evolution gen {gen_idx} (final): {n_before} children → "
+                    f"{fstats['layer0']} layer-0 + {fstats['dominated_by_all']} dominated "
+                    f"= {len(gen_kept)} kept, {fstats['discarded']} discarded (rank {rank})"
+                )
+
+            all_children.extend(gen_kept)
+            all_child_gids.extend([c.unique_id for c in gen_kept])
+            total_raw += n_raw
+
+        if all_children:
+            child_rewards_dict = self.reward_buffer.rp.compute_rewards(
+                all_children, store_to_samples=False, split="pointwise"
+            )
+            child_rewards = {
+                k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
             }
-            with self.sampling_context():
-                finals, _, _, _ = run_denoising_phase(
-                    adapter=self.adapter,
-                    accelerator=self.accelerator,
-                    autocast_ctx=self.autocast,
-                    latents=child_latents_batch,
-                    timesteps=timesteps,
-                    start_idx=step,
-                    end_idx=num_steps,
-                    batch=child_batch,
-                    training_args=self.training_args,
-                    compute_log_prob=False,
-                    collect_trajectory=False,
-                )
-            Mg = child_latents_batch.shape[0]
-            for m in range(Mg):
-                final = finals[m : m + 1]
-                imgs = self.adapter.decode_latents(final)
-                al = final.expand(n_stored, *final.shape[1:]).clone()
-                lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
-                lmap[-1] = n_stored - 1
-
-                extra = dict(_shared_extra)
-                extra.update(
-                    is_crossover_child=True,
-                    crossover_step=step,
-                    crossover_strategy=self.training_args.crossover.strategy,
-                    crossover_meta=metas[m],
-                )
-                pooled = getattr(parent, "pooled_prompt_embeds", None)
-                if pooled is not None:
-                    extra["pooled_prompt_embeds"] = pooled
-                child = sample_cls(
-                    timesteps=timesteps,
-                    all_latents=al,
-                    latent_index_map=lmap,
-                    image=imgs,
-                    log_probs=None,
-                    log_prob_index_map=None,
-                    prompt=parent.prompt,
-                    prompt_ids=parent.prompt_ids,
-                    prompt_embeds=parent.prompt_embeds,
-                    negative_prompt=parent.negative_prompt,
-                    _unique_id=gid,
-                    applicable_rewards=set(),
-                    extra_kwargs=extra,
-                )
-                my_children.append(child)
-                my_child_gids_flat.append(gid)
-
-        child_rewards_dict = self.reward_buffer.rp.compute_rewards(
-            my_children, store_to_samples=False, split="pointwise"
-        )
-        my_children, child_rewards_dict, filter_stats = self._filter_children(
-            my_children, my_child_gids_flat, child_rewards_dict, local_g_rewards, local_g_ids
-        )
-        child_rewards = {
-            k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
-        }
+        else:
+            child_rewards = {k: torch.zeros(0, device=device) for k in reward_keys}
 
         logger.info(
             f"Crossover: {len(groups)} groups, {len(entries)} parents "
-            f"→ {total_children} raw children, {len(my_children)} kept "
-            f"(layer0={filter_stats['layer0']}, dominated_by_all={filter_stats['dominated_by_all']}, "
-            f"discarded={filter_stats['discarded']}) (rank {rank})"
+            f"→ {total_raw} raw children ({n_generations} gens), {len(all_children)} kept "
+            f"(layer0={total_filter_stats['layer0']}, "
+            f"dominated_by_all={total_filter_stats['dominated_by_all']}, "
+            f"discarded={total_filter_stats['discarded']}) (rank {rank})"
         )
-        return my_children, child_rewards
+        # Clean up internal keys that would break BaseSample.stack (parents
+        # don't have them → mixed None/tensor in the same field).
+        for c in all_children:
+            c.extra_kwargs.pop("_cxo_latent", None)
+
+        # Sync device stream — ensure all async denoising + reward ops
+        # complete before the gather in downstream compute_advantages.
+        if device.type == "npu" and hasattr(torch, "npu"):
+            torch.npu.synchronize()
+        elif device.type == "cuda":
+            torch.cuda.synchronize()
+        return all_children, child_rewards
 
     # ======================================================================
     # Child filtering
@@ -394,8 +473,90 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         stats = {"layer0": n_layer0, "dominated_by_all": n_dominated_by_all, "discarded": n_discarded}
         return filtered_children, filtered_rewards, stats
 
+    def _filter_children_layer0(
+        self, children, child_gids, child_rewards_dict, g_rewards, g_ids
+    ):
+        """Keep only layer-0 (non-dominated) children for re-crossover."""
+        if not children:
+            return children, child_rewards_dict, {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
+        reward_keys = list(g_rewards.keys())
+        child_gids_arr = np.array(child_gids, dtype=np.int64)
+        keep = np.zeros(len(children), dtype=bool)
+        n_layer0 = 0
+        for gid in np.unique(child_gids_arr):
+            c_idx = np.where(child_gids_arr == gid)[0]
+            p_idx = np.where(g_ids == gid)[0]
+            if len(p_idx) == 0:
+                keep[c_idx] = True
+                n_layer0 += len(c_idx)
+                continue
+            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)
+            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])
+            combined = np.vstack([p_mat, c_mat])
+            n_p = len(p_idx)
+            all_pareto = compute_pareto_mask(combined)
+            c_pareto = all_pareto[n_p:]
+            keep[c_idx] = c_pareto
+            n_layer0 += int(c_pareto.sum())
+        filtered_children = [c for i, c in enumerate(children) if keep[i]]
+        filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
+        stats = {"layer0": n_layer0, "dominated_by_all": 0, "discarded": 0}
+        return filtered_children, filtered_rewards, stats
+
+    def _build_child_crossover_groups(
+        self,
+        children: List[BaseSample],
+        child_gids: List[int],
+        gid_to_parent: Dict[int, BaseSample],
+    ) -> List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]]:
+        """Re-crossover surviving children's latents for the next generation.
+
+        Groups children by (gid, step), adds parent latent for elitism,
+        crosses the pool, and returns new child_groups for denoising.
+        """
+        device = self.accelerator.device
+        # Group children's latents by (gid, step)
+        latent_groups: Dict[Tuple[int, int], List[torch.Tensor]] = defaultdict(list)
+        for child, gid in zip(children, child_gids):
+            step = child.extra_kwargs.get("crossover_step")
+            latent = child.extra_kwargs.get("_cxo_latent")
+            if step is not None and latent is not None:
+                latent_groups[(gid, step)].append(latent.to(device))
+
+        new_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]] = []
+        for (gid, step), gl in latent_groups.items():
+            parent = gid_to_parent.get(gid)
+            if parent is None:
+                continue
+            # Elitism: include original parent latents so good genes never lost
+            parent_idx = int(parent.latent_index_map[step])
+            parent_latent = parent.all_latents[parent_idx].to(device)
+            gl = [parent_latent] + gl
+            if len(gl) < 2:
+                continue
+            gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
+            out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
+            Mg = out.child_latents.shape[0]
+            metas: List[Dict[str, Any]] = []
+            for m in range(Mg):
+                meta: Dict[str, Any] = {
+                    "parent_i": int(out.parent_indices_i[m]),
+                    "parent_j": int(out.parent_indices_j[m]),
+                }
+                for mk, mv in out.metadata.items():
+                    meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
+                metas.append(meta)
+            latents = out.child_latents.float()
+            # Apply mutation after re-crossover
+            mutation_std = getattr(self.training_args.crossover, "mutation_std", 0.0)
+            if mutation_std > 0:
+                latents = latents + torch.randn_like(latents) * mutation_std
+            new_groups.append((gid, step, parent, latents, metas))
+
+        return new_groups
+
     # ======================================================================
-    # Dominated parent removal
+    # Neutral parent removal
 
     def _remove_neutral_parents(
         self,

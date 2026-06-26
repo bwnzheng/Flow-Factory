@@ -118,6 +118,28 @@ class CrossoverArguments(ArgABC):
             )
         },
     )
+    evolution_generations: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Number of evolutionary generations.  Generation 0 crosses parents; "
+                "each subsequent generation crosses the layer-0 children from the "
+                "previous generation.  Evaluation uses ODE (deterministic) for "
+                "unbiased fitness comparison.  Default 1 = single generation."
+            )
+        },
+    )
+    mutation_std: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Standard deviation of Gaussian noise added to crossover latents "
+                "as mutation.  Applied after each crossover operation (both initial "
+                "and re-crossover between generations).  0 = no mutation.  "
+                "Typical values: 0.01–0.1 (relative to latent scale)."
+            )
+        },
+    )
 
 
 # ============================================================================
