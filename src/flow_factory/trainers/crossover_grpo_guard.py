@@ -143,9 +143,15 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
 
     def prepare_feedback(self, samples: List[BaseSample]) -> None:
         device = self.accelerator.device
+        rank = self.accelerator.process_index
         rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
         if self._crossover_enabled:
+            logger.info(f"[rank {rank}] prepare_feedback: calling _crossover_augment")
             children, child_rewards = self._crossover_augment(samples, rewards)
+            logger.info(
+                f"[rank {rank}] prepare_feedback: _crossover_augment returned "
+                f"{len(children)} children"
+            )
             if children:
                 # ---- Child count warmup: limit children in early epochs ----
                 warmup_epochs = getattr(self.training_args.crossover, "child_warmup_epochs", 0)
@@ -157,6 +163,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                         children = [children[i] for i in idx]
                         child_rewards = {k: v[idx] for k, v in child_rewards.items()}
 
+                logger.info(f"[rank {rank}] prepare_feedback: merging children into samples")
                 if self._include_parents:
                     samples.extend(children)
                     rewards = {
@@ -174,10 +181,13 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 perm = sorted(range(len(samples)), key=lambda i: uids[i])
                 samples[:] = [samples[i] for i in perm]
                 rewards = {k: v[perm].to(device) for k, v in rewards.items()}
+                logger.info(f"[rank {rank}] prepare_feedback: merged, total {len(samples)} samples")
 
         self.advantage_processor._child_advantage_scale = 1.0
 
+        logger.info(f"[rank {rank}] prepare_feedback: calling compute_advantages")
         self.compute_advantages(samples, rewards, store_to_samples=True)
+        logger.info(f"[rank {rank}] prepare_feedback: compute_advantages done")
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
@@ -448,6 +458,10 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         for c in all_children:
             c.extra_kwargs.pop("_cxo_latent", None)
 
+        logger.info(
+            f"[rank {rank}] _crossover_augment: computing rewards for "
+            f"{len(all_children)} all_children"
+        )
         if all_children:
             child_rewards_dict = self.reward_buffer.rp.compute_rewards(
                 all_children, store_to_samples=False, split="pointwise"
@@ -457,6 +471,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             }
         else:
             child_rewards = {k: torch.zeros(0, device=device) for k in reward_keys}
+        logger.info(f"[rank {rank}] _crossover_augment: rewards computed")
 
         logger.info(
             f"Crossover: {len(groups)} groups, {len(entries)} parents "
@@ -466,11 +481,13 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             f"discarded={total_filter_stats['discarded']}) (rank {rank})"
         )
 
+        logger.info(f"[rank {rank}] _crossover_augment: device sync before return")
         # Sync device stream before downstream gather in compute_advantages
         if device.type == "npu" and hasattr(torch, "npu"):
             torch.npu.synchronize()
         elif device.type == "cuda":
             torch.cuda.synchronize()
+        logger.info(f"[rank {rank}] _crossover_augment: returning")
         return all_children, child_rewards
 
     # ======================================================================
