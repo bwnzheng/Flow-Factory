@@ -880,25 +880,15 @@ class AdvantageProcessor:
         bn_mean, bn_std = self._global_mean_std(values_for_bn)
         advantages = (combined_advantages - bn_mean) / bn_std
 
-        # DEBUG: skip gather to isolate hang
-        _SKIP_GATHER = True
-        if _SKIP_GATHER:
-            n_local = len(samples)
-            all_prompts = [s.prompt for s in samples]
-            all_rewards = gathered_rewards
-            all_unique_ids = np.array([s.unique_id for s in samples], dtype=np.int64)
-            all_advantages = advantages
-            all_applicable = applicable
-        else:
-            all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
-                self._gather_for_logging(
-                    samples,
-                    gathered_rewards,
-                    group_indices,
-                    advantages=advantages,
-                    applicable=applicable,
-                )
+        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
+            self._gather_for_logging(
+                samples,
+                gathered_rewards,
+                group_indices,
+                advantages=advantages,
+                applicable=applicable,
             )
+        )
 
         # stat_mask needs to match gathered rewards in group_contiguous mode.
         if child_mask is not None and self.group_on_same_rank:
