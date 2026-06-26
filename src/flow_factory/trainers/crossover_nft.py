@@ -257,11 +257,9 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 for mk, mv in out.metadata.items():
                     meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
                 metas.append(meta)
-            # Apply mutation to initial crossover latents
+            # No mutation on initial crossover — mutation is applied only
+            # in subsequent re-crossover generations.
             latents = out.child_latents.float()
-            mutation_std = getattr(cxo_cfg, "mutation_std", 0.0)
-            if mutation_std > 0:
-                latents = latents + torch.randn_like(latents) * mutation_std
             child_groups.append((gid, step, parent, latents, metas))
 
         if not child_groups:
@@ -623,12 +621,31 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             device=device,
         )
 
-        # Weighted aggregated reward (matches GDPO weights)
+        # Build lightweight advantage matching the configured aggregation method.
+        # GDPO: per-reward group normalisation → weighted sum.
+        # Weighted sum: weighted sum → group normalisation.
         rw = self.advantage_processor.reward_weights
+        aggregation = self.training_args.advantage_aggregation
         agg = torch.zeros(len(samples), device=device)
-        for k in reward_keys:
-            w = next(iter(rw[k].values()))
-            agg += rewards[k].to(device) * w
+
+        if aggregation == "gdpo":
+            # GDPO: normalise each reward independently per-group (parent-only
+            # stats), then weighted sum.
+            for k in reward_keys:
+                w = next(iter(rw[k].values()))
+                r_t = rewards[k].to(device).clone()
+                for gid in child_gids:
+                    p_mask = ~is_child & (uids == gid)
+                    n_p = p_mask.sum().item()
+                    if n_p > 1:
+                        p_vals = r_t[p_mask]
+                        r_t[p_mask] = (p_vals - p_vals.mean()) / (p_vals.std() + 1e-6)
+                agg += r_t * w
+        else:
+            # Weighted sum: aggregate first, then group normalise below.
+            for k in reward_keys:
+                w = next(iter(rw[k].values()))
+                agg += rewards[k].to(device) * w
 
         remove = torch.zeros(len(samples), dtype=torch.bool, device=device)
         child_gids = uids[is_child].unique()
