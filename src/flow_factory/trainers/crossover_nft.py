@@ -290,24 +290,23 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                     if getattr(parent, k, None) is not None
                 }
                 Mg = child_latents_batch.shape[0]
+                with self.sampling_context():
+                    finals, _, _, _ = run_denoising_phase(
+                        adapter=self.adapter,
+                        accelerator=self.accelerator,
+                        autocast_ctx=self.autocast,
+                        latents=child_latents_batch,
+                        timesteps=timesteps,
+                        start_idx=step,
+                        end_idx=num_steps,
+                        batch=child_batch,
+                        training_args=self.training_args,
+                        compute_log_prob=False,
+                        collect_trajectory=False,
+                    )
+                cross_latents = child_latents_batch.detach().cpu()
                 for m in range(Mg):
-                    single_latent = child_latents_batch[m : m + 1]
-                    meta_m = metas[m]
-                    with self.sampling_context():
-                        finals, _, _, _ = run_denoising_phase(
-                            adapter=self.adapter,
-                            accelerator=self.accelerator,
-                            autocast_ctx=self.autocast,
-                            latents=single_latent,
-                            timesteps=timesteps,
-                            start_idx=step,
-                            end_idx=num_steps,
-                            batch=child_batch,
-                            training_args=self.training_args,
-                            compute_log_prob=False,
-                            collect_trajectory=False,
-                        )
-                    final = finals[0:1]
+                    final = finals[m : m + 1]
                     imgs = self.adapter.decode_latents(final)
                     al = final.expand(n_stored, *final.shape[1:]).clone()
                     lmap = torch.full((num_steps + 1,), -1, dtype=torch.long, device=device)
@@ -318,14 +317,13 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                         is_crossover_child=True,
                         crossover_step=step,
                         crossover_strategy=cxo_cfg.strategy,
-                        crossover_meta=meta_m,
+                        crossover_meta=metas[m],
                         generation=gen_idx,
                     )
                     pooled = getattr(parent, "pooled_prompt_embeds", None)
                     if pooled is not None:
                         extra["pooled_prompt_embeds"] = pooled
-                    # Store crossover latent for potential re-crossover (squeeze batch dim)
-                    extra["_cxo_latent"] = single_latent.detach().cpu().squeeze(0)
+                    extra["_cxo_latent"] = cross_latents[m]
                     child = sample_cls(
                         timesteps=timesteps,
                         all_latents=al,
@@ -373,10 +371,6 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
 
             # Build next generation from layer-0 children (including their latents)
             if gen_idx < n_generations - 1:
-                # DEBUG: skip re-crossover, just repeat current groups
-                _DEBUG_NO_RECROSSOVER = True
-                if _DEBUG_NO_RECROSSOVER:
-                    continue  # reuse same current_groups
                 gen_layer0, _, _ = self._filter_children_layer0(
                     gen_children, gen_gids, gen_rewards_dict, local_g_rewards, local_g_ids
                 )
