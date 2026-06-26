@@ -433,13 +433,15 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         for c in all_children:
             c.extra_kwargs.pop("_cxo_latent", None)
 
-        logger.info(f"[rank {rank}] _crossover_augment: device sync before return")
-        # Sync device stream — ensure all async denoising + reward ops
-        # complete before the gather in downstream compute_advantages.
+        logger.info(f"[rank {rank}] _crossover_augment: device sync + barrier before return")
+        # Sync local device stream then wait for all ranks so that no rank
+        # races ahead into compute_advantages (which does accelerator.gather)
+        # while other ranks are still computing rewards.
         if device.type == "npu" and hasattr(torch, "npu"):
             torch.npu.synchronize()
         elif device.type == "cuda":
             torch.cuda.synchronize()
+        self.accelerator.wait_for_everyone()
         logger.info(f"[rank {rank}] _crossover_augment: returning")
         return all_children, child_rewards
 
