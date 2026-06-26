@@ -344,11 +344,22 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                     gen_children.append(child)
                     gen_gids.append(gid)
 
+            # Sync NPU/CUDA after denoising before reward computation
+            if current_groups:
+                if device.type == "npu" and hasattr(torch, "npu"):
+                    torch.npu.synchronize()
+                elif device.type == "cuda":
+                    torch.cuda.synchronize()
+
             # Evaluate this generation (handle empty for ranks with no children)
             if gen_children:
                 gen_rewards_dict = self.reward_buffer.rp.compute_rewards(
                     gen_children, store_to_samples=False, split="pointwise"
                 )
+                if device.type == "npu" and hasattr(torch, "npu"):
+                    torch.npu.synchronize()
+                elif device.type == "cuda":
+                    torch.cuda.synchronize()
             else:
                 gen_rewards_dict = {k: np.array([]) for k in reward_keys}
 
@@ -362,6 +373,10 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
 
             # Build next generation from layer-0 children (including their latents)
             if gen_idx < n_generations - 1:
+                # DEBUG: skip re-crossover, just repeat current groups
+                _DEBUG_NO_RECROSSOVER = True
+                if _DEBUG_NO_RECROSSOVER:
+                    continue  # reuse same current_groups
                 gen_layer0, _, _ = self._filter_children_layer0(
                     gen_children, gen_gids, gen_rewards_dict, local_g_rewards, local_g_ids
                 )
