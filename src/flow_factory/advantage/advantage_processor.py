@@ -434,7 +434,7 @@ class AdvantageProcessor:
             t = self.accelerator.reduce(t, reduction="sum")  # 1 call, 3 scalars
             n, s, ss = t[0].item(), t[1].item(), t[2].item()
             mean = s / n
-            std = max((ss / n - mean**2) ** 0.5, 1e-6)
+            std = max(max(ss / n - mean**2, 0.0) ** 0.5, 1e-6)
         else:
             mean = float(np.mean(values))
             std = max(float(np.std(values)), 1e-6)
