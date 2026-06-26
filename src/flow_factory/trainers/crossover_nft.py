@@ -626,6 +626,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # Weighted sum: weighted sum → group normalisation.
         rw = self.advantage_processor.reward_weights
         aggregation = self.training_args.advantage_aggregation
+        child_gids = uids[is_child].unique()
         agg = torch.zeros(len(samples), device=device)
 
         if aggregation == "gdpo":
@@ -648,8 +649,6 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 agg += rewards[k].to(device) * w
 
         remove = torch.zeros(len(samples), dtype=torch.bool, device=device)
-        child_gids = uids[is_child].unique()
-
         for gid in child_gids:
             c_mask = is_child & (uids == gid)
             p_mask = ~is_child & (uids == gid)
