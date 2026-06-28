@@ -534,6 +534,16 @@ class AdvantageProcessor:
 
         effective_w_g = base_w_g * relative_stds  # (R, G)
 
+        # --- 3b. Boost / dampen ratios for logging ---
+        self._stddev_boost_stats: Dict[str, Tuple[float, float]] = {}
+        for r in range(R):
+            rel = relative_stds[r, valid_mask[r]]
+            if len(rel) > 0:
+                self._stddev_boost_stats[reward_keys[r]] = (
+                    float((rel > 1.0).mean()),
+                    float((rel < 1.0).mean()),
+                )
+
         # --- 4. Expand to (R, S) and zero out non-applicable ---
         effective_weights = effective_w_g[:, group_indices]  # (R, S)
         effective_weights[~applicable] = 0.0
@@ -915,6 +925,9 @@ class AdvantageProcessor:
                     self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_std"] = (
                         float(np.std(w_pos))
                     )
+            for key, (boost, dampen) in self._stddev_boost_stats.items():
+                self._pending_advantage_metrics[f"train/stddev_boost_ratio_{key}"] = boost
+                self._pending_advantage_metrics[f"train/stddev_dampen_ratio_{key}"] = dampen
 
         # Scale child advantages for warmup (logged values remain unscaled).
         if child_mask is not None and self._child_advantage_scale != 1.0:
@@ -1099,6 +1112,9 @@ class AdvantageProcessor:
                     self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_std"] = (
                         float(np.std(w_pos))
                     )
+            for key, (boost, dampen) in self._stddev_boost_stats.items():
+                self._pending_advantage_metrics[f"train/stddev_boost_ratio_{key}"] = boost
+                self._pending_advantage_metrics[f"train/stddev_dampen_ratio_{key}"] = dampen
 
         # Scale child advantages for warmup (logged values remain unscaled).
         if child_mask is not None and self._child_advantage_scale != 1.0:
