@@ -84,6 +84,8 @@ class AdvantageProcessor:
         source_id_to_name: Optional[List[str]] = None,
         max_log_samples: Optional[int] = None,
         pareto_config: Optional[Dict[str, Any]] = None,
+        stddev_reweighting: bool = False,
+        stddev_ema_decay: float = 0.99,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -91,11 +93,16 @@ class AdvantageProcessor:
         self.global_std = global_std
         self.sampler_type = sampler_type
         self.verbose = verbose
+        self.stddev_reweighting = stddev_reweighting
+        self.stddev_ema_decay = stddev_ema_decay
         self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
 
         self.group_on_same_rank = sampler_type == "group_contiguous"
         self._pending_advantage_metrics: Optional[Dict[str, Any]] = None
+
+        # Per-reward EMA of mean std across groups (for stddev reweighting).
+        self._stddev_ema: Dict[str, float] = {}
 
         # Crossover / Pareto state
         self._pareto_enabled = pareto_config is not None and pareto_config.get("enabled", False)
@@ -419,6 +426,119 @@ class AdvantageProcessor:
                     matrix[r_idx, s_idx] = default_w
         return matrix
 
+    def _compute_stddev_weights(
+        self,
+        stack: np.ndarray,
+        weight_matrix: np.ndarray,
+        group_indices: np.ndarray,
+        applicable: np.ndarray,
+        reward_keys: List[str],
+        norm_mask: Optional[np.ndarray] = None,
+        eps: float = 1e-12,
+    ) -> np.ndarray:
+        """Reweight *weight_matrix* by per-reward within-group relative std.
+
+        For each reward *r* and group *g*:
+
+        1. Compute ``std_{r,g}`` (population std of reward *r* over samples
+           in group *g* that are both applicable and pass *norm_mask*).
+        2. Compute ``mean_std_r = mean_g(std_{r,g})`` — averaged only over
+           groups with ≥2 applicable samples.  Update an EMA of this value
+           (decay ``self.stddev_ema_decay``) and use the EMA for normalisation
+           so that the reference scale is stable across steps.
+        3. ``relative_std_{r,g} = std_{r,g} / ema_mean_std_r``
+        4. ``effective_w_{r,g} = base_weight_{r,g} * relative_std_{r,g}``
+
+        When the EMA for a reward has not been initialised yet (first step),
+        the current *mean_std_r* is used directly.
+
+        Args:
+            stack: ``(R, S)`` raw reward values.
+            weight_matrix: ``(R, S)`` base per-reward per-sample weights.
+            group_indices: ``(S,)`` integer group ids.
+            applicable: ``(R, S)`` boolean applicability mask.
+            reward_keys: Ordered list of reward names (used as EMA dict keys).
+            norm_mask: Optional ``(S,)`` boolean — only samples passing this
+                mask participate in std computation.
+            eps: Floor for near-zero stds.
+
+        Returns:
+            ``(R, S)`` effective weight matrix with stddev reweighting applied.
+        """
+        R, S = stack.shape
+        num_groups = group_indices.max() + 1
+
+        # --- 1. Per-reward per-group std via vectorised bincount ---
+        # Shape (R, G): std of each reward within each group.
+        group_stds = np.zeros((R, num_groups), dtype=np.float64)
+        # valid_mask[r, g]: group g has >=2 applicable samples for reward r.
+        valid_mask = np.zeros((R, num_groups), dtype=bool)
+
+        for r in range(R):
+            values = stack[r]
+            stat_mask = applicable[r].copy()
+            if norm_mask is not None:
+                stat_mask = stat_mask & norm_mask
+
+            # Bincount-based group std (same pattern as _group_normalize).
+            masked_vals = np.where(stat_mask, values, 0.0)
+            counts = np.bincount(
+                group_indices,
+                weights=stat_mask.astype(np.float64),
+                minlength=num_groups,
+            )
+            sums = np.bincount(group_indices, weights=masked_vals, minlength=num_groups)
+            safe_counts = np.maximum(counts, 1.0)
+            means = sums / safe_counts
+            residuals = np.where(stat_mask, values - means[group_indices], 0.0)
+            sq_sums = np.bincount(group_indices, weights=residuals**2, minlength=num_groups)
+            stds = np.sqrt(sq_sums / safe_counts)
+
+            # Groups with <2 valid samples have undefined std → 0.
+            valid = counts >= 2.0
+            stds[~valid] = 0.0
+            valid_mask[r] = valid
+            group_stds[r] = np.maximum(stds, eps)
+
+        # --- 2. Current-step mean std, EMA update, normalisation reference ---
+        current_means = np.array(
+            [group_stds[r, valid_mask[r]].mean() if valid_mask[r].any() else eps for r in range(R)],
+            dtype=np.float64,
+        )
+
+        ema_means = np.empty(R, dtype=np.float64)
+        for r in range(R):
+            key = reward_keys[r]
+            cur = float(current_means[r])
+            prev = self._stddev_ema.get(key)
+            if prev is None:
+                # First step: seed the EMA directly.
+                self._stddev_ema[key] = cur
+                ema_means[r] = cur
+            else:
+                ema = self.stddev_ema_decay * prev + (1.0 - self.stddev_ema_decay) * cur
+                self._stddev_ema[key] = ema
+                ema_means[r] = ema
+        ema_means = np.maximum(ema_means, eps)
+
+        # --- 3. Relative std & effective weight ---
+        # relative_std_{r,g} = std_{r,g} / ema_mean_std_r
+        relative_stds = group_stds / ema_means[:, None]  # (R, G)
+
+        # Base weight per (reward, group)
+        first_of_group = np.array(
+            [np.where(group_indices == g)[0][0] for g in range(num_groups)],
+            dtype=np.int64,
+        )
+        base_w_g = weight_matrix[:, first_of_group]  # (R, G)
+
+        effective_w_g = base_w_g * relative_stds  # (R, G)
+
+        # --- 4. Expand to (R, S) and zero out non-applicable ---
+        effective_weights = effective_w_g[:, group_indices]  # (R, S)
+        effective_weights[~applicable] = 0.0
+        return effective_weights
+
     def _to_local(
         self,
         values: np.ndarray,
@@ -677,6 +797,17 @@ class AdvantageProcessor:
         )  # (R, S)
         self._assert_no_nan_at_applicable(stack, reward_keys, applicable)
 
+        # ---- Stddev reweighting (optional) ----
+        if self.stddev_reweighting:
+            weight_matrix = self._compute_stddev_weights(
+                stack,
+                weight_matrix,
+                group_indices,
+                applicable,
+                reward_keys=reward_keys,
+                norm_mask=norm_mask,
+            )
+
         # Aggregate: weighted sum over applicable rewards only.
         contrib = np.where(applicable, stack, 0.0) * weight_matrix
         if pareto_mask is not None:
@@ -771,6 +902,19 @@ class AdvantageProcessor:
             reward_keys=reward_keys,
             stat_mask=log_stat_mask,
         )
+
+        # ---- Log stddev effective weights (optional) ----
+        if self.stddev_reweighting:
+            for r_idx, key in enumerate(reward_keys):
+                w = weight_matrix[r_idx]
+                w_pos = w[w > 0]
+                if len(w_pos) > 0:
+                    self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_mean"] = (
+                        float(np.mean(w_pos))
+                    )
+                    self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_std"] = (
+                        float(np.std(w_pos))
+                    )
 
         # Scale child advantages for warmup (logged values remain unscaled).
         if child_mask is not None and self._child_advantage_scale != 1.0:
@@ -867,6 +1011,17 @@ class AdvantageProcessor:
         stack = np.stack([gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=0)
         self._assert_no_nan_at_applicable(stack, reward_keys, applicable, label="GDPO")
 
+        # ---- Stddev reweighting (optional) ----
+        if self.stddev_reweighting:
+            weight_matrix = self._compute_stddev_weights(
+                stack,
+                weight_matrix,
+                group_indices,
+                applicable,
+                reward_keys=reward_keys,
+                norm_mask=norm_mask,
+            )
+
         # Per-reward group-wise normalisation.  When *norm_mask* is None
         # (non-crossover training), all applicable samples participate in both
         # statistics and output.
@@ -931,6 +1086,19 @@ class AdvantageProcessor:
             all_reward_advantages=all_reward_advantages,
             stat_mask=log_stat_mask,
         )
+
+        # ---- Log stddev effective weights (optional) ----
+        if self.stddev_reweighting:
+            for r_idx, key in enumerate(reward_keys):
+                w = weight_matrix[r_idx]
+                w_pos = w[w > 0]
+                if len(w_pos) > 0:
+                    self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_mean"] = (
+                        float(np.mean(w_pos))
+                    )
+                    self._pending_advantage_metrics[f"train/stddev_effective_weight_{key}_std"] = (
+                        float(np.std(w_pos))
+                    )
 
         # Scale child advantages for warmup (logged values remain unscaled).
         if child_mask is not None and self._child_advantage_scale != 1.0:

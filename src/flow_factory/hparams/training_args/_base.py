@@ -170,6 +170,14 @@ class TrainingArguments(ArgABC):
         default=1,
         metadata={"help": "Group size for GRPO sampling."},
     )
+    stddev_reweighting: bool = field(
+        default=False,
+        metadata={"help": "If True, scale each reward's weight within each group by its within-group standard deviation."},
+    )
+    stddev_ema_decay: float = field(
+        default=0.99,
+        metadata={"help": "EMA decay factor for the per-reward mean std in stddev reweighting."},
+    )
     unique_sample_num_per_epoch: int = field(
         default=8,
         metadata={"help": "Number of unique samples per group."},
