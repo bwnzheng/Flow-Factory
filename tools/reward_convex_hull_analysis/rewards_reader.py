@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import pickle
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -83,15 +83,22 @@ def load_train_rewards(
 
         step = int(data["step"])
 
-        # Collect scores per reward dimension
+        # Collect scores per reward dimension; also build per-prompt group
+        # indices from the first reward's array-of-arrays structure.
         dim_scores = []
+        prompt_idx_built: Optional[np.ndarray] = None
         for rname in reward_names:
             arr_list = data.get(rname)
             if arr_list is None:
                 # Missing reward in this file — skip the whole file
                 break
-            # Flatten list of arrays → 1-D
-            dim_scores.append(np.concatenate([np.asarray(a) for a in arr_list]))
+            flat = np.concatenate([np.asarray(a) for a in arr_list])
+            dim_scores.append(flat)
+            if prompt_idx_built is None:
+                # First reward determines the prompt→sample mapping
+                prompt_idx_built = np.concatenate([
+                    np.full(len(np.asarray(a)), i) for i, a in enumerate(arr_list)
+                ])
         else:
             # All reward keys present — stack into (N, D) points
             pts = np.column_stack(dim_scores)
@@ -103,6 +110,11 @@ def load_train_rewards(
                 "n_total": len(dim_scores[0]),
                 "n_valid": len(pts),
             }
+            if prompt_idx_built is not None:
+                result[step]["prompt_idx"] = prompt_idx_built[mask]
+                prompts_raw = data.get("prompts")
+                if prompts_raw is not None:
+                    result[step]["prompt_labels"] = list(prompts_raw)
 
     # Sort by step
     result = dict(sorted(result.items()))

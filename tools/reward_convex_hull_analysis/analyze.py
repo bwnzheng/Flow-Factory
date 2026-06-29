@@ -40,7 +40,7 @@ from tools.reward_convex_hull_analysis.convex_hull import (
     plot_convex_hulls_windows_cumulative,
     plot_distribution_1d,
     plot_hull_area_curve,
-    plot_pareto_front_evolution,
+    plot_per_group_hypervolume_and_gap,
     plot_reward_percentiles,
 )
 from tools.reward_convex_hull_analysis.evaluation_runner import (
@@ -356,12 +356,12 @@ def _dispatch_plots(
                 },
             ),
             (
-                "Pareto front evolution",
-                plot_pareto_front_evolution,
+                "per-group hypervolume + hull gap",
+                plot_per_group_hypervolume_and_gap,
                 (all_step_data, reward_names),
                 {
-                    "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
-                    "title": f"{title_prefix} Pareto Front Evolution",
+                    "output_path": os.path.join(out_dir, "per_group_hypervolume.png"),
+                    "title": f"{title_prefix} Per-Group Hypervolume & Hull Gap",
                     "label_name": label_name,
                 },
             ),
@@ -392,12 +392,12 @@ def _dispatch_plots(
                     },
                 ),
                 (
-                    "Pareto front evolution",
-                    plot_pareto_front_evolution,
+                    "per-group hypervolume",
+                    plot_per_group_hypervolume_and_gap,
                     (all_step_data, reward_names),
                     {
-                        "output_path": os.path.join(out_dir, "pareto_front_evolution.png"),
-                        "title": f"{title_prefix} Pareto Front Evolution",
+                        "output_path": os.path.join(out_dir, "per_group_hypervolume.png"),
+                        "title": f"{title_prefix} Per-Group Hypervolume",
                         "label_name": label_name,
                     },
                 ),
