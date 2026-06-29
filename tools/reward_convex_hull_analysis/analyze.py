@@ -24,7 +24,6 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
@@ -55,6 +54,7 @@ from tools.reward_convex_hull_analysis.reward_computer import (
     MultiGPUComputer,
     StandaloneRewardComputer,
 )
+from tools.reward_convex_hull_analysis.parallel import run_tasks
 from tools.reward_convex_hull_analysis.rewards_reader import (
     load_eval_rewards,
     load_train_rewards,
@@ -230,30 +230,6 @@ def _build_step_data(
 # ---------------------------------------------------------------------------
 
 
-def _run_plots_parallel(tasks: List[Tuple[str, callable, tuple, dict]]) -> None:
-    """Execute multiple plot functions in parallel threads.
-
-    Each task is ``(label, func, args, kwargs)``.  matplotlib Agg backend is
-    thread-safe, so we can overlap CPU-bound figure generation and PNG I/O.
-    """
-    if len(tasks) <= 1:
-        for label, func, args, kwargs in tasks:
-            print(f"  [Plot] Generating {label} ...")
-            func(*args, **kwargs)
-        return
-
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = {
-            executor.submit(func, *args, **kwargs): label for label, func, args, kwargs in tasks
-        }
-        for future in as_completed(futures):
-            label = futures[future]
-            try:
-                future.result()
-                print(f"  [Plot] ✓ {label}")
-            except Exception as exc:
-                print(f"  [Plot] ✗ {label}: {exc}")
-
 
 def _dispatch_plots(
     all_step_data: Dict[int, Dict[str, Any]],
@@ -271,7 +247,7 @@ def _dispatch_plots(
     n_models = len(reward_names)
     if n_models >= 2:
         # Phase 1: independent 2-D plots
-        _run_plots_parallel(
+        run_tasks(
             [
                 (
                     "convex hull overlay",
@@ -366,7 +342,7 @@ def _dispatch_plots(
                 },
             ),
         ]
-        _run_plots_parallel(phase3_tasks)
+        run_tasks(phase3_tasks)
 
     else:
         # 1-D: distribution first, then percentiles + Pareto in parallel
@@ -378,7 +354,7 @@ def _dispatch_plots(
             title=f"{title_prefix} Reward Distribution",
             label_name=label_name,
         )
-        _run_plots_parallel(
+        run_tasks(
             [
                 (
                     "reward percentiles",

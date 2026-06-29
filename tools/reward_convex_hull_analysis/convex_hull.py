@@ -510,6 +510,25 @@ def _hull_area_2d(points: np.ndarray) -> float:
     return 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
 
 
+def _hull_area_worker(pts: np.ndarray, di: int, dj: int) -> float:
+    """Picklable wrapper for parallel hull-area calls."""
+    if pts.shape[1] <= max(di, dj):
+        return 0.0
+    return _hull_area_2d(pts[:, [di, dj]])
+
+
+def _percentiles_worker(vals: np.ndarray) -> Tuple[float, float, float, float, float, float]:
+    """Picklable worker: (q25, q50, q75, min, max, mean) for pooled values."""
+    return (
+        float(np.percentile(vals, 25)),
+        float(np.percentile(vals, 50)),
+        float(np.percentile(vals, 75)),
+        float(np.min(vals)),
+        float(np.max(vals)),
+        float(np.mean(vals)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-group hypervolume & hull gap helpers
 # ---------------------------------------------------------------------------
@@ -836,16 +855,21 @@ def plot_hull_area_curve(
 
     for pi, (di, dj) in enumerate(pairs):
         ax = axes[pi // cols][pi % cols]
-        areas: List[float] = []
-        xs: List[int] = []
-        for step in steps:
-            data = all_steps[step]
-            pts = data.get("points")
-            if pts is None or pts.shape[1] <= max(di, dj) or len(pts) < 3:
-                continue
-            area = _hull_area_2d(pts[:, [di, dj]])
-            areas.append(area)
-            xs.append(step)
+
+        # Pre-compute hull area per step in parallel
+        from tools.reward_convex_hull_analysis.parallel import compute_map
+
+        items = [
+            (step, data["points"], di, dj)
+            for step in steps
+            for data in [all_steps.get(step, {})]
+            if data.get("points") is not None
+            and data["points"].shape[1] > max(di, dj)
+            and len(data["points"]) >= 3
+        ]
+        raw = compute_map(_hull_area_worker, items)
+        xs = sorted(raw.keys())
+        areas = [raw[s] for s in xs]
 
         ax.plot(xs, areas, "o-", markersize=4, linewidth=1.2, color="#2196F3")
         ax.set_xlabel(label_name)
@@ -1219,24 +1243,38 @@ def plot_reward_percentiles(
 
     for ri, rname in enumerate(reward_names):
         ax = axes[ri][0]
-        xs, medians, q25s, q75s, mins, maxs, means = [], [], [], [], [], [], []
 
-        for mid, w_steps in windows:
-            pool = []
+        # Pre-pool data per window
+        pooled: List[Tuple[int, np.ndarray]] = []
+        for wi, (mid, w_steps) in enumerate(windows):
+            chunks = []
             for s in w_steps:
                 pts = all_steps.get(s, {}).get("points")
                 if pts is not None and pts.shape[1] > ri and len(pts) > 0:
-                    pool.append(pts[:, ri])
-            if not pool:
+                    chunks.append(pts[:, ri])
+            if chunks:
+                pooled.append((wi, np.concatenate(chunks)))
+
+        # Compute percentiles in parallel
+        from tools.reward_convex_hull_analysis.parallel import compute_map
+
+        items = [(wi, vals) for wi, vals in pooled]
+        raw = compute_map(_percentiles_worker, items)
+
+        # Assemble ordered lists
+        xs, q25s, medians, q75s, mins, maxs, means = [], [], [], [], [], [], []
+        for wi, (mid, _) in enumerate(windows):
+            result = raw.get(wi)
+            if result is None:
                 continue
-            vals = np.concatenate(pool)
+            q25, q50, q75, vmin, vmax, vmean = result
             xs.append(mid)
-            q25s.append(np.percentile(vals, 25))
-            medians.append(np.percentile(vals, 50))
-            q75s.append(np.percentile(vals, 75))
-            mins.append(np.min(vals))
-            maxs.append(np.max(vals))
-            means.append(np.mean(vals))
+            q25s.append(q25)
+            medians.append(q50)
+            q75s.append(q75)
+            mins.append(vmin)
+            maxs.append(vmax)
+            means.append(vmean)
 
         ax.fill_between(xs, q25s, q75s, alpha=0.25, color="#2196F3", label="25%-75%")
         ax.plot(xs, medians, "o-", color="#1565C0", linewidth=1.5, markersize=4, label="Median")
@@ -1356,26 +1394,36 @@ def plot_per_group_hypervolume_and_gap(
     else:
         global_ref = np.zeros(dim)
 
-    # --- Per-step computation ---
-    mean_psizes: List[float] = []
-    mean_gaps: List[Optional[float]] = []
-    plot_steps: List[int] = []
+    # --- Per-step computation (parallel across steps) ---
+    from tools.reward_convex_hull_analysis.parallel import compute_map
 
+    step_items = []
+    empty_steps: List[int] = []
     for step in steps:
         data = all_steps.get(step, {})
         pts = data.get("points")
         if pts is None or pts.shape[1] < dim or len(pts) == 0:
+            empty_steps.append(step)
+            continue
+        step_items.append((step, pts[:, :dim].copy(), data.get("prompt_idx"), global_ref))
+
+    raw = compute_map(_compute_per_group_metrics, step_items)
+
+    mean_psizes: List[float] = []
+    mean_gaps: List[Optional[float]] = []
+    plot_steps: List[int] = []
+    for step in steps:
+        if step in empty_steps:
             mean_psizes.append(0.0)
             mean_gaps.append(None)
-            plot_steps.append(step)
-            continue
-
-        prompt_idx = data.get("prompt_idx")
-        metrics = _compute_per_group_metrics(
-            pts[:, :dim], prompt_idx, global_ref
-        )
-        mean_psizes.append(metrics["mean_pareto_size"])
-        mean_gaps.append(metrics["mean_hull_gap"])
+        else:
+            m = raw.get(step)
+            if m is not None:
+                mean_psizes.append(m["mean_pareto_size"])
+                mean_gaps.append(m["mean_hull_gap"])
+            else:
+                mean_psizes.append(0.0)
+                mean_gaps.append(None)
         plot_steps.append(step)
 
     # --- Plot ---
