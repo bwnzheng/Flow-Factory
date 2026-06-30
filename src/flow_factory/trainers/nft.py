@@ -20,6 +20,7 @@ Reference:
     - https://arxiv.org/abs/2509.16117
 """
 import os
+import time
 from typing import List, Dict, Any, Union, Optional
 from functools import partial
 from collections import defaultdict
@@ -182,12 +183,37 @@ class DiffusionNFTTrainer(BaseTrainer):
                 self.evaluate()
 
             # Sampling: use EMA if off_policy
+            t_epoch_start = time.time()
+            rank = self.accelerator.process_index
+            logger.info(f"[rank {rank}] epoch {self.epoch}: starting sampling")
             with self.sampling_context():
+                t_sample = time.time()
                 samples = self.sample()
+                t_sample = time.time() - t_sample
+                logger.info(
+                    f"[rank {rank}] epoch {self.epoch}: sampling done in {t_sample:.1f}s, "
+                    f"{len(samples)} samples"
+                )
 
+            t_fb = time.time()
             self.prepare_feedback(samples)
+            t_fb = time.time() - t_fb
+            logger.info(
+                f"[rank {rank}] epoch {self.epoch}: prepare_feedback done in {t_fb:.1f}s"
+            )
+            t_opt = time.time()
             self.optimize(samples)
+            t_opt = time.time() - t_opt
+            logger.info(
+                f"[rank {rank}] epoch {self.epoch}: optimize done in {t_opt:.1f}s"
+            )
+            t_ema = time.time()
             self.adapter.ema_step(step=self.epoch)
+            t_ema = time.time() - t_ema
+            logger.info(
+                f"[rank {rank}] epoch {self.epoch}: ema_step done in {t_ema:.1f}s "
+                f"(total epoch {time.time() - t_epoch_start:.1f}s)"
+            )
             self.epoch += 1
 
     # =========================== Sampling Loop ============================
@@ -239,8 +265,14 @@ class DiffusionNFTTrainer(BaseTrainer):
 
     def prepare_feedback(self, samples: List[BaseSample]) -> None:
         """Finalize rewards, compute advantages, and log advantage metrics."""
+        rank = self.accelerator.process_index
+        t0 = time.time()
         rewards = self.reward_buffer.finalize(store_to_samples=True, split='all')
+        t1 = time.time()
+        logger.info(f"[rank {rank}] prepare_feedback: finalize rewards done in {t1 - t0:.1f}s")
         self.compute_advantages(samples, rewards, store_to_samples=True)
+        t2 = time.time()
+        logger.info(f"[rank {rank}] prepare_feedback: compute_advantages done in {t2 - t1:.1f}s")
         adv_metrics = self.advantage_processor.pop_advantage_metrics()
         if adv_metrics:
             self.log_data(adv_metrics, step=self.step)

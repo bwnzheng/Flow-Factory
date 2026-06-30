@@ -18,6 +18,7 @@ Unified Reward Processor for handling multiple reward models.
 """
 
 from __future__ import annotations
+import time
 from typing import Dict, Any, Optional, List, Tuple, Set, Union, Literal
 from collections import defaultdict
 from contextlib import nullcontext
@@ -27,6 +28,10 @@ import numpy as np
 from tqdm import tqdm
 
 from accelerate import Accelerator
+
+from ..utils.logger_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 from .abc import (
     BaseRewardModel,
@@ -841,22 +846,42 @@ class RewardBuffer:
         """
         results: Dict[str, torch.Tensor] = {}
 
+        rank = self.rp.accelerator.process_index
+        t_sync_start = time.time()
+
         # 1. Compute sync rewards (blocking, on main thread)
         if split in ("pointwise", "all") and self._sync_pointwise:
+            t0 = time.time()
             results.update(
                 self.rp._compute_pointwise_rewards(self.all_samples, models=self._sync_pointwise)
             )
+            logger.info(
+                f"[rank {rank}] finalize: pointwise rewards done in {time.time() - t0:.1f}s"
+            )
         if split in ("groupwise", "all") and self._sync_groupwise:
+            t0 = time.time()
             results.update(
                 self.rp._compute_groupwise_rewards(self.all_samples, models=self._sync_groupwise)
+            )
+            logger.info(
+                f"[rank {rank}] finalize: groupwise rewards done in {time.time() - t0:.1f}s"
             )
 
         # 2. Flush and collect async rewards
         if self._has_async:
+            t0 = time.time()
             async_results = self._finalize_async()
             results.update(async_results)
+            logger.info(
+                f"[rank {rank}] finalize: async rewards done in {time.time() - t0:.1f}s"
+            )
 
+        logger.info(
+            f"[rank {rank}] finalize: entering barrier (total reward compute "
+            f"{time.time() - t_sync_start:.1f}s)"
+        )
         self.rp.accelerator.wait_for_everyone()
+        logger.info(f"[rank {rank}] finalize: barrier passed")
 
         # 3. Store to samples
         if store_to_samples:

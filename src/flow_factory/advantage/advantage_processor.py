@@ -1189,9 +1189,9 @@ class AdvantageProcessor:
         else:
             child_mask = local_mask
 
-        if not child_mask.any():
-            return
-
+        # Always call _build_child_reward_details so cross-rank reduce is
+        # unconditional — some ranks may have zero children but must still
+        # participate in the collective.
         keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
         self._build_child_reward_details(
             gathered_rewards, child_mask, keep_mask, samples, group_indices
@@ -1274,12 +1274,6 @@ class AdvantageProcessor:
         sum-of-squares) are reduced across ranks so the logged means / stds
         reflect all groups worldwide.
         """
-        # Only build stats when there are tagged child samples.
-        has_tag = any(s.extra_kwargs.get("is_crossover_child", False) for s in samples)
-        if not has_tag:
-            self._pending_crossover_stats = None
-            return
-
         child_mask = self._build_child_mask(samples, group_indices)
         parent_mask = ~child_mask
 
@@ -1354,13 +1348,12 @@ class AdvantageProcessor:
         than relying on the child's ``prompt`` field, which may be inherited
         from an unrelated template parent during crossover generation.
         """
-        if not child_mask.any():
-            return
+        has_children = child_mask.any()
 
         if self._pending_crossover_stats is None:
             self._pending_crossover_stats = {}
 
-        child_indices = np.where(child_mask)[0]
+        child_indices = np.where(child_mask)[0] if has_children else np.array([], dtype=np.int64)
         parent_mask = ~child_mask
         reward_keys = sorted(gathered_rewards.keys())
 
@@ -1374,40 +1367,44 @@ class AdvantageProcessor:
 
         # ---- Per-child records (prompt index + crossover provenance) ----
         child_records: List[Dict[str, Any]] = []
-        for ci in child_indices:
-            meta = samples[ci]
-            if isinstance(meta, dict):
-                cxo_step = meta["crossover_step"]
-                cxo_strategy = meta["crossover_strategy"]
-                cxo_meta = None  # gathered dicts don't carry full crossover_meta
-            else:
-                cxo_step = meta.extra_kwargs.get("crossover_step")
-                cxo_strategy = meta.extra_kwargs.get("crossover_strategy")
-                cxo_meta = meta.extra_kwargs.get("crossover_meta")
+        if has_children:
+            for ci in child_indices:
+                meta = samples[ci]
+                if isinstance(meta, dict):
+                    cxo_step = meta["crossover_step"]
+                    cxo_strategy = meta["crossover_strategy"]
+                    cxo_meta = None  # gathered dicts don't carry full crossover_meta
+                else:
+                    cxo_step = meta.extra_kwargs.get("crossover_step")
+                    cxo_strategy = meta.extra_kwargs.get("crossover_strategy")
+                    cxo_meta = meta.extra_kwargs.get("crossover_meta")
 
-            gi = int(group_indices[ci])
-            record: Dict[str, Any] = {
-                "kept": bool(pareto_mask[ci]),
-                "prompt_idx": group_to_prompt_idx.get(gi, -1),
-                "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
-            }
-            if cxo_step is not None:
-                record["crossover_step"] = cxo_step
-            if cxo_strategy is not None:
-                record["crossover_strategy"] = cxo_strategy
-            if cxo_meta is not None:
-                record["crossover_meta"] = cxo_meta
-            child_records.append(record)
+                gi = int(group_indices[ci])
+                record: Dict[str, Any] = {
+                    "kept": bool(pareto_mask[ci]),
+                    "prompt_idx": group_to_prompt_idx.get(gi, -1),
+                    "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
+                }
+                if cxo_step is not None:
+                    record["crossover_step"] = cxo_step
+                if cxo_strategy is not None:
+                    record["crossover_strategy"] = cxo_strategy
+                if cxo_meta is not None:
+                    record["crossover_meta"] = cxo_meta
+                child_records.append(record)
         self._pending_crossover_stats["crossover/children_rewards"] = child_records
         child_kept_total = sum(1 for r in child_records if r["kept"])
         child_disc_total = sum(1 for r in child_records if not r["kept"])
 
         # ---- Per-reward mean summaries with cross-rank reduction ----
+        # IMPORTANT: reduce must be unconditional so ALL ranks participate,
+        # even those with zero children. Otherwise ranks without children
+        # skip the collective and deadlock ranks that do have children.
         do_reduce = self.group_on_same_rank and self.accelerator.num_processes > 1
         for key in reward_keys:
             arr = gathered_rewards[key]
-            child_kept = arr[child_mask & pareto_mask]
-            child_disc = arr[child_mask & ~pareto_mask]
+            child_kept = arr[child_mask & pareto_mask] if has_children else np.array([])
+            child_disc = arr[child_mask & ~pareto_mask] if has_children else np.array([])
 
             nk = len(child_kept)
             sum_k = float(child_kept.sum()) if nk > 0 else 0.0
