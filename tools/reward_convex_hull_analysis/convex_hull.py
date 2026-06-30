@@ -1426,13 +1426,45 @@ def plot_per_group_hypervolume_and_gap(
                 mean_gaps.append(None)
         plot_steps.append(step)
 
+    # --- Smoothing ---
+    # Boxcar with adaptive window at edges (no zero-padding).
+    smooth_win = max(3, min(20, len(plot_steps) // 10))
+
+    def _smooth(vals: List[float]) -> np.ndarray:
+        arr = np.array(vals, dtype=float)
+        n = len(arr)
+        if n < 3:
+            return arr.copy()
+        out = np.empty(n)
+        half = smooth_win // 2
+        for i in range(n):
+            lo = max(0, i - half)
+            hi = min(n, i + half + 1)
+            out[i] = arr[lo:hi].mean()
+        return out
+
+    # Smooth Pareto sizes and gaps (drop None → NaN for convolution)
+    gap_arr = np.array(
+        [g if g is not None else float("nan") for g in mean_gaps], dtype=float
+    )
+    gap_smooth = _smooth([g for g in gap_arr if not np.isnan(g)])
+    # Re-expand smoothed gaps to full length (keep NaN for steps with no data)
+    gap_smooth_full = np.full(len(gap_arr), np.nan)
+    valid_idx = ~np.isnan(gap_arr)
+    gap_smooth_full[valid_idx] = gap_smooth
+
+    psize_smooth = _smooth(mean_psizes)
+
     # --- Plot ---
-    # Pareto size on left axis; hull gap on right (2+ rewards only).
     show_gap = dim >= 2
 
     fig, ax_left = plt.subplots(figsize=(10, 5))
+
+    # Pareto size — raw faint, smoothed bold
     color_left = "#2E7D32"
-    ax_left.plot(plot_steps, mean_psizes, "o-", color=color_left, linewidth=1.5, markersize=4,
+    ax_left.plot(plot_steps, mean_psizes, "-", color=color_left, linewidth=0.6,
+                 alpha=0.25, label="_nolegend_")
+    ax_left.plot(plot_steps, psize_smooth, "-", color=color_left, linewidth=2.0,
                  label="Mean Pareto Size (per-group)")
     ax_left.set_xlabel(label_name)
     ax_left.set_ylabel("Pareto Front Size", color=color_left)
@@ -1442,9 +1474,16 @@ def plot_per_group_hypervolume_and_gap(
     if show_gap:
         ax_gap = ax_left.twinx()
         color_gap = "#C62828"
-        gap_vals = [g if g is not None else float("nan") for g in mean_gaps]
-        ax_gap.plot(plot_steps, gap_vals, "s--", color=color_gap, linewidth=1.2, markersize=4,
-                    label="Mean Hull Gap (per-group)")
+        # Raw — faint dashed
+        ax_gap.plot(
+            plot_steps, gap_arr, "--", color=color_gap, linewidth=0.5,
+            alpha=0.20, label="_nolegend_",
+        )
+        # Smoothed — bold
+        ax_gap.plot(
+            plot_steps, gap_smooth_full, "-", color=color_gap, linewidth=2.0,
+            label="Mean Hull Gap (per-group, smoothed)",
+        )
         ax_gap.set_ylabel("Hull Gap (HV_hull − HV_HSO)", color=color_gap)
         ax_gap.tick_params(axis="y", labelcolor=color_gap)
 

@@ -16,6 +16,7 @@ all ranks.
 from __future__ import annotations
 
 import hashlib
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
@@ -199,6 +200,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
     def _crossover_augment(
         self, parent_samples: List[BaseSample], parent_rewards: Dict[str, torch.Tensor]
     ) -> tuple:
+        t_start = time.time()
         device = self.accelerator.device
         num_steps = self.training_args.num_inference_steps
         rank = self.accelerator.process_index
@@ -263,7 +265,11 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             child_groups.append((gid, step, parent, latents, metas))
 
         if not child_groups:
-            logger.info(f"[rank {rank}] _crossover_augment: no child_groups, returning empty")
+            elapsed = time.time() - t_start
+            logger.info(
+                f"[rank {rank}] _crossover_augment: no child_groups, returning empty "
+                f"(elapsed {elapsed:.1f}s)"
+            )
             empty = {k: torch.zeros(0, device=device) for k in reward_keys}
             return [], empty
 
@@ -436,12 +442,17 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         for c in all_children:
             c.extra_kwargs.pop("_cxo_latent", None)
 
+        elapsed = time.time() - t_start
         logger.info(f"[rank {rank}] _crossover_augment: device sync before return")
         if device.type == "npu" and hasattr(torch, "npu"):
             torch.npu.synchronize()
         elif device.type == "cuda":
             torch.cuda.synchronize()
-        logger.info(f"[rank {rank}] _crossover_augment: returning")
+        logger.info(
+            f"[rank {rank}] _crossover_augment: returning {len(all_children)} children, "
+            f"{len(groups)}→{total_raw} raw after {n_generations} gens, "
+            f"elapsed {elapsed:.1f}s"
+        )
         return all_children, child_rewards
 
     # ======================================================================
