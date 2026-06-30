@@ -669,9 +669,10 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             if n_children == 0 or n_parents <= 1:
                 continue
 
-            n_remove = min(n_children, n_parents - 1)
-            if n_remove <= 0:
-                continue
+            # How many parents can we remove (must keep at least 1).
+            n_remove_parents = min(n_children, n_parents - 1)
+            # If children outnumber removable parents, also remove excess children.
+            n_excess_children = n_children - n_remove_parents
 
             p_indices = p_mask.nonzero(as_tuple=True)[0]
             c_indices = c_mask.nonzero(as_tuple=True)[0]
@@ -681,6 +682,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             group_mean = p_agg.mean()
             group_std = p_agg.std()
             p_adv = (p_agg - group_mean) / (group_std + 1e-6)
+            c_adv = (agg[c_indices] - group_mean) / (group_std + 1e-6)
 
             # Pareto mask on parents+children combined
             all_indices = torch.cat([p_indices, c_indices])
@@ -693,18 +695,34 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             all_pareto = compute_pareto_mask(all_rewards_np)
             all_pareto_t = torch.from_numpy(all_pareto).to(device)
             p_pareto_t = all_pareto_t[:n_parents]
+            c_pareto_t = all_pareto_t[n_parents:]
 
+            # ---- Remove parents ----
             # Order: dominated first, then non-dominated.
             # Within each: sort by |advantage| ascending — closest to 0 removed first.
-            dom_mask = ~p_pareto_t
-            nondom_mask = p_pareto_t
+            p_dom_mask = ~p_pareto_t
+            p_nondom_mask = p_pareto_t
 
-            dominated_by_adv = p_indices[dom_mask][p_adv[dom_mask].abs().argsort()]
-            nondom_by_adv = p_indices[nondom_mask][p_adv[nondom_mask].abs().argsort()]
+            p_dom_order = p_indices[p_dom_mask][p_adv[p_dom_mask].abs().argsort()]
+            p_nondom_order = p_indices[p_nondom_mask][p_adv[p_nondom_mask].abs().argsort()]
 
-            removal_order = torch.cat([dominated_by_adv, nondom_by_adv])
-            for idx in removal_order[:n_remove]:
+            p_removal = torch.cat([p_dom_order, p_nondom_order])
+            for idx in p_removal[:n_remove_parents]:
                 remove[idx] = True
+
+            # ---- Remove excess children (when children > removable parents) ----
+            if n_excess_children > 0:
+                # Priority: dominated children first (less valuable), then non-dominated.
+                # Within each: sort by |advantage| ascending.
+                c_dom_mask = ~c_pareto_t
+                c_nondom_mask = c_pareto_t
+
+                c_dom_order = c_indices[c_dom_mask][c_adv[c_dom_mask].abs().argsort()]
+                c_nondom_order = c_indices[c_nondom_mask][c_adv[c_nondom_mask].abs().argsort()]
+
+                c_removal = torch.cat([c_dom_order, c_nondom_order])
+                for idx in c_removal[:n_excess_children]:
+                    remove[idx] = True
 
         keep = ~remove
         keep_indices = keep.nonzero(as_tuple=True)[0].tolist()
@@ -714,9 +732,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 rewards[k] = rewards[k][keep_indices].to(device)
 
             n_removed = int(remove.sum().item())
+            n_removed_parents = int((remove & ~is_child).sum().item())
+            n_removed_children = int((remove & is_child).sum().item())
             logger.info(
-                f"Crossover: removed {n_removed} neutral parents to balance "
-                f"{int(is_child.sum().item())} children (total now {len(samples)})"
+                f"Crossover: removed {n_removed} samples to balance "
+                f"({n_removed_parents} parents + {n_removed_children} children), "
+                f"{int(is_child.sum().item())} children total → {len(samples)} remaining"
             )
 
     # ======================================================================
