@@ -119,7 +119,11 @@ class BaseTrainer(ABC):
         if self.accelerator.is_main_process:
             self.logger = load_logger(self.config)
         else:
-            self.logger = None
+            # Non-main process: create a local-file-only logger so that
+            # save_media_locally, reward pickles, and JSONL metrics are
+            # written by every rank independently.
+            from ..logger.abc import LocalFileLogger
+            self.logger = LocalFileLogger(self.config)
         self.accelerator.wait_for_everyone()
 
     def _init_reward_model(self) -> Tuple[Dict[str, BaseRewardModel], Dict[str, BaseRewardModel]]:

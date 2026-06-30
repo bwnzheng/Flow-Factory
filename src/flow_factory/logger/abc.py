@@ -289,3 +289,28 @@ class Logger(ABC):
     @abstractmethod
     def _log_impl(self, data: Dict, step: int):
         pass
+
+
+class LocalFileLogger(Logger):
+    """Logger that only saves media (images / videos) to local files.
+
+    Used on non-main processes so that every rank independently writes
+    its own ``train_samples`` when ``save_media_locally`` is enabled.
+    Scalar metrics and reward pickles are already written by the main
+    process — those are skipped here to avoid duplicate records.
+    """
+
+    def _init_platform(self):
+        self.platform = None
+
+    def _convert_to_platform(self, value, height=None, width=None):
+        return value
+
+    def _log_impl(self, data: Dict, step: int):
+        pass
+
+    def log_data(self, data: Dict[str, Any], step: int, keys: Optional[str] = None):
+        """Only save media locally; skip JSONL metrics and reward pickles."""
+        formatted_dict = LogFormatter.format_dict(data)
+        if self._should_save_locally:
+            self._extract_and_save_media(formatted_dict, step)

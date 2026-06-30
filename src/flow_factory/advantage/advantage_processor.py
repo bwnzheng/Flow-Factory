@@ -111,6 +111,7 @@ class AdvantageProcessor:
         )
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
+        self._pending_nondom_stats: Optional[Dict[str, Any]] = None
         self._child_advantage_scale: float = 1.0  # set by crossover trainers for warmup
         self._child_in_norm: bool = (
             False  # set by crossover trainers to include children in mean/std
@@ -765,6 +766,9 @@ class AdvantageProcessor:
         gathered_rewards, group_indices, source_ids = self.collect_group_rewards(samples, rewards)
         reward_keys = list(gathered_rewards.keys())
 
+        # ---- Per-group non-dominated set size (all algorithms) ----
+        self._build_nondom_stats(gathered_rewards, group_indices)
+
         # ---- Crossover stats (before any filtering) ----
         if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
@@ -984,6 +988,9 @@ class AdvantageProcessor:
         gathered_rewards, group_indices, source_ids = self.collect_group_rewards(samples, rewards)
         reward_keys = list(gathered_rewards.keys())
 
+        # ---- Per-group non-dominated set size (all algorithms) ----
+        self._build_nondom_stats(gathered_rewards, group_indices)
+
         # ---- Crossover stats ----
         if self._log_crossover_rewards:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
@@ -1149,6 +1156,9 @@ class AdvantageProcessor:
         if self._pending_pareto_stats:
             out.update(self._pending_pareto_stats)
             self._pending_pareto_stats = None
+        if self._pending_nondom_stats:
+            out.update(self._pending_nondom_stats)
+            self._pending_nondom_stats = None
         adv = self.pop_advantage_metrics()
         if adv:
             out.update(adv)
@@ -1259,6 +1269,10 @@ class AdvantageProcessor:
 
         Requires that crossover children have ``is_crossover_child = True``
         in their ``extra_kwargs``.
+
+        In ``group_on_same_rank`` mode the per-rank accumulators (count, sum,
+        sum-of-squares) are reduced across ranks so the logged means / stds
+        reflect all groups worldwide.
         """
         # Only build stats when there are tagged child samples.
         has_tag = any(s.extra_kwargs.get("is_crossover_child", False) for s in samples)
@@ -1270,24 +1284,55 @@ class AdvantageProcessor:
         parent_mask = ~child_mask
 
         stats: Dict[str, Any] = {}
+        num_ranks = self.accelerator.num_processes
+        do_reduce = self.group_on_same_rank and num_ranks > 1
+
         for key in sorted(gathered_rewards.keys()):
             arr = gathered_rewards[key]
             valid = ~np.isnan(arr)
-            # Parents
             p_mask = parent_mask & valid
-            if p_mask.any():
-                stats[f"crossover/parent_{key}_mean"] = float(arr[p_mask].mean())
-                stats[f"crossover/parent_{key}_std"] = float(arr[p_mask].std())
-            # Children
             c_mask = child_mask & valid
-            if c_mask.any():
-                stats[f"crossover/child_{key}_mean"] = float(arr[c_mask].mean())
-                stats[f"crossover/child_{key}_std"] = float(arr[c_mask].std())
-            # Fraction of children exceeding their parent (approximate)
-            if p_mask.any() and c_mask.any():
-                parent_mean = arr[p_mask].mean()
-                better = (arr[c_mask] > parent_mean).sum()
-                stats[f"crossover/child_better_{key}"] = float(better) / max(1, c_mask.sum())
+
+            # Local accumulators: (count, sum, sum-of-squares)
+            n_p = int(p_mask.sum())
+            sum_p = float(arr[p_mask].sum()) if n_p > 0 else 0.0
+            sum_sq_p = float((arr[p_mask] ** 2).sum()) if n_p > 0 else 0.0
+            n_c = int(c_mask.sum())
+            sum_c = float(arr[c_mask].sum()) if n_c > 0 else 0.0
+            sum_sq_c = float((arr[c_mask] ** 2).sum()) if n_c > 0 else 0.0
+            # child_better: children exceeding the local parent mean
+            better = 0.0
+            if n_p > 0 and n_c > 0:
+                parent_mean = sum_p / n_p
+                better = float((arr[c_mask] > parent_mean).sum())
+
+            if do_reduce:
+                t = torch.tensor(
+                    [n_p, sum_p, sum_sq_p, n_c, sum_c, sum_sq_c, better],
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+                t = self.accelerator.reduce(t, reduction="sum")
+                n_p = int(t[0].item())
+                sum_p = t[1].item()
+                sum_sq_p = t[2].item()
+                n_c = int(t[3].item())
+                sum_c = t[4].item()
+                sum_sq_c = t[5].item()
+                better = t[6].item()
+
+            if n_p > 0:
+                mean_p = sum_p / n_p
+                var_p = max(sum_sq_p / n_p - mean_p**2, 1e-12)
+                stats[f"crossover/parent_{key}_mean"] = round(mean_p, 6)
+                stats[f"crossover/parent_{key}_std"] = round(var_p**0.5, 6)
+            if n_c > 0:
+                mean_c = sum_c / n_c
+                var_c = max(sum_sq_c / n_c - mean_c**2, 1e-12)
+                stats[f"crossover/child_{key}_mean"] = round(mean_c, 6)
+                stats[f"crossover/child_{key}_std"] = round(var_c**0.5, 6)
+            if n_p > 0 and n_c > 0:
+                stats[f"crossover/child_better_{key}"] = round(better / n_c, 4)
 
         self._pending_crossover_stats = stats
 
@@ -1354,26 +1399,51 @@ class AdvantageProcessor:
                 record["crossover_meta"] = cxo_meta
             child_records.append(record)
         self._pending_crossover_stats["crossover/children_rewards"] = child_records
-        self._pending_crossover_stats["crossover/child_kept_total"] = sum(
-            1 for r in child_records if r["kept"]
-        )
-        self._pending_crossover_stats["crossover/child_disc_total"] = sum(
-            1 for r in child_records if not r["kept"]
-        )
+        child_kept_total = sum(1 for r in child_records if r["kept"])
+        child_disc_total = sum(1 for r in child_records if not r["kept"])
 
-        # ---- Per-reward mean summaries (mean is reward-specific; count is not) ----
+        # ---- Per-reward mean summaries with cross-rank reduction ----
+        do_reduce = self.group_on_same_rank and self.accelerator.num_processes > 1
         for key in reward_keys:
             arr = gathered_rewards[key]
             child_kept = arr[child_mask & pareto_mask]
             child_disc = arr[child_mask & ~pareto_mask]
 
-            nk, nd = len(child_kept), len(child_disc)
+            nk = len(child_kept)
+            sum_k = float(child_kept.sum()) if nk > 0 else 0.0
+            nd = len(child_disc)
+            sum_d = float(child_disc.sum()) if nd > 0 else 0.0
+
+            if do_reduce:
+                t = torch.tensor(
+                    [nk, sum_k, nd, sum_d],
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+                t = self.accelerator.reduce(t, reduction="sum")
+                nk = int(t[0].item())
+                sum_k = t[1].item()
+                nd = int(t[2].item())
+                sum_d = t[3].item()
+
             self._pending_crossover_stats[f"crossover/child_kept_{key}_mean"] = (
-                float(child_kept.mean()) if nk > 0 else 0.0
+                round(sum_k / nk, 6) if nk > 0 else 0.0
             )
             self._pending_crossover_stats[f"crossover/child_disc_{key}_mean"] = (
-                float(child_disc.mean()) if nd > 0 else 0.0
+                round(sum_d / nd, 6) if nd > 0 else 0.0
             )
+
+        if do_reduce:
+            t = torch.tensor(
+                [child_kept_total, child_disc_total],
+                device=self.accelerator.device,
+                dtype=torch.float32,
+            )
+            t = self.accelerator.reduce(t, reduction="sum")
+            child_kept_total = int(t[0].item())
+            child_disc_total = int(t[1].item())
+        self._pending_crossover_stats["crossover/child_kept_total"] = child_kept_total
+        self._pending_crossover_stats["crossover/child_disc_total"] = child_disc_total
 
     def _build_child_mask(
         self,
@@ -1395,6 +1465,62 @@ class AdvantageProcessor:
             gathered_flag = self.accelerator.gather(local_flag).cpu().numpy()
             child_mask = gathered_flag.astype(bool)
         return child_mask
+
+    def _build_nondom_stats(
+        self,
+        gathered_rewards: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+    ) -> None:
+        """Compute per-group non-dominated set size and store as logging stat.
+
+        Called unconditionally from both ``compute_weighted_sum`` and
+        ``compute_gdpo`` so the metric is logged for every algorithm, with or
+        without crossover enabled.
+
+        In ``group_on_same_rank`` mode the per-group sizes are computed
+        locally and then reduced across ranks so the logged value reflects
+        all groups worldwide.  In ``distributed_k_repeat`` mode the input
+        arrays already span all ranks.
+
+        Stores ``nondom_size_mean`` in ``_pending_nondom_stats``, which
+        ``pop_all_stats`` merges into the step-level log payload.
+        """
+        from ..trainers.crossover.pareto import compute_pareto_mask
+
+        reward_keys = sorted(gathered_rewards.keys())
+        if not reward_keys:
+            self._pending_nondom_stats = None
+            return
+
+        stack = np.stack(
+            [gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=1
+        )  # (S, R)
+        num_groups = int(group_indices.max()) + 1
+        nondom_sum = 0
+        nondom_count = 0
+        for g in range(num_groups):
+            idx = np.where(group_indices == g)[0]
+            if len(idx) <= 1:
+                nondom_sum += len(idx)
+            else:
+                nondom_sum += int(compute_pareto_mask(stack[idx]).sum())
+            nondom_count += 1
+
+        # Cross-rank reduction for group_on_same_rank mode: each rank
+        # only sees its own groups — reduce sum + count to get the
+        # worldwide mean.  In distributed_k_repeat mode the arrays
+        # already span all ranks so no communication is needed.
+        if self.group_on_same_rank and self.accelerator.num_processes > 1:
+            t = torch.tensor(
+                [float(nondom_sum), float(nondom_count)],
+                device=self.accelerator.device,
+            )
+            t = self.accelerator.reduce(t, reduction="sum")
+            nondom_sum = int(t[0].item())
+            nondom_count = int(t[1].item())
+
+        mean_size = round(nondom_sum / nondom_count, 2) if nondom_count > 0 else 0.0
+        self._pending_nondom_stats = {"nondom_size_mean": mean_size}
 
     def _filter_pareto(
         self,
