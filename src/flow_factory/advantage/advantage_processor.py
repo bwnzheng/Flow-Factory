@@ -1468,19 +1468,19 @@ class AdvantageProcessor:
         gathered_rewards: Dict[str, np.ndarray],
         group_indices: np.ndarray,
     ) -> None:
-        """Compute per-group non-dominated set size and store as logging stat.
+        """Compute per-group non-dominated set size statistics.
 
         Called unconditionally from both ``compute_weighted_sum`` and
-        ``compute_gdpo`` so the metric is logged for every algorithm, with or
-        without crossover enabled.
+        ``compute_gdpo`` so the metrics are logged for every algorithm, with
+        or without crossover enabled.
 
         In ``group_on_same_rank`` mode the per-group sizes are computed
-        locally and then reduced across ranks so the logged value reflects
+        locally and then reduced across ranks so the logged values reflect
         all groups worldwide.  In ``distributed_k_repeat`` mode the input
         arrays already span all ranks.
 
-        Stores ``nondom_size_mean`` in ``_pending_nondom_stats``, which
-        ``pop_all_stats`` merges into the step-level log payload.
+        Stores ``train/nondom_size_in_group_{mean,max,min,std}`` in
+        ``_pending_nondom_stats``.
         """
         from ..trainers.crossover.pareto import compute_pareto_mask
 
@@ -1493,31 +1493,40 @@ class AdvantageProcessor:
             [gathered_rewards[k].astype(np.float64) for k in reward_keys], axis=1
         )  # (S, R)
         num_groups = int(group_indices.max()) + 1
-        nondom_sum = 0
-        nondom_count = 0
+        sizes = []
         for g in range(num_groups):
             idx = np.where(group_indices == g)[0]
             if len(idx) <= 1:
-                nondom_sum += len(idx)
+                sizes.append(len(idx))
             else:
-                nondom_sum += int(compute_pareto_mask(stack[idx]).sum())
-            nondom_count += 1
+                sizes.append(int(compute_pareto_mask(stack[idx]).sum()))
 
-        # Cross-rank reduction for group_on_same_rank mode: each rank
-        # only sees its own groups — reduce sum + count to get the
-        # worldwide mean.  In distributed_k_repeat mode the arrays
-        # already span all ranks so no communication is needed.
+        # Gather all per-group sizes from all ranks so statistics are
+        # computed on the full worldwide set of groups.
         if self.group_on_same_rank and self.accelerator.num_processes > 1:
-            t = torch.tensor(
-                [float(nondom_sum), float(nondom_count)],
-                device=self.accelerator.device,
-            )
-            t = self.accelerator.reduce(t, reduction="sum")
-            nondom_sum = int(t[0].item())
-            nondom_count = int(t[1].item())
+            t = torch.tensor(sizes, dtype=torch.float32, device=self.accelerator.device)
+            gathered = self._gather_uneven(t).cpu().numpy()
+            sizes = gathered.astype(np.int64).tolist()
 
-        mean_size = round(nondom_sum / nondom_count, 2) if nondom_count > 0 else 0.0
-        self._pending_nondom_stats = {"nondom_size_mean": mean_size}
+        if sizes:
+            arr = np.array(sizes, dtype=np.float32)
+            mean_size = round(float(arr.mean()), 2)
+            max_size = int(arr.max())
+            min_size = int(arr.min())
+            std_size = round(float(arr.std()), 2)
+        else:
+            mean_size = 0.0
+            max_size = 0
+            min_size = 0
+            std_size = 0.0
+
+        self._pending_nondom_stats = {
+            "train/nondom_size_in_group_mean": mean_size,
+            "train/nondom_size_in_group_max": max_size,
+            "train/nondom_size_in_group_min": min_size,
+            "train/nondom_size_in_group_std": std_size,
+            "train/nondom_sizes_in_group": {"values": sizes},
+        }
 
     def _filter_pareto(
         self,
