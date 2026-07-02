@@ -352,8 +352,8 @@ class GeneticAlgorithm:
         # 1. Compute advantage
         adv = self._compute_advantage(pop_rewards, reward_keys)
 
-        # 2. Select parents
-        parent_idx, n_parents = self._select_parents(adv)
+        # 2. Select parents (non-dominated first, then by advantage)
+        parent_idx, n_parents = self._select_parents(adv, pop_rewards, reward_keys)
         if parent_idx is None:
             return population, pop_rewards, None
 
@@ -400,12 +400,36 @@ class GeneticAlgorithm:
     # Step 1–2: Parent selection + crossover + mutation
     # ------------------------------------------------------------------
 
-    def _select_parents(self, adv: np.ndarray) -> Tuple[Optional[np.ndarray], int]:
-        """Select top-advantage parents."""
+    def _select_parents(
+        self,
+        adv: np.ndarray,
+        pop_rewards: Dict[str, np.ndarray],
+        reward_keys: List[str],
+    ) -> Tuple[Optional[np.ndarray], int]:
+        """Select parents: non-dominated first, then by advantage."""
         n_parents = max(2, int(len(adv) * self._parent_ratio))
         if n_parents < 2:
             return None, 0
-        return torch.topk(torch.as_tensor(adv), n_parents).indices.numpy(), n_parents
+
+        # Pareto mask on current population
+        stack = np.stack(
+            [pop_rewards[k].astype(np.float32) for k in reward_keys], axis=1
+        )
+        pareto = compute_pareto_mask(stack)
+
+        # Non-dominated first, sorted by advantage descending
+        nondom_idx = np.where(pareto)[0]
+        nondom_idx = nondom_idx[np.argsort(adv[nondom_idx])[::-1]]
+
+        selected = list(nondom_idx[:n_parents])
+
+        # Fill remaining from dominated, by advantage descending
+        if len(selected) < n_parents:
+            dom_idx = np.where(~pareto)[0]
+            dom_idx = dom_idx[np.argsort(adv[dom_idx])[::-1]]
+            selected.extend(dom_idx[:n_parents - len(selected)])
+
+        return np.array(selected), n_parents
 
     def _crossover_and_mutate(
         self, parent_latents: torch.Tensor, rng_seed: int
