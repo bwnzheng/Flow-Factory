@@ -188,77 +188,75 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         ga_acc: Dict[str, Any],
         ga_samples: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Reduce GA accumulator across ranks and build final stats dict."""
+        """Reduce GA accumulator across ranks and build final stats."""
         num_ranks = self.accelerator.num_processes
-        if num_ranks <= 1:
-            return self._build_ga_stats(ga_acc, ga_samples)
 
-        # Pack all float values into a tensor for a single reduce call
-        float_keys = [k for k, v in ga_acc.items() if isinstance(v, float)]
-        int_keys = [k for k, v in ga_acc.items() if isinstance(v, int)]
-        all_keys = float_keys + int_keys
-        t = torch.tensor(
-            [float(ga_acc[k]) for k in all_keys],
-            device=self.accelerator.device,
-            dtype=torch.float64,
-        )
-        t = self.accelerator.reduce(t, reduction="sum")
-        for i, k in enumerate(all_keys):
-            if k in int_keys:
-                ga_acc[k] = int(t[i].item())
-            else:
-                ga_acc[k] = t[i].item()
-
-        return self._build_ga_stats(ga_acc, ga_samples)
-
-    @staticmethod
-    def _build_ga_stats(
-        ga_acc: Dict[str, Any],
-        ga_samples: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Compute final metrics from reduced accumulators."""
-        stats: Dict[str, Any] = {"ga/n_groups": ga_acc["n_groups"]}
+        # Build a deterministic ordered list of keys so every rank packs
+        # the same-sized tensor.
         max_gen = 0
         while f"gen{max_gen}_count" in ga_acc:
             max_gen += 1
 
-        reward_keys = set()
-        for k in ga_acc:
-            if k.startswith("gen0_") and k.endswith("_pop_sum"):
-                reward_keys.add(k[len("gen0_"):-len("_pop_sum")])
+        reward_keys = sorted(
+            {k[len("gen0_"):-len("_pop_sum")]
+             for k in ga_acc
+             if k.startswith("gen0_") and k.endswith("_pop_sum")}
+        )
 
+        count_keys = ["n_groups"]
         for gen in range(max_gen):
-            count = ga_acc[f"gen{gen}_count"]
+            count_keys.append(f"gen{gen}_count")
+            count_keys.extend([
+                f"gen{gen}_n_replaced", f"gen{gen}_n_children",
+                f"gen{gen}_n_children_kept", f"gen{gen}_n_pareto_parents",
+                f"gen{gen}_n_pareto_children", f"gen{gen}_n_filled",
+            ])
+            for rk in reward_keys:
+                for suffix in ["pop_sum", "pop_sum_sq", "child_sum",
+                               "child_sum_sq", "new_sum", "new_sum_sq"]:
+                    count_keys.append(f"gen{gen}_{rk}_{suffix}")
+
+        values = [float(ga_acc.get(k, 0)) for k in count_keys]
+        t = torch.tensor(values, device=self.accelerator.device, dtype=torch.float32)
+
+        if num_ranks > 1:
+            t = self.accelerator.reduce(t, reduction="sum")
+
+        # Unpack reduced values
+        reduced: Dict[str, float] = {}
+        for i, k in enumerate(count_keys):
+            reduced[k] = t[i].item()
+
+        # Build final stats
+        stats: Dict[str, Any] = {"ga/n_groups": int(reduced["n_groups"])}
+        for gen in range(max_gen):
+            count = reduced[f"gen{gen}_count"]
             if count == 0:
                 continue
             p = f"ga/gen{gen}"
-            for prefix, key in [
-                ("n_replaced", "n_replaced"),
-                ("n_children", "n_children"),
-                ("n_children_kept", "n_children_kept"),
-                ("n_pareto_parents", "n_pareto_parents"),
-                ("n_pareto_children", "n_pareto_children"),
-                ("n_filled", "n_filled"),
-            ]:
-                stats[f"{p}/{prefix}"] = round(ga_acc[f"gen{gen}_{key}"] / max(count, 1), 2)
+            for key in ["n_replaced", "n_children", "n_children_kept",
+                         "n_pareto_parents", "n_pareto_children", "n_filled"]:
+                stats[f"{p}/{key}"] = round(reduced[f"gen{gen}_{key}"] / count, 2)
 
-            for rk in sorted(reward_keys):
+            for rk in reward_keys:
                 for prefix, sum_key, sum_sq_key in [
                     ("pop_mean", "pop_sum", "pop_sum_sq"),
                     ("child_mean", "child_sum", "child_sum_sq"),
                     ("new_mean", "new_sum", "new_sum_sq"),
                 ]:
-                    s = ga_acc[f"gen{gen}_{rk}_{sum_key}"]
-                    sq = ga_acc[f"gen{gen}_{rk}_{sum_sq_key}"]
-                    n_eff = count if "child" not in sum_key else max(count, 1)
-                    mean = s / max(n_eff, 1)
-                    var = max(sq / max(n_eff, 1) - mean**2, 0.0)
+                    s = reduced[f"gen{gen}_{rk}_{sum_key}"]
+                    sq = reduced[f"gen{gen}_{rk}_{sum_sq_key}"]
+                    n_eff = count
+                    if "child" in sum_key:
+                        n_child = max(reduced.get(f"gen{gen}_n_children", 1.0), 1.0)
+                        n_eff = n_child
+                    mean = s / max(n_eff, 1.0)
+                    var = max(sq / max(n_eff, 1.0) - mean**2, 0.0)
                     if "mean" in prefix:
                         stats[f"{p}/{rk}/{prefix}"] = round(mean, 6)
                     else:
                         stats[f"{p}/{rk}/{prefix.replace('mean', 'std')}"] = round(var**0.5, 6)
 
-        # Per-sample reward records for JSONL
         if ga_samples:
             stats["ga/samples"] = ga_samples
 

@@ -547,7 +547,7 @@ class GeneticAlgorithm:
 
         # Pareto mask
         stack = np.stack(
-            [combined_rewards[k].astype(np.float64) for k in reward_keys], axis=1
+            [combined_rewards[k].astype(np.float32) for k in reward_keys], axis=1
         )
         pareto = compute_pareto_mask(stack)
 
@@ -649,10 +649,10 @@ class GeneticAlgorithm:
         if n == 0:
             return np.array([])
 
-        agg = np.zeros(n, dtype=np.float64)
+        agg = np.zeros(n, dtype=np.float32)
         for key in reward_keys:
             w = next(iter(self._reward_weights.get(key, {"default": 1.0}).values()))
-            vals = rewards_dict[key].astype(np.float64)
+            vals = rewards_dict[key].astype(np.float32)
             mean = vals.mean()
             std = vals.std()
             if std > 1e-8 and n > 1:
