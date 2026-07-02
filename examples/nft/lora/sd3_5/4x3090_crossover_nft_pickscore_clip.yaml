@@ -101,7 +101,7 @@ train:
   # Stopping
   max_epochs: 101
 
-  # ---- Crossover configuration ----
+  # ---- Crossover / Genetic Algorithm configuration ----
   crossover:
     enabled: true                 # false → fall back to standard NFT
     # Step sampling
@@ -110,15 +110,16 @@ train:
     step_range: [0.1, 0.4]        # Used when step_sampling='uniform' → step ~ U(0.1, 0.4)*num_steps
     # Crossover strategy
     strategy: "block"             # 'uniform' | 'convex' | 'block'
-    augmentation_factor: 1.0      # M/K ratio: ceil(K * factor) children from non-dominated parents
+    augmentation_factor: 1.0      # M/parent ratio: ceil(n_parents * factor) children
     strategy_kwargs:
       mixing_ratio: 0.3           # Fraction of blocks from primary parent
       block_size: 8               # Spatial block size (H, W)
       block_size_c: 4             # Channel block size (C). 1=no ch split, 4=blocks of 4ch
-    include_parents: true         # Keep original parents alongside children
-    # Selection & filtering
-    selective_crossover: true     # Only crossover non-dominated parents
-    pareto_filter: false           # Remove dominated samples before optimize
+    # Genetic Algorithm
+    evolution_generations: 3      # Number of GA generations
+    parent_ratio: 0.25            # Fraction of group selected as parents (top by advantage)
+    mutation_std: 0.05            # Gaussian noise stddev applied to child latents
+    # Logging
     log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration
@@ -127,9 +128,9 @@ scheduler:
 
 # Evaluation settings
 eval:
-  debug_eval: false
+  debug_eval: true
   resolution: 512  # Evaluation resolution
-  per_device_batch_size: 2  # Eval batch size
+  per_device_batch_size: 4  # Eval batch size
   guidance_scale: 1.0  # Guidance scale for sampling
   num_inference_steps: 40  # Number of eval timesteps
   eval_freq: 20  # Eval frequency in epochs (0 to disable)
@@ -154,11 +155,11 @@ rewards:
 eval_rewards:
   - name: "pick_score"
     reward_model: "PickScore"
-    batch_size: 8
+    batch_size: 16
     device: "cuda"
     dtype: bfloat16
   - name: "alignment"
     reward_model: "CLIP"
-    batch_size: 8
+    batch_size: 16
     device: "cuda"
     dtype: bfloat16

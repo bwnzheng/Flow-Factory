@@ -1,4 +1,4 @@
-# Copyright 2026 Jayce-Ping
+# Copyright 2026 Bowen-Zheng
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 intermediate denoising states during RL training."""
 
 from .abc import BaseCrossover, CrossoverOutput
+from .genetic_algorithm import GeneticAlgorithm
 from .pareto import (
     compute_pareto_mask,
     filter_by_group,
@@ -40,6 +41,7 @@ __all__ = [
     "BlockCrossover",
     "ConvexCrossover",
     "CrossoverOutput",
+    "GeneticAlgorithm",
     "UniformCrossover",
     "compute_pareto_mask",
     "create_crossover_strategy",

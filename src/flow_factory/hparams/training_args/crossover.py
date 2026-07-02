@@ -1,4 +1,4 @@
-# Copyright 2026 Jayce-Ping
+# Copyright 2026 Bowen-Zheng
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -137,6 +137,17 @@ class CrossoverArguments(ArgABC):
                 "as mutation.  Applied after each crossover operation (both initial "
                 "and re-crossover between generations).  0 = no mutation.  "
                 "Typical values: 0.01–0.1 (relative to latent scale)."
+            )
+        },
+    )
+    parent_ratio: float = field(
+        default=0.25,
+        metadata={
+            "help": (
+                "Fraction of group selected as parents in the genetic algorithm.  "
+                "Samples are sorted by advantage, and the top ``parent_ratio * K`` "
+                "are chosen as parents for crossover.  Clamped to at least 2.  "
+                "Default: 0.25 (top quarter of the group)."
             )
         },
     )

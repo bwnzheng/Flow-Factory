@@ -796,11 +796,6 @@ class AdvantageProcessor:
             if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
 
-        # ---- Per-child reward details (after filtering decision) ----
-        if self._log_crossover_rewards:
-            keep_mask = pareto_mask if pareto_mask is not None else None
-            self._log_child_details(gathered_rewards, group_indices, samples, keep_mask)
-
         applicable, weight_matrix = self.build_source_aware_matrices(
             samples, reward_keys, source_ids
         )
@@ -1018,11 +1013,6 @@ class AdvantageProcessor:
             if norm_mask is not None and not norm_mask.any():
                 norm_mask = np.ones(len(group_indices), dtype=bool)
 
-        # ---- Per-child reward details (after filtering decision) ----
-        if self._log_crossover_rewards:
-            keep_mask = pareto_mask if pareto_mask is not None else None
-            self._log_child_details(gathered_rewards, group_indices, samples, keep_mask)
-
         applicable, weight_matrix = self.build_source_aware_matrices(
             samples, reward_keys, source_ids
         )
@@ -1164,101 +1154,6 @@ class AdvantageProcessor:
             out.update(adv)
         return out
 
-    def _log_child_details(
-        self,
-        gathered_rewards: Dict[str, np.ndarray],
-        group_indices: np.ndarray,
-        samples: List[BaseSample],
-        pareto_mask: Optional[np.ndarray],
-    ) -> None:
-        """Log per-child reward details (kept vs discarded) for JSONL / pkl.
-
-        Gathers child data across ranks only in distributed mode, matching
-        the logic in :meth:`_build_child_mask`.
-        """
-        local_mask = np.array(
-            [s.extra_kwargs.get("is_crossover_child", False) for s in samples],
-            dtype=bool,
-        )
-        gathered_len = len(group_indices)
-        if len(local_mask) < gathered_len:
-            # Distributed mode: gather child flags and metadata across ranks.
-            local_flag = torch.tensor(local_mask.astype(np.float32), device=self.accelerator.device)
-            child_mask = self.accelerator.gather(local_flag).cpu().numpy().astype(bool)
-            samples = self._gather_sample_meta(samples, gathered_len)
-        else:
-            child_mask = local_mask
-
-        # Always call _build_child_reward_details so cross-rank reduce is
-        # unconditional — some ranks may have zero children but must still
-        # participate in the collective.
-        keep_mask = pareto_mask if pareto_mask is not None else np.ones(len(child_mask), dtype=bool)
-        self._build_child_reward_details(
-            gathered_rewards, child_mask, keep_mask, samples, group_indices
-        )
-
-    def _gather_sample_meta(
-        self, samples: List[BaseSample], gathered_len: int
-    ) -> List[Dict[str, Any]]:
-        """Gather per-sample crossover metadata (prompt, step, strategy) across ranks.
-
-        Returns a list of *gathered_len* lightweight dicts so that
-        ``_build_child_reward_details`` can read metadata for every sample
-        in the global reward array.
-        """
-        device = self.accelerator.device
-        B = len(samples)
-
-        # -- crossover_step: int → tensor --
-        steps = torch.tensor(
-            [s.extra_kwargs.get("crossover_step", -1) for s in samples],
-            dtype=torch.long,
-            device=device,
-        )
-        all_steps = self.accelerator.gather(steps).cpu().tolist()
-
-        # -- crossover_strategy: short string → padded tensor --
-        strat_bytes = [
-            (s.extra_kwargs.get("crossover_strategy") or "").encode("utf-8") for s in samples
-        ]
-        max_sl = max((len(b) for b in strat_bytes), default=0)
-        max_sl_t = torch.tensor([max_sl], dtype=torch.long, device=device)
-        global_max_sl = int(self.accelerator.gather(max_sl_t).max().item())
-        spadded = torch.tensor(
-            [b + b"\x00" * (global_max_sl - len(b)) for b in strat_bytes],
-            dtype=torch.uint8,
-            device=device,
-        )
-        all_strat = [
-            bytes(row).rstrip(b"\x00").decode("utf-8") or None
-            for row in self.accelerator.gather(spadded).cpu().numpy()
-        ]
-
-        # -- prompt: string → padded tensor (same as _gather_for_logging) --
-        prompt_bytes = [(s.prompt or "").encode("utf-8") for s in samples]
-        max_pl = max((len(b) for b in prompt_bytes), default=0)
-        max_pl_t = torch.tensor([max_pl], dtype=torch.long, device=device)
-        global_max_pl = int(self.accelerator.gather(max_pl_t).max().item())
-        ppadded = torch.tensor(
-            [b + b"\x00" * (global_max_pl - len(b)) for b in prompt_bytes],
-            dtype=torch.uint8,
-            device=device,
-        )
-        all_prompts = [
-            bytes(row).rstrip(b"\x00").decode("utf-8") or None
-            for row in self.accelerator.gather(ppadded).cpu().numpy()
-        ]
-
-        # Assemble lightweight dict per global sample
-        return [
-            {
-                "prompt": all_prompts[i],
-                "crossover_step": all_steps[i],
-                "crossover_strategy": all_strat[i],
-            }
-            for i in range(gathered_len)
-        ]
-
     def _build_crossover_stats(
         self,
         gathered_rewards: Dict[str, np.ndarray],
@@ -1329,118 +1224,6 @@ class AdvantageProcessor:
                 stats[f"crossover/child_better_{key}"] = round(better / n_c, 4)
 
         self._pending_crossover_stats = stats
-
-    def _build_child_reward_details(
-        self,
-        gathered_rewards: Dict[str, np.ndarray],
-        child_mask: np.ndarray,
-        pareto_mask: np.ndarray,
-        samples: List[BaseSample],
-        group_indices: np.ndarray,
-    ) -> None:
-        """Record per-child rewards with keep/discard status.
-
-        * Per-child list → ``crossover/children_rewards`` (JSONL / pkl).
-        * Per-reward scalar aggregates → ``crossover/child_kept_{rw}_mean`` etc.
-          (TensorBoard / WandB).
-
-        Uses *group_indices* to determine each child's prompt group rather
-        than relying on the child's ``prompt`` field, which may be inherited
-        from an unrelated template parent during crossover generation.
-        """
-        has_children = child_mask.any()
-
-        if self._pending_crossover_stats is None:
-            self._pending_crossover_stats = {}
-
-        child_indices = np.where(child_mask)[0] if has_children else np.array([], dtype=np.int64)
-        parent_mask = ~child_mask
-        reward_keys = sorted(gathered_rewards.keys())
-
-        # Build group_idx → sequential prompt_idx mapping using PARENTS only.
-        # Children may carry an incorrect prompt (inherited from the denoising
-        # template), but group_indices is always authoritative.
-        group_to_prompt_idx: Dict[int, int] = {}
-        for gi, is_parent in zip(group_indices, parent_mask):
-            if is_parent and gi not in group_to_prompt_idx:
-                group_to_prompt_idx[int(gi)] = len(group_to_prompt_idx)
-
-        # ---- Per-child records (prompt index + crossover provenance) ----
-        child_records: List[Dict[str, Any]] = []
-        if has_children:
-            for ci in child_indices:
-                meta = samples[ci]
-                if isinstance(meta, dict):
-                    cxo_step = meta["crossover_step"]
-                    cxo_strategy = meta["crossover_strategy"]
-                    cxo_meta = None  # gathered dicts don't carry full crossover_meta
-                else:
-                    cxo_step = meta.extra_kwargs.get("crossover_step")
-                    cxo_strategy = meta.extra_kwargs.get("crossover_strategy")
-                    cxo_meta = meta.extra_kwargs.get("crossover_meta")
-
-                gi = int(group_indices[ci])
-                record: Dict[str, Any] = {
-                    "kept": bool(pareto_mask[ci]),
-                    "prompt_idx": group_to_prompt_idx.get(gi, -1),
-                    "rewards": {k: float(gathered_rewards[k][ci]) for k in reward_keys},
-                }
-                if cxo_step is not None:
-                    record["crossover_step"] = cxo_step
-                if cxo_strategy is not None:
-                    record["crossover_strategy"] = cxo_strategy
-                if cxo_meta is not None:
-                    record["crossover_meta"] = cxo_meta
-                child_records.append(record)
-        self._pending_crossover_stats["crossover/children_rewards"] = child_records
-        child_kept_total = sum(1 for r in child_records if r["kept"])
-        child_disc_total = sum(1 for r in child_records if not r["kept"])
-
-        # ---- Per-reward mean summaries with cross-rank reduction ----
-        # IMPORTANT: reduce must be unconditional so ALL ranks participate,
-        # even those with zero children. Otherwise ranks without children
-        # skip the collective and deadlock ranks that do have children.
-        do_reduce = self.group_on_same_rank and self.accelerator.num_processes > 1
-        for key in reward_keys:
-            arr = gathered_rewards[key]
-            child_kept = arr[child_mask & pareto_mask] if has_children else np.array([])
-            child_disc = arr[child_mask & ~pareto_mask] if has_children else np.array([])
-
-            nk = len(child_kept)
-            sum_k = float(child_kept.sum()) if nk > 0 else 0.0
-            nd = len(child_disc)
-            sum_d = float(child_disc.sum()) if nd > 0 else 0.0
-
-            if do_reduce:
-                t = torch.tensor(
-                    [nk, sum_k, nd, sum_d],
-                    device=self.accelerator.device,
-                    dtype=torch.float32,
-                )
-                t = self.accelerator.reduce(t, reduction="sum")
-                nk = int(t[0].item())
-                sum_k = t[1].item()
-                nd = int(t[2].item())
-                sum_d = t[3].item()
-
-            self._pending_crossover_stats[f"crossover/child_kept_{key}_mean"] = (
-                round(sum_k / nk, 6) if nk > 0 else 0.0
-            )
-            self._pending_crossover_stats[f"crossover/child_disc_{key}_mean"] = (
-                round(sum_d / nd, 6) if nd > 0 else 0.0
-            )
-
-        if do_reduce:
-            t = torch.tensor(
-                [child_kept_total, child_disc_total],
-                device=self.accelerator.device,
-                dtype=torch.float32,
-            )
-            t = self.accelerator.reduce(t, reduction="sum")
-            child_kept_total = int(t[0].item())
-            child_disc_total = int(t[1].item())
-        self._pending_crossover_stats["crossover/child_kept_total"] = child_kept_total
-        self._pending_crossover_stats["crossover/child_disc_total"] = child_disc_total
 
     def _build_child_mask(
         self,
