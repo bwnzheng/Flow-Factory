@@ -35,9 +35,11 @@ Usage::
         reward_buffer=reward_buffer,
         seed=42,
     )
+    applicable = GeneticAlgorithm.build_applicable_mask(samples, rewards)
     evolved_samples, evolved_rewards = ga.evolve(
         parent_samples=samples,
         parent_rewards=rewards,
+        applicable=applicable,
         epoch=epoch,
     )
 """
@@ -134,6 +136,8 @@ class GeneticAlgorithm:
         evolution_generations: int = 1,
         reward_weights: Optional[Dict[str, Dict[str, float]]] = None,
         seed: int = 42,
+        denoise_kwargs: Optional[Dict[str, Any]] = None,
+        child_factory: Optional[callable] = None,
     ) -> None:
         # Strategy
         self._strategy = crossover_strategy
@@ -154,6 +158,10 @@ class GeneticAlgorithm:
         self._num_steps: int = training_args.num_inference_steps
         self._group_size: int = training_args.group_size
 
+        # Denoising and child creation
+        self._denoise_kwargs = denoise_kwargs or {}
+        self._child_factory = child_factory or self._default_child_factory
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -162,15 +170,62 @@ class GeneticAlgorithm:
     def device(self) -> torch.device:
         return self._accelerator.device
 
+    # ------------------------------------------------------------------
+    # Applicable mask construction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_applicable_mask(
+        samples: List[BaseSample],
+        reward_keys: List[str],
+    ) -> np.ndarray:
+        """Build ``(R, S)`` boolean applicable mask from ``sample.applicable_rewards``.
+
+        This is the authoritative source of truth for which reward model
+        applies to which sample — the same mask used by
+        :class:`AdvantageProcessor` for reward aggregation.
+
+        Args:
+            samples: All parent samples (any ordering / group assignment).
+            reward_keys: Ordered list of reward names (matching axis 0).
+
+        Returns:
+            ``(R, S)`` boolean array where ``mask[r, s]`` is True iff
+            ``reward_keys[r]`` is in ``samples[s].applicable_rewards``.
+        """
+        R, S = len(reward_keys), len(samples)
+        mask = np.zeros((R, S), dtype=bool)
+        if R == 0 or S == 0:
+            return mask
+        rk_to_idx = {rk: i for i, rk in enumerate(reward_keys)}
+        for s_idx, s in enumerate(samples):
+            for rk in s.applicable_rewards:
+                idx = rk_to_idx.get(rk)
+                if idx is not None:
+                    mask[idx, s_idx] = True
+        return mask
+
     @torch.no_grad()
     def evolve(
         self,
         parent_samples: List[BaseSample],
         parent_rewards: Dict[str, torch.Tensor],
         epoch: int,
+        applicable: Optional[np.ndarray] = None,
         verbose: bool = True,
     ) -> Tuple[List[BaseSample], Dict[str, torch.Tensor], Dict[str, Any], List[Dict[str, Any]]]:
         """Run GA on all groups and return the evolved population.
+
+        Args:
+            parent_samples: All parent samples across all groups on this rank.
+            parent_rewards: ``{reward_name: tensor(S,)}`` — per-reward scores
+                for every parent sample (NaN at non-applicable positions).
+            epoch: Current training epoch (used as RNG seed component).
+            applicable: Optional ``(R, S)`` boolean mask from
+                :meth:`build_applicable_mask`.  When provided, per-group valid
+                reward keys are derived from this mask; when ``None``, the
+                GA falls back to treating *all* global reward keys as valid
+                (single-source / homogeneous training).
 
         Returns:
             ``(evolved_samples, evolved_rewards, ga_stats, ga_samples)``.
@@ -188,9 +243,7 @@ class GeneticAlgorithm:
         for i, s in enumerate(parent_samples):
             gid_to_indices[s.unique_id].append(i)
 
-        local_g_rewards = {
-            k: torch.as_tensor(v).cpu().numpy() for k, v in parent_rewards.items()
-        }
+        local_g_rewards = {k: torch.as_tensor(v).cpu().numpy() for k, v in parent_rewards.items()}
 
         # Pre-compute shared context
         _p0 = parent_samples[0]
@@ -207,8 +260,6 @@ class GeneticAlgorithm:
         all_evolved_rewards: Dict[str, List[float]] = {k: [] for k in reward_keys}
 
         # Accumulate stats locally on this rank.
-        # Counts: summed across groups, then reduced across ranks.
-        # Reward moments: (sum, sum_sq, count) per (gen, key) for weighted averaging.
         acc: Dict[str, Any] = {"n_groups": 0}
         for gen in range(self._n_generations):
             acc[f"gen{gen}_count"] = 0
@@ -225,19 +276,31 @@ class GeneticAlgorithm:
             acc[f"gen{gen}_n_pareto_parents"] = 0
             acc[f"gen{gen}_n_pareto_children"] = 0
             acc[f"gen{gen}_n_filled"] = 0
-        # Per-sample rewards: list of (gen, gid, sample_idx, rewards_dict) records
         ga_samples: List[Dict[str, Any]] = []
 
         gid_items = sorted(gid_to_indices.items())
         if verbose and rank == 0:
-            gid_items = list(
-                tqdm(gid_items, desc=f"GA evolve (rank {rank})", position=rank)
-            )
+            gid_items = list(tqdm(gid_items, desc=f"GA evolve (rank {rank})", position=rank))
 
         for gid, indices in gid_items:
             population = [parent_samples[i] for i in indices]
             pop_rewards = {k: local_g_rewards[k][indices].copy() for k in reward_keys}
             acc["n_groups"] += 1
+
+            # ---- Determine valid reward keys for this group -------------
+            # All samples in a group share the same source, so we consult
+            # the first sample's applicable_rewards (set by RewardProcessor).
+            if applicable is not None:
+                # Applicable mask supplied: use it to derive per-group validity.
+                # A reward is valid for this group if it applies to *any*
+                # sample (all share source → either all or none apply).
+                group_applicable = applicable[:, indices]
+                valid_reward_keys = [
+                    rk for r_idx, rk in enumerate(reward_keys) if group_applicable[r_idx].any()
+                ]
+            else:
+                # Legacy / single-source path: all global reward keys are valid.
+                valid_reward_keys = list(reward_keys)
 
             for gen_idx in range(self._n_generations):
                 ctx.gid = gid
@@ -246,6 +309,7 @@ class GeneticAlgorithm:
                     population=population,
                     pop_rewards=pop_rewards,
                     reward_keys=reward_keys,
+                    valid_reward_keys=valid_reward_keys,
                     epoch=epoch,
                     ctx=ctx,
                 )
@@ -253,11 +317,16 @@ class GeneticAlgorithm:
                     break
 
                 # ---- Log to console ----
+                _logged_keys = sorted(
+                    set(stats["pop_rewards"].keys())
+                    | set(stats["child_rewards"].keys())
+                    | set(stats["new_rewards"].keys())
+                )
                 rw_lines = "  ".join(
                     f"{k}: pop {stats['pop_rewards'][k]['mean']:.3f}→"
                     f"{stats['new_rewards'][k]['mean']:.3f}"
                     f" | child {stats['child_rewards'][k]['mean']:.3f}"
-                    for k in reward_keys
+                    for k in _logged_keys
                 )
                 logger.info(
                     f"[rank {rank}] GA gid={gid} gen={gen_idx}: "
@@ -278,14 +347,13 @@ class GeneticAlgorithm:
                 acc[f"gen{gen_idx}_n_pareto_children"] += stats["n_pareto_children"]
                 acc[f"gen{gen_idx}_n_filled"] += stats["n_filled"]
                 n_pop = float(stats["n_pop"])
-                for k in reward_keys:
+                for k in _logged_keys:
                     pop_m = stats["pop_rewards"][k]["mean"]
                     pop_s = stats["pop_rewards"][k]["std"]
                     child_m = stats["child_rewards"][k]["mean"]
                     child_s = stats["child_rewards"][k]["std"]
                     new_m = stats["new_rewards"][k]["mean"]
                     new_s = stats["new_rewards"][k]["std"]
-                    # Accumulate moments: sum, sum_sq
                     acc[f"gen{gen_idx}_{k}_pop_sum"] += pop_m * n_pop
                     acc[f"gen{gen_idx}_{k}_pop_sum_sq"] += (pop_s**2 + pop_m**2) * n_pop
                     n_child = float(stats["n_children"])
@@ -297,14 +365,18 @@ class GeneticAlgorithm:
 
                 # ---- Record per-sample rewards ----
                 for si in range(len(population)):
-                    ga_samples.append({
-                        "gen": gen_idx,
-                        "gid": int(gid),
-                        "rank": int(rank),
-                        "sample_idx": si,
-                        "is_child": bool(population[si].extra_kwargs.get("is_crossover_child", False)),
-                        "rewards": {k: float(pop_rewards[k][si]) for k in reward_keys},
-                    })
+                    ga_samples.append(
+                        {
+                            "gen": gen_idx,
+                            "gid": int(gid),
+                            "rank": int(rank),
+                            "sample_idx": si,
+                            "is_child": bool(
+                                population[si].extra_kwargs.get("is_crossover_child", False)
+                            ),
+                            "rewards": {k: float(pop_rewards[k][si]) for k in reward_keys},
+                        }
+                    )
 
             all_evolved.extend(population)
             for k in reward_keys:
@@ -335,6 +407,7 @@ class GeneticAlgorithm:
         population: List[BaseSample],
         pop_rewards: Dict[str, np.ndarray],
         reward_keys: List[str],
+        valid_reward_keys: List[str],
         epoch: int,
         ctx: _EvolveCtx,
     ) -> Tuple[
@@ -344,16 +417,18 @@ class GeneticAlgorithm:
     ]:
         """One GA generation: select → crossover → denoise → evaluate → filter.
 
+        *reward_keys* is the global list (used for dict keys).  *valid_reward_keys*
+        is the subset that actually applies to this group's source; only these
+        participate in advantage computation and Pareto filtering.
+
         Returns ``(new_population, new_rewards, stats)``.  *stats* is None
         when there aren't enough parents.
         """
-        n_pop = len(population)
+        # 1. Compute advantage (only on valid reward dimensions)
+        adv = self._compute_advantage(pop_rewards, valid_reward_keys)
 
-        # 1. Compute advantage
-        adv = self._compute_advantage(pop_rewards, reward_keys)
-
-        # 2. Select parents (non-dominated first, then by advantage)
-        parent_idx, n_parents = self._select_parents(adv, pop_rewards, reward_keys)
+        # 2. Select parents (Pareto on valid dimensions)
+        parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
         if parent_idx is None:
             return population, pop_rewards, None
 
@@ -362,9 +437,7 @@ class GeneticAlgorithm:
         parent_latents = torch.stack(
             [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
         )
-        child_latents = self._crossover_and_mutate(
-            parent_latents, epoch + ctx.gid + ctx.gen_idx
-        )
+        child_latents = self._crossover_and_mutate(parent_latents, epoch + ctx.gid + ctx.gen_idx)
 
         # 4. Denoise → child samples
         cxo_step = _resolve_cxo_step(population[0], self._num_steps)
@@ -379,9 +452,7 @@ class GeneticAlgorithm:
         child_rewards_dict_raw = self._reward_buffer.rp.compute_rewards(
             children, store_to_samples=False, split="pointwise"
         )
-        child_rewards_dict = {
-            k: v.cpu().numpy() for k, v in child_rewards_dict_raw.items()
-        }
+        child_rewards_dict = {k: v.cpu().numpy() for k, v in child_rewards_dict_raw.items()}
         self._device_sync()
 
         # 6. Select survivors
@@ -392,6 +463,7 @@ class GeneticAlgorithm:
             child_rewards=child_rewards_dict,
             pop_adv=adv,
             reward_keys=reward_keys,
+            valid_reward_keys=valid_reward_keys,
         )
 
         return population, pop_rewards, stats
@@ -404,17 +476,18 @@ class GeneticAlgorithm:
         self,
         adv: np.ndarray,
         pop_rewards: Dict[str, np.ndarray],
-        reward_keys: List[str],
+        valid_reward_keys: List[str],
     ) -> Tuple[Optional[np.ndarray], int]:
-        """Select parents: non-dominated first, then by advantage."""
+        """Select parents: non-dominated first (on valid dimensions), then by advantage."""
+        if not valid_reward_keys:
+            return None, 0
+
         n_parents = max(2, int(len(adv) * self._parent_ratio))
         if n_parents < 2:
             return None, 0
 
-        # Pareto mask on current population
-        stack = np.stack(
-            [pop_rewards[k].astype(np.float32) for k in reward_keys], axis=1
-        )
+        # Pareto mask on current population — only valid reward dimensions
+        stack = np.stack([pop_rewards[k].astype(np.float32) for k in valid_reward_keys], axis=1)
         pareto = compute_pareto_mask(stack)
 
         # Non-dominated first, sorted by advantage descending
@@ -427,23 +500,18 @@ class GeneticAlgorithm:
         if len(selected) < n_parents:
             dom_idx = np.where(~pareto)[0]
             dom_idx = dom_idx[np.argsort(adv[dom_idx])[::-1]]
-            selected.extend(dom_idx[:n_parents - len(selected)])
+            selected.extend(dom_idx[: n_parents - len(selected)])
 
         return np.array(selected), n_parents
 
-    def _crossover_and_mutate(
-        self, parent_latents: torch.Tensor, rng_seed: int
-    ) -> torch.Tensor:
+    def _crossover_and_mutate(self, parent_latents: torch.Tensor, rng_seed: int) -> torch.Tensor:
         """Apply crossover strategy + Gaussian mutation."""
         gen_rng = torch.Generator()
         gen_rng.manual_seed(rng_seed)
         out = self._strategy.crossover(parent_latents, generator=gen_rng)
         child_latents = out.child_latents.float()
         if self._mutation_std > 0:
-            child_latents = (
-                child_latents
-                + torch.randn_like(child_latents) * self._mutation_std
-            )
+            child_latents = child_latents + torch.randn_like(child_latents) * self._mutation_std
         return child_latents
 
     # ------------------------------------------------------------------
@@ -457,7 +525,7 @@ class GeneticAlgorithm:
         template: BaseSample,
         ctx: _EvolveCtx,
     ) -> List[BaseSample]:
-        """Denoise child latents to images and wrap as BaseSample objects."""
+        """Denoise child latents and create samples via child_factory."""
         device = self.device
 
         child_batch = {
@@ -467,7 +535,7 @@ class GeneticAlgorithm:
         }
 
         timesteps = template.timesteps.to(device)
-        finals, _, _, _ = run_denoising_phase(
+        raw = run_denoising_phase(
             adapter=self._adapter,
             accelerator=self._accelerator,
             autocast_ctx=self._autocast,
@@ -477,12 +545,33 @@ class GeneticAlgorithm:
             end_idx=self._num_steps,
             batch=child_batch,
             training_args=self._training_args,
-            compute_log_prob=False,
-            collect_trajectory=False,
+            compute_log_prob=self._denoise_kwargs.get("compute_log_prob", False),
+            collect_trajectory=self._denoise_kwargs.get("collect_trajectory", False),
+            extra_call_back_kwargs=self._denoise_kwargs.get("extra_call_back_kwargs"),
+            collect_callbacks=self._denoise_kwargs.get("collect_callbacks", False),
         )
 
         self._device_sync()
 
+        return self._child_factory(
+            template=template,
+            child_latents=child_latents,
+            cxo_step=cxo_step,
+            denoise_output=raw,
+            ctx=ctx,
+        )
+
+    def _default_child_factory(
+        self,
+        template: BaseSample,
+        child_latents: torch.Tensor,
+        cxo_step: int,
+        denoise_output: tuple,
+        ctx: _EvolveCtx,
+    ) -> List[BaseSample]:
+        """Default child factory — NFT-style (no log_probs, no trajectory)."""
+        device = child_latents.device
+        finals, _, _, _ = denoise_output
         n_children = child_latents.shape[0]
         cross_latents_cpu = child_latents.detach().cpu()
         children: List[BaseSample] = []
@@ -491,9 +580,7 @@ class GeneticAlgorithm:
             final = finals[m : m + 1]
             imgs = self._adapter.decode_latents(final)
             al = final.expand(ctx.n_stored, *final.shape[1:]).clone()
-            lmap = torch.full(
-                (self._num_steps + 1,), -1, dtype=torch.long, device=device
-            )
+            lmap = torch.full((ctx.n_stored,), -1, dtype=torch.long, device=device)
             lmap[-1] = ctx.n_stored - 1
 
             extra = dict(ctx.shared_extra)
@@ -509,7 +596,7 @@ class GeneticAlgorithm:
             extra["_cxo_latent"] = cross_latents_cpu[m]
 
             child = ctx.sample_cls(
-                timesteps=timesteps,
+                timesteps=template.timesteps,
                 all_latents=al,
                 latent_index_map=lmap,
                 image=imgs,
@@ -539,23 +626,32 @@ class GeneticAlgorithm:
         child_rewards: Dict[str, np.ndarray],
         pop_adv: np.ndarray,
         reward_keys: List[str],
+        valid_reward_keys: List[str],
     ) -> Tuple[
         List[BaseSample],
         Dict[str, np.ndarray],
         Dict[str, Any],
     ]:
-        """Merge population + children, keep non-dominated, trim to K."""
+        """Merge population + children, keep non-dominated, trim to K.
+
+        Pareto filtering and advantage computation use only
+        *valid_reward_keys*; *reward_keys* is the full global set (needed
+        for dict iteration and stats bookkeeping).
+        """
         n_pop = len(population)
         n_children = len(children)
 
-        # ---- Reward stats before replacement ----
+        # ---- Reward stats before replacement (valid dimensions only) ----
         pop_rw_stats = {
-            k: {"mean": float(pop_rewards[k].mean()), "std": float(pop_rewards[k].std())}
-            for k in reward_keys
+            k: {
+                "mean": float(pop_rewards[k].mean()),
+                "std": float(pop_rewards[k].std()),
+            }
+            for k in valid_reward_keys
         }
 
-        # Compute child advantages
-        child_adv = self._compute_advantage(child_rewards, reward_keys)
+        # Compute child advantages (valid dimensions only)
+        child_adv = self._compute_advantage(child_rewards, valid_reward_keys)
 
         # Merge
         combined_adv = np.concatenate([pop_adv, child_adv])
@@ -563,17 +659,24 @@ class GeneticAlgorithm:
         for k in reward_keys:
             combined_rewards[k] = np.concatenate([pop_rewards[k], child_rewards[k]])
 
-        # ---- Child reward stats ----
+        # ---- Child reward stats (valid dimensions only) ----
         child_rw_stats = {
-            k: {"mean": float(child_rewards[k].mean()), "std": float(child_rewards[k].std())}
-            for k in reward_keys
+            k: {
+                "mean": float(child_rewards[k].mean()),
+                "std": float(child_rewards[k].std()),
+            }
+            for k in valid_reward_keys
         }
 
-        # Pareto mask
-        stack = np.stack(
-            [combined_rewards[k].astype(np.float32) for k in reward_keys], axis=1
-        )
-        pareto = compute_pareto_mask(stack)
+        # ---- Pareto mask (valid dimensions only) ----
+        if valid_reward_keys:
+            stack = np.stack(
+                [combined_rewards[k].astype(np.float32) for k in valid_reward_keys],
+                axis=1,
+            )
+            pareto = compute_pareto_mask(stack)
+        else:
+            pareto = np.ones(len(combined_adv), dtype=bool)
 
         # Keep non-dominated
         keep = pareto.copy()
@@ -599,9 +702,7 @@ class GeneticAlgorithm:
         # Build new population
         combined_pop = population + children
         new_population = [combined_pop[ci] for ci in keep_indices]
-        new_rewards = {
-            k: combined_rewards[k][keep_indices].copy() for k in reward_keys
-        }
+        new_rewards = {k: combined_rewards[k][keep_indices].copy() for k in reward_keys}
 
         assert n_keep_final == n_pop, (
             f"GA population size mismatch: {n_pop} in, {n_keep_final} out. "
@@ -616,10 +717,13 @@ class GeneticAlgorithm:
         n_pareto_children = int(pareto[n_pop:].sum())
         n_pareto_parents = int(pareto[:n_pop].sum())
 
-        # ---- Reward stats after replacement ----
+        # ---- Reward stats after replacement (valid dimensions only) ----
         new_rw_stats = {
-            k: {"mean": float(new_rewards[k].mean()), "std": float(new_rewards[k].std())}
-            for k in reward_keys
+            k: {
+                "mean": float(new_rewards[k].mean()),
+                "std": float(new_rewards[k].std()),
+            }
+            for k in valid_reward_keys
         }
 
         stats = {
@@ -652,9 +756,7 @@ class GeneticAlgorithm:
         cxo_latent = sample.extra_kwargs.get("_cxo_latent")
         if cxo_latent is not None:
             return cxo_latent.to(device)
-        step = sample.extra_kwargs.get("_cxo_step") or sample.extra_kwargs.get(
-            "crossover_step"
-        )
+        step = sample.extra_kwargs.get("_cxo_step") or sample.extra_kwargs.get("crossover_step")
         if step is not None and hasattr(sample, "latent_index_map"):
             idx = int(sample.latent_index_map[step])
             return sample.all_latents[idx].to(device)
@@ -663,18 +765,25 @@ class GeneticAlgorithm:
     def _compute_advantage(
         self,
         rewards_dict: Dict[str, np.ndarray],
-        reward_keys: List[str],
+        valid_reward_keys: List[str],
     ) -> np.ndarray:
-        """Per-group GDPO-style advantage. Local only, no cross-rank comm."""
-        if not reward_keys:
-            return np.array([])
+        """Per-group GDPO-style advantage (valid dimensions only).
 
-        n = len(next(iter(rewards_dict.values())))
+        Only *valid_reward_keys* participate; all-NaN columns from
+        non-applicable rewards are already excluded by the caller.
+        """
+        if not valid_reward_keys:
+            if not rewards_dict:
+                return np.array([])
+            n = len(next(iter(rewards_dict.values())))
+            return np.zeros(n, dtype=np.float32)
+
+        n = len(rewards_dict[valid_reward_keys[0]])
         if n == 0:
             return np.array([])
 
         agg = np.zeros(n, dtype=np.float32)
-        for key in reward_keys:
+        for key in valid_reward_keys:
             w = next(iter(self._reward_weights.get(key, {"default": 1.0}).values()))
             vals = rewards_dict[key].astype(np.float32)
             mean = vals.mean()
@@ -692,3 +801,101 @@ class GeneticAlgorithm:
             torch.npu.synchronize()
         elif device.type == "cuda":
             torch.cuda.synchronize()
+
+    # ------------------------------------------------------------------
+    # Stats reduction (shared across trainers)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def reduce_stats(
+        ga_acc: Dict[str, Any],
+        ga_samples: List[Dict[str, Any]],
+        accelerator: Any,
+    ) -> Dict[str, Any]:
+        """Reduce per-rank GA accumulators across ranks, build final stats."""
+        num_ranks = accelerator.num_processes
+
+        max_gen = 0
+        while f"gen{max_gen}_count" in ga_acc:
+            max_gen += 1
+
+        reward_keys = sorted(
+            {
+                k[len("gen0_") : -len("_pop_sum")]
+                for k in ga_acc
+                if k.startswith("gen0_") and k.endswith("_pop_sum")
+            }
+        )
+
+        count_keys = ["n_groups"]
+        for gen in range(max_gen):
+            count_keys.append(f"gen{gen}_count")
+            for key in [
+                "n_replaced",
+                "n_children",
+                "n_children_kept",
+                "n_pareto_parents",
+                "n_pareto_children",
+                "n_filled",
+            ]:
+                count_keys.append(f"gen{gen}_{key}")
+            for rk in reward_keys:
+                for suffix in [
+                    "pop_sum",
+                    "pop_sum_sq",
+                    "child_sum",
+                    "child_sum_sq",
+                    "new_sum",
+                    "new_sum_sq",
+                ]:
+                    count_keys.append(f"gen{gen}_{rk}_{suffix}")
+
+        values = [float(ga_acc.get(k, 0)) for k in count_keys]
+        t = torch.tensor(values, device=accelerator.device, dtype=torch.float32)
+
+        if num_ranks > 1:
+            t = accelerator.reduce(t, reduction="sum")
+
+        reduced: Dict[str, float] = {}
+        for i, k in enumerate(count_keys):
+            reduced[k] = t[i].item()
+
+        stats: Dict[str, Any] = {"ga/n_groups": int(reduced["n_groups"])}
+        for gen in range(max_gen):
+            count = reduced[f"gen{gen}_count"]
+            if count == 0:
+                continue
+            p = f"ga/gen{gen}"
+            for key in [
+                "n_replaced",
+                "n_children",
+                "n_children_kept",
+                "n_pareto_parents",
+                "n_pareto_children",
+                "n_filled",
+            ]:
+                stats[f"{p}/{key}"] = round(reduced[f"gen{gen}_{key}"] / count, 2)
+
+            for rk in reward_keys:
+                for prefix, sum_key, sum_sq_key in [
+                    ("pop_mean", "pop_sum", "pop_sum_sq"),
+                    ("child_mean", "child_sum", "child_sum_sq"),
+                    ("new_mean", "new_sum", "new_sum_sq"),
+                ]:
+                    s = reduced[f"gen{gen}_{rk}_{sum_key}"]
+                    sq = reduced[f"gen{gen}_{rk}_{sum_sq_key}"]
+                    n_eff = count
+                    if "child" in sum_key:
+                        n_child = max(reduced.get(f"gen{gen}_n_children", 1.0), 1.0)
+                        n_eff = n_child
+                    mean = s / max(n_eff, 1.0)
+                    var = max(sq / max(n_eff, 1.0) - mean**2, 0.0)
+                    if "mean" in prefix:
+                        stats[f"{p}/{rk}/{prefix}"] = round(mean, 6)
+                    else:
+                        stats[f"{p}/{rk}/{prefix.replace('mean', 'std')}"] = round(var**0.5, 6)
+
+        if ga_samples:
+            stats["ga/samples"] = ga_samples
+
+        return stats

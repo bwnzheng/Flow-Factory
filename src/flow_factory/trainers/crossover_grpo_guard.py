@@ -1,23 +1,22 @@
-# Copyright 2026 Jayce-Ping
+# Copyright 2026 Bowen-Zheng
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # ...
 
 # src/flow_factory/trainers/crossover_grpo_guard.py
 """
-CrossoverGRPOGuard — GRPO-Guard trainer with global-group crossover.
+CrossoverGRPOGuard — GRPO-Guard trainer with Genetic Algorithm augmentation.
 
 Parents generated during ``sample()`` store crossover-step latents + full
-trajectory.  In ``prepare_feedback()``, rewards are gathered globally,
-non-dominated parents identified per group, and crossover children generated
-with equal share across all ranks.
+trajectory.  In ``prepare_feedback()``, a per-group genetic algorithm evolves
+the population: select top parents by advantage, crossover + mutation, filter
+by Pareto expansion, trim by |advantage|.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -25,15 +24,13 @@ import tqdm as tqdm_
 
 from ..hparams import CrossoverGRPOGuardTrainingArguments
 from ..samples import BaseSample
-from ..utils.base import create_generator, filter_kwargs
+from ..utils.base import create_generator
 from ..utils.logger_utils import setup_logger
 from ..utils.trajectory_collector import compute_trajectory_indices
 from .crossover import (
-    compute_pareto_mask,
+    GeneticAlgorithm,
     create_crossover_strategy,
-    run_denoising_phase,
     sample_crossover_step,
-    select_non_dominated_parents,
 )
 from .grpo import GRPOGuardTrainer
 
@@ -49,20 +46,38 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         cxo_args = self.training_args.crossover
         self._crossover_enabled = cxo_args.enabled
         if self._crossover_enabled:
-            self._crossover_strategy = create_crossover_strategy(
+            strategy = create_crossover_strategy(
                 name=cxo_args.strategy,
                 augmentation_factor=cxo_args.augmentation_factor,
                 **cxo_args.strategy_kwargs,
             )
-            self._selective = getattr(cxo_args, "selective_crossover", False)
-            self._include_parents = getattr(cxo_args, "include_parents", True)
-            if getattr(cxo_args, "pareto_filter", False):
-                self.advantage_processor._pareto_enabled = True
+            self._ga = GeneticAlgorithm(
+                crossover_strategy=strategy,
+                adapter=self.adapter,
+                accelerator=self.accelerator,
+                autocast=self.autocast,
+                training_args=self.training_args,
+                reward_buffer=self.reward_buffer,
+                parent_ratio=getattr(cxo_args, "parent_ratio", 0.25),
+                mutation_std=getattr(cxo_args, "mutation_std", 0.0),
+                evolution_generations=getattr(cxo_args, "evolution_generations", 1),
+                reward_weights=self.advantage_processor.reward_weights,
+                seed=self.training_args.seed,
+                denoise_kwargs={
+                    "compute_log_prob": True,
+                    "collect_trajectory": True,
+                    "extra_call_back_kwargs": ["next_latents_mean"],
+                    "collect_callbacks": True,
+                },
+                child_factory=self._grpo_child_factory,
+            )
             if getattr(cxo_args, "log_rewards", True):
                 self.advantage_processor._log_crossover_rewards = True
             logger.info(
-                f"CrossoverGRPOGuard: strategy={cxo_args.strategy} selective={self._selective} "
-                f"include_parents={self._include_parents}"
+                f"CrossoverGRPOGuard GA: strategy={cxo_args.strategy} "
+                f"parent_ratio={self._ga._parent_ratio} "
+                f"mutation_std={self._ga._mutation_std} "
+                f"generations={self._ga._n_generations}"
             )
 
     # =========================== Sampling ==================================
@@ -146,46 +161,25 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         rank = self.accelerator.process_index
         rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
         if self._crossover_enabled:
-            logger.info(f"[rank {rank}] prepare_feedback: calling _crossover_augment")
-            children, child_rewards = self._crossover_augment(samples, rewards)
-            # Barrier: ensure all ranks finish _crossover_augment (which
-            # internally calls compute_rewards → wait_for_everyone) before
-            # any rank enters compute_advantages (which does gather).
+            logger.info(f"[rank {rank}] prepare_feedback: calling GA evolve")
+            applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
+            evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
+                parent_samples=samples,
+                parent_rewards=rewards,
+                applicable=applicable,
+                epoch=self.epoch,
+                verbose=self.show_progress_bar,
+            )
             self.accelerator.wait_for_everyone()
             logger.info(
-                f"[rank {rank}] prepare_feedback: _crossover_augment returned "
-                f"{len(children)} children"
+                f"[rank {rank}] prepare_feedback: GA returned "
+                f"{len(evolved_samples)} evolved samples"
             )
-            if children:
-                # ---- Child count warmup: limit children in early epochs ----
-                warmup_epochs = getattr(self.training_args.crossover, "child_warmup_epochs", 0)
-                if warmup_epochs > 0 and len(children) > 0:
-                    ratio = min(1.0, self.epoch / max(warmup_epochs, 1))
-                    target = max(1, int(len(children) * ratio))
-                    if target < len(children):
-                        idx = torch.randperm(len(children))[:target].tolist()
-                        children = [children[i] for i in idx]
-                        child_rewards = {k: v[idx] for k, v in child_rewards.items()}
-
-                logger.info(f"[rank {rank}] prepare_feedback: merging children into samples")
-                if self._include_parents:
-                    samples.extend(children)
-                    rewards = {
-                        k: torch.cat([rewards[k].to(device), child_rewards[k].to(device)], dim=0)
-                        for k in rewards
-                    }
-                else:
-                    samples[:] = children
-                    rewards = {k: v.to(device) for k, v in child_rewards.items()}
-
-                # Sort by unique_id so children are interleaved with their
-                # parent groups — advantage grouping is keyed on unique_id,
-                # and logging (train_samples) now covers children evenly.
-                uids = [s.unique_id for s in samples]
-                perm = sorted(range(len(samples)), key=lambda i: uids[i])
-                samples[:] = [samples[i] for i in perm]
-                rewards = {k: v[perm].to(device) for k, v in rewards.items()}
-                logger.info(f"[rank {rank}] prepare_feedback: merged, total {len(samples)} samples")
+            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_samples, self.accelerator)
+            if ga_stats and self.accelerator.is_main_process:
+                self.log_data(ga_stats, step=self.step)
+            samples[:] = evolved_samples
+            rewards = {k: v.to(device) for k, v in evolved_rewards.items()}
 
         self.advantage_processor._child_advantage_scale = 1.0
 
@@ -197,403 +191,49 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             self.log_data(stats, step=self.step)
 
     # ======================================================================
-    # Crossover augmentation
+    # GRPO-Guard child factory (with trajectory merging)
     # ======================================================================
 
-    @torch.no_grad()
-    def _crossover_augment(
-        self, parent_samples: List[BaseSample], parent_rewards: Dict[str, torch.Tensor]
-    ) -> tuple:
-        device = self.accelerator.device
-        num_steps = self.training_args.num_inference_steps
-        rank = self.accelerator.process_index
-        world = self.accelerator.num_processes
-        B = len(parent_samples)
-
-        # 1. Gather rewards + unique_ids globally
-        reward_keys = sorted(parent_rewards.keys())
-        packed = torch.stack(
-            [torch.as_tensor(parent_rewards[k], device=device) for k in reward_keys]
-            + [
-                torch.as_tensor(
-                    [s.unique_id for s in parent_samples], dtype=torch.float32, device=device
-                )
-            ],
-            dim=1,
-        )
-        gathered = self.accelerator.gather(packed)
-        g_rewards = {k: gathered[:, i].cpu().numpy() for i, k in enumerate(reward_keys)}
-        g_ids = gathered[:, -1].cpu().numpy().astype(np.int64)
-
-        # 2. Non-dominated per group (global)
-        if self._selective:
-            nondom = select_non_dominated_parents(
-                {k: torch.from_numpy(v) for k, v in g_rewards.items()}, g_ids.tolist()
-            )
-        else:
-            nondom = np.ones(len(g_ids), dtype=bool)
-
-        # 3. All_gather (latent, gid, step) of non-dominated parents.
-        #    Prompt data is fetched from each child's local parent in step 5.
-        local_nondom = nondom[rank * B : (rank + 1) * B]
-        local_latents, local_gids, local_steps = [], [], []
-        for i, s in enumerate(parent_samples):
-            if local_nondom[i]:
-                step = s.extra_kwargs["_cxo_step"]
-                idx = int(s.latent_index_map[step])
-                local_latents.append(s.all_latents[idx].to(device))
-                local_gids.append(s.unique_id)
-                local_steps.append(step)
-
-        cnt_t = torch.tensor([len(local_latents)], device=device)
-        max_cnt = max(self.accelerator.gather(cnt_t).max().item(), 1)
-        dummy = (
-            torch.zeros_like(local_latents[0]) if local_latents else torch.zeros(1, device=device)
-        )
-        padded_l = (
-            (local_latents + [dummy] * (max_cnt - len(local_latents)))
-            if local_latents
-            else [dummy] * max_cnt
-        )
-        all_lat = self.accelerator.gather(torch.stack(padded_l))
-        all_gid = (
-            self.accelerator.gather(
-                torch.tensor(
-                    local_gids + [-1] * (max_cnt - len(local_gids)), dtype=torch.long, device=device
-                )
-            )
-            .cpu()
-            .tolist()
-        )
-        all_step = (
-            self.accelerator.gather(
-                torch.tensor(
-                    local_steps + [-1] * (max_cnt - len(local_steps)),
-                    dtype=torch.long,
-                    device=device,
-                )
-            )
-            .cpu()
-            .tolist()
-        )
-        all_cnt = self.accelerator.gather(cnt_t).cpu().tolist()
-
-        entries = []
-        off = 0
-        for cnt in all_cnt:
-            for j in range(cnt):
-                entries.append((all_lat[off + j], all_gid[off + j], all_step[off + j]))
-            off += max_cnt
-
-        # 4. Per-group crossover — each rank only processes children from its
-        #    own local groups so the actual parent Sample is always available.
-        groups: Dict[tuple, List[torch.Tensor]] = defaultdict(list)
-        for latent, gid, step in entries:
-            groups[(gid, step)].append(latent)
-        gid_to_parent_local: Dict[int, BaseSample] = {}
-        for s in parent_samples:
-            gid_to_parent_local.setdefault(s.unique_id, s)
-
-        # Build child_groups with batched latents for batch denoising.
-        child_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict[str, Any]]]] = []
-
-        for (gid, step), gl in groups.items():
-            parent = gid_to_parent_local.get(gid)
-            if parent is None or len(gl) < 2:
-                continue
-            gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
-            out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
-            Mg = out.child_latents.shape[0]
-            metas: List[Dict[str, Any]] = []
-            for m in range(Mg):
-                meta: Dict[str, Any] = {
-                    "parent_i": int(out.parent_indices_i[m]),
-                    "parent_j": int(out.parent_indices_j[m]),
-                }
-                for mk, mv in out.metadata.items():
-                    meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
-                metas.append(meta)
-            child_groups.append((gid, step, parent, out.child_latents.float(), metas))
-
-        if not child_groups:
-            logger.info(f"[rank {rank}] _crossover_augment: no child_groups, returning empty")
-            empty = {k: torch.zeros(0, device=device) for k in reward_keys}
-            return [], empty
-
-        # 5. Multi-generation evolutionary loop.
-        #    Each generation: denoise → evaluate → select layer-0 survivors →
-        #    re-crossover with parent latents (elitism) for next generation.
-        _p0 = parent_samples[0]
-        timesteps = _p0.timesteps.to(device)
-        n_generations = max(1, getattr(self.training_args.crossover, "evolution_generations", 1))
-
-        current_groups = child_groups
-        all_children: List[BaseSample] = []
-        all_child_gids: List[int] = []
-        total_raw = 0
-        total_filter_stats = {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
-
-        for gen_idx in range(n_generations):
-            gen_children: List[BaseSample] = []
-            gen_gids: List[int] = []
-            n_raw = sum(lat.shape[0] for _, _, _, lat, _ in current_groups)
-
-            for gid, step, parent, child_latents_batch, metas in tqdm(
-                current_groups,
-                desc=f"Child denoising gen {gen_idx} (rank {rank})",
-                disable=not self.show_progress_bar,
-            ):
-                pooled = getattr(parent, "pooled_prompt_embeds", None)
-                child_batch = {
-                    k: getattr(parent, k).to(device)
-                    for k in ("prompt_embeds", "prompt_ids")
-                    if getattr(parent, k, None) is not None
-                }
-                if pooled is not None:
-                    child_batch["pooled_prompt_embeds"] = pooled.to(device)
-                missing = [
-                    k for k in ("prompt_embeds", "pooled_prompt_embeds") if k not in child_batch
-                ]
-                if missing:
-                    raise RuntimeError(
-                        f"Child gid={gid} missing required prompt field(s) "
-                        f"{missing} from parent group. "
-                        f"Check that the parent sample stores pooled_prompt_embeds."
-                    )
-
-                Mg = child_latents_batch.shape[0]
-                finals, post_lat, post_lp, post_cb = run_denoising_phase(
-                    adapter=self.adapter,
-                    accelerator=self.accelerator,
-                    autocast_ctx=self.autocast,
-                    latents=child_latents_batch,
-                    timesteps=timesteps,
-                    start_idx=step,
-                    end_idx=num_steps,
-                    batch=child_batch,
-                    training_args=self.training_args,
-                    compute_log_prob=True,
-                    collect_trajectory=True,
-                    extra_call_back_kwargs=["next_latents_mean"],
-                    collect_callbacks=True,
-                )
-
-                # Slice batched outputs per-child for individual Sample construction.
-                cross_latents = child_latents_batch.detach().cpu()
-                for m in range(Mg):
-                    imgs = self.adapter.decode_latents(finals[m : m + 1])
-                    child_post_lat = [lat[m : m + 1] for lat in post_lat]
-                    child_post_lp = [lp[m : m + 1] for lp in post_lp]
-                    child_post_cb = (
-                        {k: [cb[m : m + 1] for cb in v] for k, v in post_cb.items()}
-                        if post_cb
-                        else None
-                    )
-                    child = self._build_child(
-                        parent=parent,
-                        post_latents=child_post_lat,
-                        post_log_probs=child_post_lp,
-                        post_callbacks=child_post_cb,
-                        image=imgs,
-                        cxo_step=step,
-                        num_steps=num_steps,
-                        cxo_latent=cross_latents[m],
-                    )
-                    child.extra_kwargs["crossover_meta"] = metas[m]
-                    child._unique_id = gid
-                    gen_children.append(child)
-                    gen_gids.append(gid)
-
-            # Sync device after denoising before reward computation
-            if current_groups:
-                if device.type == "npu" and hasattr(torch, "npu"):
-                    torch.npu.synchronize()
-                elif device.type == "cuda":
-                    torch.cuda.synchronize()
-
-            # Evaluate this generation
-            if gen_children:
-                gen_rewards_dict = self.reward_buffer.rp.compute_rewards(
-                    gen_children, store_to_samples=False, split="pointwise"
-                )
-                if device.type == "npu" and hasattr(torch, "npu"):
-                    torch.npu.synchronize()
-                elif device.type == "cuda":
-                    torch.cuda.synchronize()
-            else:
-                gen_rewards_dict = {k: np.array([]) for k in reward_keys}
-
-            n_before = len(gen_children)
-            gen_kept, gen_kept_rewards = self._filter_children(
-                gen_children, gen_gids, gen_rewards_dict, g_rewards, g_ids
-            )
-
-            # Build next generation from layer-0 survivors
-            if gen_idx < n_generations - 1:
-                gen_layer0, _, fstats = self._filter_children_layer0(
-                    gen_children, gen_gids, gen_rewards_dict, g_rewards, g_ids
-                )
-                for k in total_filter_stats:
-                    total_filter_stats[k] += fstats[k]
-                current_groups = (
-                    self._build_child_crossover_groups(
-                        gen_layer0, [c.unique_id for c in gen_layer0], gid_to_parent_local
-                    )
-                    if gen_layer0
-                    else []
-                )
-                if not current_groups:
-                    break
-                logger.info(
-                    f"Evolution gen {gen_idx}: {n_before} children → "
-                    f"{fstats['layer0']} layer-0, {fstats['discarded']} discarded "
-                    f"({len(current_groups)} groups for next) (rank {rank})"
-                )
-            else:
-                logger.info(
-                    f"Evolution gen {gen_idx} (final): {n_before} children → "
-                    f"{len(gen_kept)} kept after filter (rank {rank})"
-                )
-
-            all_children.extend(gen_kept)
-            all_child_gids.extend([c.unique_id for c in gen_kept])
-            total_raw += n_raw
-
-        # Clean up internal keys before reward computation
-        for c in all_children:
-            c.extra_kwargs.pop("_cxo_latent", None)
-
-        logger.info(
-            f"[rank {rank}] _crossover_augment: computing rewards for "
-            f"{len(all_children)} all_children"
-        )
-        if all_children:
-            child_rewards_dict = self.reward_buffer.rp.compute_rewards(
-                all_children, store_to_samples=False, split="pointwise"
-            )
-            child_rewards = {
-                k: torch.as_tensor(v, device=device) for k, v in child_rewards_dict.items()
-            }
-        else:
-            child_rewards = {k: torch.zeros(0, device=device) for k in reward_keys}
-        logger.info(f"[rank {rank}] _crossover_augment: rewards computed")
-
-        logger.info(
-            f"Crossover: {len(groups)} groups, {len(entries)} parents "
-            f"→ {total_raw} raw children ({n_generations} gens), {len(all_children)} kept "
-            f"(layer0={total_filter_stats['layer0']}, "
-            f"dominated_by_all={total_filter_stats['dominated_by_all']}, "
-            f"discarded={total_filter_stats['discarded']}) (rank {rank})"
-        )
-
-        logger.info(f"[rank {rank}] _crossover_augment: device sync before return")
-        if device.type == "npu" and hasattr(torch, "npu"):
-            torch.npu.synchronize()
-        elif device.type == "cuda":
-            torch.cuda.synchronize()
-        logger.info(f"[rank {rank}] _crossover_augment: returning")
-        return all_children, child_rewards
-
-    # ======================================================================
-    # Child filtering
-
-    def _filter_children(self, children, child_gids, child_rewards_dict, g_rewards, g_ids):
-        """Keep only non-dominated children within each parent group."""
-        if not children:
-            return children, child_rewards_dict
-        reward_keys = list(g_rewards.keys())
-        child_gids_arr = np.array(child_gids, dtype=np.int64)
-        keep = np.ones(len(children), dtype=bool)
-        for gid in np.unique(child_gids_arr):
-            c_idx = np.where(child_gids_arr == gid)[0]
-            p_idx = np.where(g_ids == gid)[0]
-            if len(p_idx) == 0 or len(c_idx) == 0:
-                continue
-            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)
-            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])
-            combined = np.vstack([p_mat, c_mat])
-            pareto = compute_pareto_mask(combined)
-            keep[c_idx] = pareto[len(p_idx) :]
-        filtered_children = [c for i, c in enumerate(children) if keep[i]]
-        filtered_rewards = {k: v[keep] for k, v in child_rewards_dict.items()}
-        return filtered_children, filtered_rewards
-
-    def _filter_children_layer0(self, children, child_gids, child_rewards_dict, g_rewards, g_ids):
-        """Keep only layer-0 (non-dominated) children for next-gen re-crossover."""
-        if not children:
-            return children, child_gids, {"layer0": 0, "dominated_by_all": 0, "discarded": 0}
-        reward_keys = list(g_rewards.keys())
-        child_gids_arr = np.array(child_gids, dtype=np.int64)
-        keep = np.zeros(len(children), dtype=bool)
-        n_layer0 = 0
-        n_discarded = 0
-        for gid in np.unique(child_gids_arr):
-            c_idx = np.where(child_gids_arr == gid)[0]
-            p_idx = np.where(g_ids == gid)[0]
-            if len(p_idx) == 0:
-                keep[c_idx] = True
-                n_layer0 += len(c_idx)
-                continue
-            p_mat = np.stack([g_rewards[k][p_idx] for k in reward_keys], axis=1)
-            c_mat = np.array([[child_rewards_dict[k][i] for k in reward_keys] for i in c_idx])
-            combined = np.vstack([p_mat, c_mat])
-            n_p = len(p_idx)
-            all_pareto = compute_pareto_mask(combined)
-            c_pareto = all_pareto[n_p:]
-            keep[c_idx] = c_pareto
-            n_layer0 += int(c_pareto.sum())
-            n_discarded += int((~c_pareto).sum())
-        filtered_children = [c for i, c in enumerate(children) if keep[i]]
-        filtered_gids = [g for i, g in enumerate(child_gids) if keep[i]]
-        stats = {"layer0": n_layer0, "dominated_by_all": 0, "discarded": n_discarded}
-        return filtered_children, filtered_gids, stats
-
-    def _build_child_crossover_groups(
+    def _grpo_child_factory(
         self,
-        children: List[BaseSample],
-        child_gids: List[int],
-        gid_to_parent: Dict[int, BaseSample],
-    ) -> List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]]:
-        """Re-crossover surviving children's latents for the next generation.
+        template: BaseSample,
+        child_latents: torch.Tensor,
+        cxo_step: int,
+        denoise_output: tuple,
+        ctx: Any,
+    ) -> List[BaseSample]:
+        """Child factory for GRPO-Guard — merges parent pre-cxo trajectory
+        with child post-cxo trajectory to create full-trajectory children."""
+        device = child_latents.device
+        num_steps = self._num_steps
+        finals, post_lat, post_lp, post_cb = denoise_output
+        n_children = child_latents.shape[0]
+        cross_latents_cpu = child_latents.detach().cpu()
+        children: List[BaseSample] = []
 
-        Groups children by (gid, step), adds parent latent for elitism,
-        crosses the pool, and returns new child_groups for denoising.
-        """
-        device = self.accelerator.device
-        latent_groups: Dict[Tuple[int, int], List[torch.Tensor]] = defaultdict(list)
-        for child, gid in zip(children, child_gids):
-            step = child.extra_kwargs.get("crossover_step")
-            latent = child.extra_kwargs.get("_cxo_latent")
-            if step is not None and latent is not None:
-                latent_groups[(gid, step)].append(latent.to(device))
+        for m in range(n_children):
+            imgs = self._adapter.decode_latents(finals[m : m + 1])
+            child_post_lat = [lat[m : m + 1] for lat in post_lat]
+            child_post_lp = [lp[m : m + 1] for lp in post_lp]
+            child_post_cb = (
+                {k: [cb[m : m + 1] for cb in v] for k, v in post_cb.items()} if post_cb else None
+            )
+            child = self._build_child(
+                parent=template,
+                post_latents=child_post_lat,
+                post_log_probs=child_post_lp,
+                post_callbacks=child_post_cb,
+                image=imgs,
+                cxo_step=cxo_step,
+                num_steps=num_steps,
+                cxo_latent=cross_latents_cpu[m],
+            )
+            child.extra_kwargs["crossover_strategy"] = ctx.strategy_name
+            child.extra_kwargs["generation"] = ctx.gen_idx
+            child._unique_id = ctx.gid
+            children.append(child)
 
-        new_groups: List[Tuple[int, int, BaseSample, torch.Tensor, List[Dict]]] = []
-        for (gid, step), gl in latent_groups.items():
-            parent = gid_to_parent.get(gid)
-            if parent is None:
-                continue
-            # Elitism: include original parent latent so good genes are never lost
-            parent_idx = int(parent.latent_index_map[step])
-            parent_latent = parent.all_latents[parent_idx].to(device)
-            gl = [parent_latent] + gl
-            if len(gl) < 2:
-                continue
-            gen = create_generator(self.training_args.seed + self.epoch + gid, device="cpu")
-            out = self._crossover_strategy.crossover(torch.stack(gl), generator=gen)
-            Mg = out.child_latents.shape[0]
-            metas: List[Dict[str, Any]] = []
-            for m in range(Mg):
-                meta: Dict[str, Any] = {
-                    "parent_i": int(out.parent_indices_i[m]),
-                    "parent_j": int(out.parent_indices_j[m]),
-                }
-                for mk, mv in out.metadata.items():
-                    meta[mk] = mv[m] if isinstance(mv, list) and len(mv) == Mg else mv
-                metas.append(meta)
-            latents = out.child_latents.float()
-            new_groups.append((gid, step, parent, latents, metas))
-
-        return new_groups
+        return children
 
     # ======================================================================
     # Child trajectory construction
@@ -678,15 +318,14 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                     pos += 1
         merged_lp = torch.stack(lp_list) if lp_list else torch.empty(0, device=device)
 
-        # Inherit all parent fields (including model-specific ones) via
-        # to_dict/from_dict, overriding only the fields that differ.
+        # Inherit all parent fields via to_dict/from_dict
         parent_dict = parent.to_dict()
         parent_dict["all_latents"] = merged_al
         parent_dict["latent_index_map"] = lm
         parent_dict["log_probs"] = merged_lp
         parent_dict["log_prob_index_map"] = lpm2
         parent_dict["image"] = image
-        parent_dict["_unique_id"] = None  # recompute from child content
+        parent_dict["_unique_id"] = None
         parent_dict["applicable_rewards"] = set()
 
         extra = parent_dict.get("extra_kwargs", {})

@@ -55,13 +55,27 @@ class OCRRewardModel(PointwiseRewardModel):
         super().__init__(config, accelerator)
 
         device_index = self.accelerator.local_process_index
+        device_type = str(self.device)
+
+        # Map accelerator device to PaddleOCR device string.
+        if "npu" in device_type:
+            paddle_device = f"npu:{device_index}"
+        elif "cuda" in device_type:
+            paddle_device = f"gpu:{device_index}"
+        else:
+            paddle_device = "cpu"
+
+        logger.info(
+            f"PaddleOCR device: {paddle_device} "
+            f"(accelerator device: {self.device})"
+        )
 
         # Initialize PP-OCRv5 reader with new API
         self.model = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
-            device=f"gpu:{device_index}" if "cuda" in str(self.device) else "cpu"
+            device=paddle_device,
         )
 
     def _compute_scores_batch(

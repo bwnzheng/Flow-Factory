@@ -148,9 +148,11 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
         if self._crossover_enabled:
             logger.info(f"[rank {rank}] prepare_feedback: calling GA evolve")
+            applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
             evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
                 parent_samples=samples,
                 parent_rewards=rewards,
+                applicable=applicable,
                 epoch=self.epoch,
                 verbose=self.log_args.verbose,
             )
@@ -162,7 +164,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             )
 
             # Reduce GA stats across ranks
-            ga_stats = self._reduce_ga_stats(ga_acc, ga_samples)
+            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_samples, self.accelerator)
             if ga_stats and self.accelerator.is_main_process:
                 self.log_data(ga_stats, step=self.step)
 
@@ -178,92 +180,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
-
-    # ======================================================================
-    # GA stats reduction
-    # ======================================================================
-
-    def _reduce_ga_stats(
-        self,
-        ga_acc: Dict[str, Any],
-        ga_samples: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Reduce GA accumulator across ranks and build final stats."""
-        num_ranks = self.accelerator.num_processes
-
-        # Build a deterministic ordered list of keys so every rank packs
-        # the same-sized tensor.
-        max_gen = 0
-        while f"gen{max_gen}_count" in ga_acc:
-            max_gen += 1
-
-        reward_keys = sorted(
-            {k[len("gen0_"):-len("_pop_sum")]
-             for k in ga_acc
-             if k.startswith("gen0_") and k.endswith("_pop_sum")}
-        )
-
-        count_keys = ["n_groups"]
-        for gen in range(max_gen):
-            count_keys.append(f"gen{gen}_count")
-            count_keys.extend([
-                f"gen{gen}_n_replaced", f"gen{gen}_n_children",
-                f"gen{gen}_n_children_kept", f"gen{gen}_n_pareto_parents",
-                f"gen{gen}_n_pareto_children", f"gen{gen}_n_filled",
-            ])
-            for rk in reward_keys:
-                for suffix in ["pop_sum", "pop_sum_sq", "child_sum",
-                               "child_sum_sq", "new_sum", "new_sum_sq"]:
-                    count_keys.append(f"gen{gen}_{rk}_{suffix}")
-
-        values = [float(ga_acc.get(k, 0)) for k in count_keys]
-        t = torch.tensor(values, device=self.accelerator.device, dtype=torch.float32)
-
-        if num_ranks > 1:
-            t = self.accelerator.reduce(t, reduction="sum")
-
-        # Unpack reduced values
-        reduced: Dict[str, float] = {}
-        for i, k in enumerate(count_keys):
-            reduced[k] = t[i].item()
-
-        # Build final stats
-        stats: Dict[str, Any] = {"ga/n_groups": int(reduced["n_groups"])}
-        for gen in range(max_gen):
-            count = reduced[f"gen{gen}_count"]
-            if count == 0:
-                continue
-            p = f"ga/gen{gen}"
-            for key in ["n_replaced", "n_children", "n_children_kept",
-                         "n_pareto_parents", "n_pareto_children", "n_filled"]:
-                stats[f"{p}/{key}"] = round(reduced[f"gen{gen}_{key}"] / count, 2)
-
-            for rk in reward_keys:
-                for prefix, sum_key, sum_sq_key in [
-                    ("pop_mean", "pop_sum", "pop_sum_sq"),
-                    ("child_mean", "child_sum", "child_sum_sq"),
-                    ("new_mean", "new_sum", "new_sum_sq"),
-                ]:
-                    s = reduced[f"gen{gen}_{rk}_{sum_key}"]
-                    sq = reduced[f"gen{gen}_{rk}_{sum_sq_key}"]
-                    n_eff = count
-                    if "child" in sum_key:
-                        n_child = max(reduced.get(f"gen{gen}_n_children", 1.0), 1.0)
-                        n_eff = n_child
-                    mean = s / max(n_eff, 1.0)
-                    var = max(sq / max(n_eff, 1.0) - mean**2, 0.0)
-                    if "mean" in prefix:
-                        stats[f"{p}/{rk}/{prefix}"] = round(mean, 6)
-                    else:
-                        stats[f"{p}/{rk}/{prefix.replace('mean', 'std')}"] = round(var**0.5, 6)
-
-        if ga_samples:
-            stats["ga/samples"] = ga_samples
-
-        return stats
         self.compute_advantages(samples, rewards, store_to_samples=True)
         logger.info(f"[rank {rank}] prepare_feedback: compute_advantages done")
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
-

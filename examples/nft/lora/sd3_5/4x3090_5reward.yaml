@@ -1,0 +1,284 @@
+# Multi-reward NFT training on SD3.5 Medium with 4x3090 GPUs.
+#
+# Training rewards (5): PickScore, HPSv2, CLIPScore, GenEval, OCR
+# Eval rewards (7):    all 5 training + AestheticScore + HPSv2.1
+#
+# Optional additions (uncomment to enable):
+#   Eval:     VisionReward — CogVLM2 multi-dim scoring (requires cloned repo, ~20 GB VRAM)
+#   Eval:     UniReward — 7B VLM multi-dim scoring (requires qwen_vl_utils, ~14 GB VRAM)
+#
+# GenEval requires CUDA for mmdet ops — will fail on NPU.  Included for
+# alignment with Marble paper; remove if unavailable.
+#
+# Datasets (3 sources, 1:1:1):
+#   - pickscore — generic prompts (PickScore / HPSv2 / CLIPScore)
+#   - geneval   — compositional prompts with metadata (GenEval + general)
+#   - ocr       — text-rendering prompts with quoted target text (OCR + general)
+#
+# Specialist rewards (GenEval, OCR) route only to their own source via
+# `applicable_datasets`.  General rewards apply to all sources.
+#
+# Dependencies (beyond core Flow-Factory):
+#   bash scripts/install_geneval_deps.sh                           # GenEval (mmdet + open_clip)
+#   pip install paddleocr python-Levenshtein                       # OCR
+#   uv pip install hpsv2 --no-deps                                 # HPSv2 (see hpsv2_reward.py notes)
+#
+# Usage:
+#   ff-train examples/nft/lora/sd3_5/4x3090_5reward.yaml
+
+# Environment Configuration
+launcher: "accelerate"
+config_file: config/deepspeed/deepspeed_zero2.yaml
+num_processes: 4
+main_process_port: 29500
+mixed_precision: "bf16"
+
+# Data Configuration — 3 training sources
+data:
+  datasets:
+    - name: pickscore
+      dataset_dir: "dataset/pickscore"
+      train:
+        weight: 1
+        max_dataset_size: 1024
+      eval: {}
+
+    # - name: geneval
+    #   dataset_dir: "dataset/geneval"
+    #   train:
+    #     weight: 1
+    #     max_dataset_size: 1024
+    #   eval: {}
+
+    # - name: ocr
+    #   dataset_dir: "dataset/ocr"
+    #   train:
+    #     weight: 1
+    #     max_dataset_size: 1024
+    #   eval: {}
+
+  preprocessing_batch_size: 8
+  dataloader_num_workers: 16
+  force_reprocess: false
+  cache_dir: "~/.cache/flow_factory/datasets"
+  sampler_type: "auto"
+
+# Model Configuration
+model:
+  finetune_type: 'lora'
+  lora_rank: 32
+  lora_alpha: 64
+  target_modules: "default"
+  model_name_or_path: "stabilityai/stable-diffusion-3.5-medium"
+  model_type: "sd3-5"
+  resume_path: null
+  resume_type: null
+
+log:
+  run_name: null
+  project: "Flow-Factory"
+  logging_backend: "tensorboard"
+  save_media_locally: true
+  save_dir: "saves/"
+  save_freq: 20
+  save_model_only: true
+
+# Training Configuration
+train:
+  # Trainer settings
+  trainer_type: 'nft'
+  advantage_aggregation: 'gdpo'
+  nft_beta: 1.0
+  # Old-policy settings
+  off_policy: true
+  ema_decay_schedule: "piecewise_linear"
+  flat_steps: 0
+  ramp_rate: 0.001
+  ema_decay: 0.5
+  ema_update_interval: 1
+  ema_device: "cuda"
+  # Training timestep distribution
+  num_train_timesteps: 4
+  time_sampling_strategy: discrete
+  time_shift: 3.0
+  timestep_range: 0.5
+  # KL divergence
+  kl_type: 'v-based'
+  kl_beta: 0
+  ref_param_device: 'cuda'
+  # Clipping
+  adv_clip_range: 5.0
+
+  # Sampling
+  resolution: 512
+  num_inference_steps: 14
+  guidance_scale: 1.0
+
+  # Batch and sampling
+  per_device_batch_size: 1
+  group_size: 16
+  global_std: false
+  stddev_reweighting: true
+  stddev_ema_decay: 0.99
+  unique_sample_num_per_epoch: 144  # 48 per source x 3 sources
+  gradient_step_per_epoch: 1
+  gradient_accumulation_steps: auto
+
+  # Optimization
+  learning_rate: 1.0e-4
+  adam_weight_decay: 1.0e-4
+  adam_betas: [0.9, 0.999]
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+
+  # Gradient checkpointing
+  enable_gradient_checkpointing: false
+
+  # Seed
+  seed: 42
+
+  # Stopping
+  max_epochs: 101
+
+# Scheduler Configuration
+scheduler:
+  dynamics_type: "ODE"
+
+# Evaluation settings
+eval:
+  debug_eval: true
+  resolution: 512
+  per_device_batch_size: 2
+  guidance_scale: 1.0
+  num_inference_steps: 40
+  eval_freq: 20
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# Training Rewards (5)
+# ---------------------------------------------------------------------------
+rewards:
+  # --- General-purpose rewards (apply to ALL sources) ---
+  - name: "pick_score"
+    reward_model: "PickScore"
+    weight:
+      pickscore: 1.0
+      # geneval: 0.2
+      # ocr: 0.2
+    batch_size: 16
+    device: "cuda"
+    dtype: bfloat16
+
+  # - name: "hpsv2"
+  #   reward_model: "HPSv2"
+  #   weight:
+  #     pickscore: 1.0
+  #     geneval: 0.2
+  #     ocr: 0.2
+  #   batch_size: 16
+  #   device: "cuda"
+  #   dtype: bfloat16
+
+  - name: "clip_score"
+    reward_model: "CLIP"
+    weight:
+      pickscore: 1.0
+      # geneval: 0.2
+      # ocr: 0.2
+    batch_size: 16
+    device: "cuda"
+    dtype: bfloat16
+
+  # --- Specialist: GenEval (routes to geneval source only) ---
+  # - name: "geneval_reward"
+  #   reward_model: "GenEval"
+  #   weight: 1.0
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: float32
+  #   applicable_datasets: ["geneval"]
+
+  # --- Specialist: OCR (routes to ocr source only) ---
+  # - name: "ocr_reward"
+  #   reward_model: "OCR"
+  #   weight: 1.0
+  #   batch_size: 16
+  #   device: "cuda"
+  #   dtype: bfloat16
+  #   applicable_datasets: ["ocr"]
+
+# ---------------------------------------------------------------------------
+# Eval Rewards (8) — 5 training + AestheticScore + ImageBind + HPSv2.1
+# ---------------------------------------------------------------------------
+eval_rewards:
+  # --- General-purpose (apply to all eval sources) ---
+  - name: "pick_score"
+    reward_model: "PickScore"
+    batch_size: 32
+    device: "cuda"
+    dtype: bfloat16
+
+  # - name: "hpsv2"
+  #   reward_model: "HPSv2"
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: bfloat16
+
+  - name: "clip_score"
+    reward_model: "CLIP"
+    batch_size: 32
+    device: "cuda"
+    dtype: bfloat16
+
+  # --- Held-out: HPSv2.1 (newer version than training HPSv2, OOD evaluation) ---
+  # - name: "hpsv21"
+  #   reward_model: "HPSv2"
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: bfloat16
+  #   extra_kwargs:
+  #     hps_version: "v2.1"
+
+  # --- Held-out: image-only aesthetic quality ---
+  # - name: "aesthetic_score"
+  #   reward_model: "aesthetic_score"
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: bfloat16
+
+  # --- Held-out: CogVLM2 multi-dim scoring (uncomment to enable) ---
+  # Requires: git clone https://github.com/THUDM/VisionReward.git
+  #           pip install -r requirements.txt
+  #           Set VISIONREWARD_REPO env var or repo_path in extra_kwargs.
+  # - name: "vision_reward"
+  #   reward_model: "vision_reward"
+  #   batch_size: 1
+  #   device: "cuda"
+  #   dtype: bfloat16
+  #   extra_kwargs:
+  #     repo_path: "VisionReward"
+  #     model_path: "THUDM/VisionReward-Image-bf16"
+
+  # # --- Held-out: VLM multi-dim scoring (uncomment to enable) ---
+  # # Requires: pip install qwen_vl_utils; ~14 GB VRAM for the 7B model
+  # - name: "unireward"
+  #   reward_model: "unireward"
+  #   batch_size: 1
+  #   device: "cuda"
+  #   dtype: bfloat16
+
+  # --- Specialist: GenEval eval (routes to geneval source only) ---
+  # - name: "geneval_reward"
+  #   reward_model: "GenEval"
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: float32
+  #   applicable_datasets: ["geneval"]
+
+  # --- Specialist: OCR eval (routes to ocr source only) ---
+  # - name: "ocr_reward"
+  #   reward_model: "OCR"
+  #   batch_size: 32
+  #   device: "cuda"
+  #   dtype: bfloat16
+  #   applicable_datasets: ["ocr"]
