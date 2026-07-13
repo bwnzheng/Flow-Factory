@@ -114,6 +114,8 @@ class OCRLegacyRewardModel(PointwiseRewardModel):
         rewards = []
         for img, p in zip(image, prompt):
             if isinstance(img, Image.Image):
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
                 img = np.array(img)
 
             # Extract quoted target text (e.g. 'a sign saying "Hello"' -> 'Hello')

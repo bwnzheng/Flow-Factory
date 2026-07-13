@@ -102,8 +102,10 @@ class OCRRewardModel(PointwiseRewardModel):
         """Compute OCR reward for a batch of image-prompt pairs."""
         rewards = []
         for img, p in zip(image, prompt):
-            # Convert image format to np.ndarray
+            # Convert image format to np.ndarray (ensure RGB, 3 channels)
             if isinstance(img, Image.Image):
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
                 img = np.array(img)
 
             # Extract quoted target text (e.g. 'a sign saying "Hello World"' -> 'Hello World')
@@ -112,6 +114,7 @@ class OCRRewardModel(PointwiseRewardModel):
 
             try:
                 # OCR recognition using PP-OCRv5 predict API
+                logger.debug(f"OCR predict: image shape={img.shape}, dtype={img.dtype}, prompt_head={p[:50]}")
                 result = self.model.predict(img)
                 # Extract recognized text from PP-OCRv5 result
                 recognized_text = ''
