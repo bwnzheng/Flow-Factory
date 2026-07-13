@@ -47,6 +47,14 @@ logging.getLogger("paddleocr").setLevel(logging.WARNING)
 logging.getLogger("ppocr").setLevel(logging.WARNING)
 logging.getLogger("paddle").setLevel(logging.WARNING)
 
+# Limit PaddlePaddle CPU threads to avoid multi-rank contention.
+# Each rank runs PaddleOCR on CPU; if all ranks use all cores
+# simultaneously, the cluster scheduler may kill the job.
+_cpu_count = os.cpu_count() or 1
+_ocr_threads = max(1, _cpu_count // 4)
+os.environ.setdefault("OMP_NUM_THREADS", str(_ocr_threads))
+os.environ.setdefault("MKL_NUM_THREADS", str(_ocr_threads))
+
 try:
     from paddleocr import PaddleOCR
 except ImportError:
