@@ -445,7 +445,7 @@ class GeneticAlgorithm:
             n_children = self._strategy.num_children(len(population))
             child_latents = self._resample_children(
                 batch_size=n_children,
-                latent_shape=template_latent.shape[1:],
+                latent_shape=template_latent.shape,
                 dtype=template_latent.dtype,
                 rng_seed=epoch + ctx.gid + ctx.gen_idx,
             )
