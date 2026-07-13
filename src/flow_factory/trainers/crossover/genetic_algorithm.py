@@ -670,7 +670,11 @@ class GeneticAlgorithm:
             lmap = torch.full((ctx.n_stored,), -1, dtype=torch.long, device=device)
             lmap[-1] = ctx.n_stored - 1
 
-            extra = dict(ctx.shared_extra)
+            # Use template's extra_kwargs (group-specific) instead of
+            # ctx.shared_extra (which is from the first global parent).
+            # This ensures per-group metadata (e.g. Geneval criteria) is
+            # correctly associated with each child's prompt.
+            extra = dict(template.extra_kwargs) if template.extra_kwargs else {}
             extra.update(
                 is_crossover_child=True,
                 crossover_step=cxo_step,
