@@ -63,9 +63,26 @@ class CrossoverArguments(ArgABC):
         default=(0.2, 0.8),
         metadata={"help": "Range for uniform step sampling as (min_frac, max_frac) in (0, 1)."},
     )
+    offspring_mode: Literal["crossover", "resample", "mutation"] = field(
+        default="crossover",
+        metadata={
+            "help": (
+                "How to generate offspring.  Mutually exclusive modes:\n"
+                "  'crossover' — crossover between two parents + optional mutation (default).\n"
+                "  'resample' — pure random noise, no parents involved.\n"
+                "  'mutation'  — clone a single parent + Gaussian mutation, no crossover.\n"
+                "When 'resample' or 'mutation', the ``strategy`` field is ignored."
+            )
+        },
+    )
     strategy: str = field(
         default="uniform",
-        metadata={"help": "Crossover strategy name.  Options: 'uniform', 'convex', 'block'."},
+        metadata={
+            "help": (
+                "Crossover strategy name.  Options: 'uniform', 'convex', 'block'.  "
+                "Ignored when ``offspring_mode`` is not 'crossover'."
+            )
+        },
     )
     augmentation_factor: float = field(
         default=2.0,

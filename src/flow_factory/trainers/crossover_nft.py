@@ -53,6 +53,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 augmentation_factor=cxo_args.augmentation_factor,
                 **cxo_args.strategy_kwargs,
             )
+            offspring_mode = getattr(cxo_args, "offspring_mode", "crossover")
             self._ga = GeneticAlgorithm(
                 crossover_strategy=strategy,
                 adapter=self.adapter,
@@ -63,6 +64,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 parent_ratio=getattr(cxo_args, "parent_ratio", 0.25),
                 mutation_std=getattr(cxo_args, "mutation_std", 0.0),
                 evolution_generations=getattr(cxo_args, "evolution_generations", 1),
+                offspring_mode=offspring_mode,
                 reward_weights=self.advantage_processor.reward_weights,
                 seed=self.training_args.seed,
             )
@@ -70,7 +72,8 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 self.advantage_processor._log_crossover_rewards = True
             self.advantage_processor._child_in_norm = True
             logger.info(
-                f"CrossoverNFT GA: strategy={cxo_args.strategy} "
+                f"CrossoverNFT GA: offspring_mode={offspring_mode} "
+                f"strategy={cxo_args.strategy} "
                 f"parent_ratio={self._ga._parent_ratio} "
                 f"mutation_std={self._ga._mutation_std} "
                 f"generations={self._ga._n_generations}"

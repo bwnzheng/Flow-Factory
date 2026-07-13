@@ -104,13 +104,20 @@ class GeneticAlgorithm:
     Each group (K samples sharing a prompt) evolves independently:
 
     1. Compute advantage → select top *parent_ratio* as parents
-    2. Crossover parent latents + Gaussian mutation → M children
+    2. Generate children by *offspring_mode*:
+
+       - ``"crossover"`` — crossover parent latents + optional Gaussian mutation
+       - ``"resample"``  — pure random noise, no parents involved
+       - ``"mutation"``  — clone a single parent + Gaussian mutation, no crossover
     3. Denoise children → compute rewards
     4. Merge population → keep non-dominated (Pareto front expanders)
     5. Fill back to K by keeping dominated samples with largest |advantage|
 
     Args:
-        crossover_strategy: Pluggable crossover strategy.
+        crossover_strategy: Pluggable crossover strategy (used only in
+            ``offspring_mode="crossover"``).
+        offspring_mode: How to generate children:
+            ``"crossover"``, ``"resample"``, or ``"mutation"``.
         parent_ratio: Fraction of group selected as parents (0–1).
         mutation_std: Gaussian noise stddev applied to child latents.
         evolution_generations: Number of GA generations.
@@ -134,6 +141,7 @@ class GeneticAlgorithm:
         parent_ratio: float = 0.25,
         mutation_std: float = 0.0,
         evolution_generations: int = 1,
+        offspring_mode: str = "crossover",
         reward_weights: Optional[Dict[str, Dict[str, float]]] = None,
         seed: int = 42,
         denoise_kwargs: Optional[Dict[str, Any]] = None,
@@ -144,6 +152,7 @@ class GeneticAlgorithm:
         self._parent_ratio = max(0.0, min(1.0, float(parent_ratio)))
         self._mutation_std = float(mutation_std)
         self._n_generations = max(1, int(evolution_generations))
+        self._offspring_mode = offspring_mode
         self._reward_weights = reward_weights or {}
 
         # Environment (constant across epochs)
@@ -427,17 +436,37 @@ class GeneticAlgorithm:
         # 1. Compute advantage (only on valid reward dimensions)
         adv = self._compute_advantage(pop_rewards, valid_reward_keys)
 
-        # 2. Select parents (Pareto on valid dimensions)
-        parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
-        if parent_idx is None:
-            return population, pop_rewards, None
-
-        # 3. Crossover + mutation
+        # 2–3. Generate children by offspring mode
         device = self.device
-        parent_latents = torch.stack(
-            [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
-        )
-        child_latents = self._crossover_and_mutate(parent_latents, epoch + ctx.gid + ctx.gen_idx)
+
+        if self._offspring_mode == "resample":
+            # ---- Resample: pure random noise, no parents ----
+            template_latent = self._get_crossover_latent(population[0], device)
+            n_children = self._strategy.num_children(len(population))
+            child_latents = self._resample_children(
+                batch_size=n_children,
+                latent_shape=template_latent.shape[1:],
+                dtype=template_latent.dtype,
+                rng_seed=epoch + ctx.gid + ctx.gen_idx,
+            )
+        elif self._offspring_mode == "mutation":
+            # ---- Mutation-only: clone single parent + noise, no crossover ----
+            parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
+            if parent_idx is None:
+                return population, pop_rewards, None
+            parent_latents = torch.stack(
+                [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
+            )
+            child_latents = self._mutate_only(parent_latents, epoch + ctx.gid + ctx.gen_idx)
+        else:
+            # ---- Crossover (default): two-parent crossover + optional mutation ----
+            parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
+            if parent_idx is None:
+                return population, pop_rewards, None
+            parent_latents = torch.stack(
+                [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
+            )
+            child_latents = self._crossover_and_mutate(parent_latents, epoch + ctx.gid + ctx.gen_idx)
 
         # 4. Denoise → child samples
         cxo_step = _resolve_cxo_step(population[0], self._num_steps)
@@ -512,6 +541,64 @@ class GeneticAlgorithm:
         child_latents = out.child_latents.float()
         if self._mutation_std > 0:
             child_latents = child_latents + torch.randn_like(child_latents) * self._mutation_std
+        return child_latents
+
+    def _resample_children(
+        self,
+        batch_size: int,
+        latent_shape: torch.Size,
+        dtype: torch.dtype,
+        rng_seed: int,
+    ) -> torch.Tensor:
+        """Generate children from pure random noise (no parents involved).
+
+        Args:
+            batch_size: Number of children ``M``.
+            latent_shape: Per-sample shape ``(C, H, W)`` or ``(L, D)``.
+            dtype: Data type of the latents.
+            rng_seed: Seed for reproducibility.
+
+        Returns:
+            Random noise tensor of shape ``(M, *latent_shape)``.
+        """
+        device = self.device
+        gen_rng = torch.Generator(device=device)
+        gen_rng.manual_seed(rng_seed)
+        shape = (batch_size, *latent_shape)
+        child_latents = torch.randn(shape, device=device, dtype=dtype, generator=gen_rng)
+        return child_latents
+
+    def _mutate_only(self, parent_latents: torch.Tensor, rng_seed: int) -> torch.Tensor:
+        """Clone a single parent + Gaussian mutation (no crossover).
+
+        Each child is a noisy copy of one randomly selected parent.
+        The ``mutation_std`` controls the noise magnitude; a warning is
+        emitted if it is zero (children would be identical clones).
+
+        Args:
+            parent_latents: Parent latents, shape ``(K, *latent_dims)``.
+            rng_seed: Seed for reproducibility.
+
+        Returns:
+            Mutated child latents of shape ``(M, *latent_dims)``.
+        """
+        K = parent_latents.shape[0]
+        M = self._strategy.num_children(K)
+        gen_rng = torch.Generator()
+        gen_rng.manual_seed(rng_seed)
+        # Randomly select one parent for each child
+        pick = torch.randint(0, K, (M,), generator=gen_rng)
+        child_latents = parent_latents[pick].clone()
+        # Mutation
+        std = self._mutation_std
+        if std <= 0:
+            std = 0.05
+            logger.warning(
+                f"offspring_mode='mutation' but mutation_std={self._mutation_std}. "
+                f"Falling back to mutation_std={std} to avoid producing identical clones."
+            )
+        noise = torch.randn_like(child_latents)
+        child_latents = child_latents + noise * std
         return child_latents
 
     # ------------------------------------------------------------------
