@@ -33,6 +33,8 @@ Usage (YAML):
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import List, Optional
 
 import numpy as np
@@ -45,6 +47,12 @@ from ..utils.logger_utils import setup_logger
 from .abc import PointwiseRewardModel, RewardModelOutput
 
 logger = setup_logger(__name__)
+
+# Suppress PaddleOCR / PaddlePaddle internal debug logging.
+os.environ.setdefault("GLOG_v", "0")  # PaddlePaddle glog verbosity (0 = ERROR only)
+logging.getLogger("paddleocr").setLevel(logging.WARNING)
+logging.getLogger("ppocr").setLevel(logging.WARNING)
+logging.getLogger("paddle").setLevel(logging.WARNING)
 
 try:
     from paddleocr import PaddleOCR

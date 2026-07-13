@@ -27,6 +27,8 @@ yum install -y mesa-libGL glib2
 ```
 For other versions of CUDA, please refer to the official documentation of PaddleOCR.
 """
+import logging
+import os
 from typing import Optional
 from accelerate import Accelerator
 from PIL import Image
@@ -38,6 +40,12 @@ from ..hparams import *
 from ..utils.logger_utils import setup_logger
 
 logger = setup_logger(__name__)
+
+# Suppress PaddleOCR / PaddlePaddle internal debug logging.
+os.environ.setdefault("GLOG_v", "0")  # PaddlePaddle glog verbosity (0 = ERROR only)
+logging.getLogger("paddleocr").setLevel(logging.WARNING)
+logging.getLogger("ppocr").setLevel(logging.WARNING)
+logging.getLogger("paddle").setLevel(logging.WARNING)
 
 try:
     from paddleocr import PaddleOCR
