@@ -615,11 +615,22 @@ class GeneticAlgorithm:
         """Denoise child latents and create samples via child_factory."""
         device = self.device
 
-        child_batch = {
-            k: getattr(template, k).to(device)
-            for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids")
-            if getattr(template, k, None) is not None
-        }
+        # Build the denoising batch from the template sample.
+        # Must also check extra_kwargs because subclasses like SD3_5Sample
+        # declare pooled_prompt_embeds as a direct dataclass field (default
+        # None), which shadows the extra_kwargs fallback of __getattr__.
+        child_batch: Dict[str, Any] = {}
+        for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids"):
+            val = getattr(template, k, None)
+            if val is None:
+                val = template.extra_kwargs.get(k)
+            if val is not None:
+                child_batch[k] = val.to(device)
+            elif k == "pooled_prompt_embeds":
+                logger.warning(
+                    f"_denoise_and_create_children: template is missing "
+                    f"'{k}'.  The adapter may fail if it requires it."
+                )
 
         timesteps = template.timesteps.to(device)
         raw = run_denoising_phase(
@@ -656,7 +667,13 @@ class GeneticAlgorithm:
         denoise_output: tuple,
         ctx: _EvolveCtx,
     ) -> List[BaseSample]:
-        """Default child factory — NFT-style (no log_probs, no trajectory)."""
+        """Default child factory — NFT-style (no log_probs, no trajectory).
+
+        Uses ``template.to_dict()`` to inherit all fields from the parent,
+        then overrides only the fields that differ.  This is the same
+        pattern used by ``_grpo_child_factory`` and guarantees that
+        parent ↔ child field parity is always maintained.
+        """
         device = child_latents.device
         finals, _, _, _ = denoise_output
         n_children = child_latents.shape[0]
@@ -670,37 +687,25 @@ class GeneticAlgorithm:
             lmap = torch.full((ctx.n_stored,), -1, dtype=torch.long, device=device)
             lmap[-1] = ctx.n_stored - 1
 
-            # Use template's extra_kwargs (group-specific) instead of
-            # ctx.shared_extra (which is from the first global parent).
-            # This ensures per-group metadata (e.g. Geneval criteria) is
-            # correctly associated with each child's prompt.
-            extra = dict(template.extra_kwargs) if template.extra_kwargs else {}
-            extra.update(
-                is_crossover_child=True,
-                crossover_step=cxo_step,
-                crossover_strategy=ctx.strategy_name,
-                generation=ctx.gen_idx,
-            )
-            pooled = getattr(template, "pooled_prompt_embeds", None)
-            if pooled is not None:
-                extra["pooled_prompt_embeds"] = pooled
-            extra["_cxo_latent"] = cross_latents_cpu[m]
+            # Inherit everything from the template, then override.
+            child_dict = template.to_dict()
+            child_dict["all_latents"] = al
+            child_dict["latent_index_map"] = lmap
+            child_dict["image"] = imgs
+            child_dict["log_probs"] = None
+            child_dict["log_prob_index_map"] = None
+            child_dict["applicable_rewards"] = set()
+            child_dict["_unique_id"] = ctx.gid
 
-            child = ctx.sample_cls(
-                timesteps=template.timesteps,
-                all_latents=al,
-                latent_index_map=lmap,
-                image=imgs,
-                log_probs=None,
-                log_prob_index_map=None,
-                prompt=template.prompt,
-                prompt_ids=template.prompt_ids,
-                prompt_embeds=template.prompt_embeds,
-                negative_prompt=template.negative_prompt,
-                _unique_id=ctx.gid,
-                applicable_rewards=set(),
-                extra_kwargs=extra,
-            )
+            extra = child_dict.get("extra_kwargs", {})
+            extra["is_crossover_child"] = True
+            extra["crossover_step"] = cxo_step
+            extra["crossover_strategy"] = ctx.strategy_name
+            extra["generation"] = ctx.gen_idx
+            extra["_cxo_latent"] = cross_latents_cpu[m]
+            child_dict["extra_kwargs"] = extra
+
+            child = type(template).from_dict(child_dict)
             children.append(child)
 
         return children

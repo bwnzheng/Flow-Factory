@@ -54,8 +54,6 @@ class SD3_5Sample(BaseSample):
     # Obj var
     pooled_prompt_embeds: Optional[torch.Tensor] = None
     negative_pooled_prompt_embeds: Optional[torch.Tensor] = None
-    pooled_prompt_embeds : Optional[torch.Tensor] = None
-    negative_pooled_prompt_embeds : Optional[torch.Tensor] = None
 
 class SD3_5Adapter(BaseAdapter):
     """Concrete implementation for Stable Diffusion 3 medium."""
