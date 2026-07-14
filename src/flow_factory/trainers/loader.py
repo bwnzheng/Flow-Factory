@@ -66,7 +66,7 @@ def load_trainer(config: Arguments) -> BaseTrainer:
     """
     from accelerate.utils import InitProcessGroupKwargs
 
-    timeout_handler = InitProcessGroupKwargs(timeout=datetime.timedelta(minutes=5))
+    timeout_handler = InitProcessGroupKwargs(timeout=datetime.timedelta(minutes=60))
 
     # Initialize Accelerator
     accelerator_config = ProjectConfiguration(
