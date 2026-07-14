@@ -486,13 +486,12 @@ class GeneticAlgorithm:
         child_rewards_dict = {k: v.cpu().numpy() for k, v in child_rewards_dict_raw.items()}
         self._device_sync()
 
-        # 6. Select survivors
+        # 6. Select survivors (advantage computed on merged set internally)
         population, pop_rewards, stats = self._select_survivors(
             population=population,
             children=children,
             pop_rewards=pop_rewards,
             child_rewards=child_rewards_dict,
-            pop_adv=adv,
             reward_keys=reward_keys,
             valid_reward_keys=valid_reward_keys,
         )
@@ -722,7 +721,6 @@ class GeneticAlgorithm:
         children: List[BaseSample],
         pop_rewards: Dict[str, np.ndarray],
         child_rewards: Dict[str, np.ndarray],
-        pop_adv: np.ndarray,
         reward_keys: List[str],
         valid_reward_keys: List[str],
     ) -> Tuple[
@@ -730,39 +728,31 @@ class GeneticAlgorithm:
         Dict[str, np.ndarray],
         Dict[str, Any],
     ]:
-        """Merge population + children, keep non-dominated, trim to K.
+        """Merge population + children, compute unified advantage, trim to K.
 
-        Pareto filtering and advantage computation use only
-        *valid_reward_keys*; *reward_keys* is the full global set (needed
-        for dict iteration and stats bookkeeping).
+        Advantage is computed *after* merging so all K+M samples share the
+        same normalization (combined mean/std).  Pareto and |advantage|
+        trimming use only *valid_reward_keys*; *reward_keys* is the full
+        global set for dict iteration and stats bookkeeping.
         """
         n_pop = len(population)
         n_children = len(children)
 
-        # ---- Reward stats before replacement (valid dimensions only) ----
-        pop_rw_stats = {
-            k: {
-                "mean": float(pop_rewards[k].mean()),
-                "std": float(pop_rewards[k].std()),
-            }
-            for k in valid_reward_keys
-        }
-
-        # Compute child advantages (valid dimensions only)
-        child_adv = self._compute_advantage(child_rewards, valid_reward_keys)
-
-        # Merge
-        combined_adv = np.concatenate([pop_adv, child_adv])
+        # Merge rewards first
         combined_rewards: Dict[str, np.ndarray] = {}
         for k in reward_keys:
             combined_rewards[k] = np.concatenate([pop_rewards[k], child_rewards[k]])
 
-        # ---- Child reward stats (valid dimensions only) ----
+        # Compute advantage on the FULL combined set (unified normalization)
+        combined_adv = self._compute_advantage(combined_rewards, valid_reward_keys)
+
+        # ---- Reward stats before replacement ----
+        pop_rw_stats = {
+            k: {"mean": float(pop_rewards[k].mean()), "std": float(pop_rewards[k].std())}
+            for k in valid_reward_keys
+        }
         child_rw_stats = {
-            k: {
-                "mean": float(child_rewards[k].mean()),
-                "std": float(child_rewards[k].std()),
-            }
+            k: {"mean": float(child_rewards[k].mean()), "std": float(child_rewards[k].std())}
             for k in valid_reward_keys
         }
 
