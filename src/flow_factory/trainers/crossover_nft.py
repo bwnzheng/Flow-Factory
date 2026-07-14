@@ -150,8 +150,12 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         rank = self.accelerator.process_index
         rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
         if self._crossover_enabled:
-            logger.info(f"[rank {rank}] prepare_feedback: calling GA evolve")
+            logger.info(
+                f"[rank {rank}] prepare_feedback: calling GA evolve "
+                f"({len(set(s.unique_id for s in samples))} groups)"
+            )
             applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
+            t_ga = time.time()
             evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
                 parent_samples=samples,
                 parent_rewards=rewards,
@@ -159,12 +163,19 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 epoch=self.epoch,
                 verbose=self.log_args.verbose,
             )
-            # Barrier: ensure all ranks finish GA before reduction
-            self.accelerator.wait_for_everyone()
+            t_ga = time.time() - t_ga
             logger.info(
                 f"[rank {rank}] prepare_feedback: GA returned "
-                f"{len(evolved_samples)} evolved samples"
+                f"{len(evolved_samples)} evolved samples in {t_ga:.1f}s"
             )
+
+            # Barrier: prevent cross-epoch drift accumulation.
+            # With imbalanced per-group reward compute, evolve() time varies
+            # across ranks.  This barrier caps the drift to a single epoch's
+            # max time difference.  If HCCL_EXEC_TIMEOUT is too low (default
+            # 300 s), fast ranks may be killed by the watchdog while waiting.
+            # Increase to e.g. 1800 s via: export HCCL_EXEC_TIMEOUT=1800
+            self.accelerator.wait_for_everyone()
 
             # Reduce GA stats across ranks
             ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_samples, self.accelerator)

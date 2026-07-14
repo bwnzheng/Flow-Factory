@@ -466,7 +466,9 @@ class GeneticAlgorithm:
             parent_latents = torch.stack(
                 [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
             )
-            child_latents = self._crossover_and_mutate(parent_latents, epoch + ctx.gid + ctx.gen_idx)
+            child_latents = self._crossover_and_mutate(
+                parent_latents, epoch + ctx.gid + ctx.gen_idx
+            )
 
         # 4. Denoise → child samples
         cxo_step = _resolve_cxo_step(population[0], self._num_steps)
