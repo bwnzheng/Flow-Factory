@@ -710,8 +710,8 @@ def _run_rewards_analysis(
     This path does NOT load images or run reward models — it uses the scores
     that were saved during training directly.
 
-    Generates separate plot sets for train and eval data, each under
-    ``train_rewards/`` and ``eval_rewards/``.
+    Generates separate plot sets for train data and each eval dataset:
+    ``train_rewards/`` and ``eval_rewards/<dataset_name>/``.
     """
     rewards_dir = os.path.join(config.save_dir, run_name, "logs", "rewards")
     if not os.path.isdir(rewards_dir):
@@ -720,9 +720,9 @@ def _run_rewards_analysis(
 
     print(f"[Rewards Analysis] Loading reward pickles from {rewards_dir} ...")
 
-    # Each loader returns (step_data, reward_names) where reward_names are
-    # discovered dynamically from pickle keys.
+    # train_data: {step: {...}}, train_rnames: [str, ...]
     train_data, train_rnames = load_train_rewards(rewards_dir)
+    # eval_data: {dataset_name: {step: {...}}}, eval_rnames: {dataset_name: [str, ...]}
     eval_data, eval_rnames = load_eval_rewards(rewards_dir)
 
     if not train_data and not eval_data:
@@ -736,7 +736,8 @@ def _run_rewards_analysis(
         first_step = sorted(train_data.keys())[0]
         n_scores = train_data[first_step]["n_total"]
         print(
-            f"  Train: {len(train_data)} steps, {n_scores} scores/step, " f"rewards={train_rnames}"
+            f"  Train: {len(train_data)} steps, {n_scores} scores/step, "
+            f"rewards={train_rnames}"
         )
 
         _dispatch_plots(
@@ -749,22 +750,33 @@ def _run_rewards_analysis(
         )
         print(f"  Train rewards → {tr_out}/")
 
-    # --- Eval ---
+    # --- Eval (per dataset) ---
     if eval_data:
-        ev_out = os.path.join(output_dir, "eval_rewards")
-        os.makedirs(ev_out, exist_ok=True)
-        n_scores = eval_data[sorted(eval_data.keys())[0]]["n_total"]
-        print(f"  Eval: {len(eval_data)} steps, {n_scores} scores/step, " f"rewards={eval_rnames}")
+        ev_base = os.path.join(output_dir, "eval_rewards")
+        os.makedirs(ev_base, exist_ok=True)
+        for ds_name, ds_step_data in eval_data.items():
+            ds_out = os.path.join(ev_base, ds_name)
+            os.makedirs(ds_out, exist_ok=True)
+            ds_rnames = eval_rnames.get(ds_name, [])
+            if not ds_rnames:
+                print(f"  Eval/{ds_name}: no common reward keys — skipping")
+                continue
+            n_steps = len(ds_step_data)
+            n_scores = ds_step_data[sorted(ds_step_data.keys())[0]]["n_total"]
+            print(
+                f"  Eval/{ds_name}: {n_steps} steps, {n_scores} scores/step, "
+                f"rewards={ds_rnames}"
+            )
 
-        _dispatch_plots(
-            eval_data,
-            eval_rnames,
-            ev_out,
-            title_prefix="Eval Rewards (from pickles)",
-            label_name="Step",
-            window_size=1,
-        )
-        print(f"  Eval rewards → {ev_out}/")
+            _dispatch_plots(
+                ds_step_data,
+                ds_rnames,
+                ds_out,
+                title_prefix=f"Eval/{ds_name} Rewards (from pickles)",
+                label_name="Step",
+                window_size=1,
+            )
+            print(f"  Eval/{ds_name} → {ds_out}/")
 
 
 # ---------------------------------------------------------------------------
