@@ -470,11 +470,18 @@ class GeneticAlgorithm:
                 parent_latents, epoch + ctx.gid + ctx.gen_idx
             )
 
-        # 4. Denoise → child samples
-        cxo_step = _resolve_cxo_step(population[0], self._num_steps)
+        # 4. Denoise → child samples.
+        #    Crossover / mutation start from cxo_step (mid-denoising).
+        #    Resample starts from step 0 (full noise → full denoising,
+        #    same as original sampling).
+        if self._offspring_mode == "resample":
+            denoise_start = 0
+        else:
+            denoise_start = _resolve_cxo_step(population[0], self._num_steps)
+
         children = self._denoise_and_create_children(
             child_latents=child_latents,
-            cxo_step=cxo_step,
+            cxo_step=denoise_start,
             template=population[0],
             ctx=ctx,
         )
