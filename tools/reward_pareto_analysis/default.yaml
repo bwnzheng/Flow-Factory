@@ -1,22 +1,25 @@
-# Reward Convex Hull Analysis Configuration
+# Reward Pareto Analysis Configuration
 #
-# Extracts rollout images from TensorBoard events and/or generates images from
-# checkpoints, scores them with reward models, and plots convex hulls in reward
-# space to visualize how the reward landscape evolves during training.
+# Analyzes saved reward pickles by default. It can also rescore rollout images
+# or generate and score checkpoint evaluation images when explicitly enabled.
 
 # ---- Run identity ----
 run_name: ""                       # Auto-resolved from checkpoint_dir if empty
 save_dir: "saves"                  # Parent of saves/tensorboard/ and saves/{run_name}/
 
+# ---- Saved reward analysis (lightweight; no model loading) ----
+rewards_analysis:
+  enabled: true                    # Reads {save_dir}/{run_name}/logs/rewards/*.pkl
+
 # ---- Images analysis (reads images from media.jsonl, scores with reward models) ----
 images_analysis:
-  enabled: true
+  enabled: false
   # Reads {save_dir}/{run_name}/logs/media.jsonl
   max_images_per_step: 0          # 0 = all; set to N to cap per-step images
 
 # ---- Evaluation inference (from checkpoints on test prompts) ----
 evaluation:
-  enabled: true
+  enabled: false
   checkpoint_dir: ""               # Auto-resolved to {save_dir}/{run_name}/checkpoints/
   prompts_file: "dataset/pickscore/test.txt"  # One prompt per line
   prompts: []                      # Inline prompts (used if prompts_file is empty)
@@ -36,12 +39,16 @@ model:
   device: "cuda"                   # "cuda" or "cpu"
   num_gpus: 1                      # >1 → parallel scoring across multiple GPUs
 
-# ---- Reward models (2+ models recommended for meaningful convex hulls) ----
+# ---- Reward models (required only for images_analysis or evaluation) ----
 rewards:
   - name: "clip_score"
     reward_model: "CLIP"
   - name: "pick_score"
     reward_model: "PickScore"
+
+# ---- Compute ----
+compute:
+  max_workers: 0                    # 0 = auto (up to 16); positive = explicit count
 
 # ---- Output ----
 output:

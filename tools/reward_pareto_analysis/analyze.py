@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
-"""Reward Convex Hull Analysis Tool.
+# Copyright 2026 Jayce-Ping
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Analyze reward distributions and full-dimensional Pareto convexity.
 
 Three independent data sources:
   1. **Images analysis** — reads rollout images from ``media.jsonl``, scores them
      with reward models (CLIP, PickScore, …), caches results, and plots per-step
-     convex hulls.  Supports train / eval dataset split.
+     reward distributions and Pareto convexity. Supports train/eval splits.
   2. **Rewards analysis** — reads pre-computed scores from ``logs/rewards/*.pkl``
      directly (no image loading, no reward model), and generates distribution,
      percentile, and Pareto front plots.  Also supports train / eval split.
   3. **Evaluation inference** — loads LoRA weights from each checkpoint, generates
-     fresh images on test prompts, scores them, and plots per-checkpoint hulls.
+     fresh images on test prompts, scores them, and plots checkpoint trends.
 
 Usage::
 
-    python tools/reward_convex_hull_analysis/analyze.py \\
-        -c tools/reward_convex_hull_analysis/default_config.yaml
+    python -m tools.reward_pareto_analysis.analyze \\
+        -c tools/reward_pareto_analysis/default.yaml
 """
 
 from __future__ import annotations
@@ -22,42 +36,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import torch
 import yaml
 from PIL import Image
 from tqdm import tqdm
 
-from tools.reward_convex_hull_analysis.convex_hull import (
-    plot_convex_hulls_2d,
-    plot_convex_hulls_faceted,
-    plot_convex_hulls_windows,
-    plot_convex_hulls_windows_cumulative,
-    plot_distribution_1d,
-    plot_hull_area_curve,
-    plot_per_group_hypervolume_and_gap,
-    plot_reward_percentiles,
-)
-from tools.reward_convex_hull_analysis.evaluation_runner import (
+from tools.reward_pareto_analysis.checkpoint_evaluation import (
     EvaluationRunner,
     MultiGPUEvaluationRunner,
     discover_checkpoints,
 )
-from tools.reward_convex_hull_analysis.log_reader import (
-    load_media_samples,
+from tools.reward_pareto_analysis.media_logs import load_media_samples
+from tools.reward_pareto_analysis.plots import (
+    plot_distribution_1d,
+    plot_pareto_convexity_metrics,
+    plot_reward_percentiles,
 )
-from tools.reward_convex_hull_analysis.reward_computer import (
+from tools.reward_pareto_analysis.reward_logs import load_eval_rewards, load_train_rewards
+from tools.reward_pareto_analysis.reward_scoring import (
     MultiGPUComputer,
     StandaloneRewardComputer,
-)
-from tools.reward_convex_hull_analysis.parallel import run_tasks
-from tools.reward_convex_hull_analysis.rewards_reader import (
-    load_eval_rewards,
-    load_train_rewards,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,9 +82,9 @@ class AnalysisConfig:
     run_name: str = ""
     save_dir: str = "saves"
 
-    images_analysis_enabled: bool = True
+    images_analysis_enabled: bool = False
     images_max_images_per_step: int = 0
-    evaluation_enabled: bool = True
+    evaluation_enabled: bool = False
     rewards_analysis_enabled: bool = True
     eval_checkpoint_dir: str = ""
     prompts_file: str = ""
@@ -99,6 +102,7 @@ class AnalysisConfig:
     rewards: List[Dict[str, Any]] = field(default_factory=list)
 
     output_dir: str = "analysis_output"
+    max_workers: int = 0
 
 
 def _parse_config(path: str) -> AnalysisConfig:
@@ -110,13 +114,17 @@ def _parse_config(path: str) -> AnalysisConfig:
     ra = raw.get("rewards_analysis", {})
     model = raw.get("model", {})
     output = raw.get("output", {})
+    compute = raw.get("compute", {})
+    max_workers = int(compute.get("max_workers", 0))
+    if max_workers < 0:
+        raise ValueError(f"compute.max_workers must be non-negative, got {max_workers}")
 
     return AnalysisConfig(
         run_name=raw.get("run_name", ""),
         save_dir=raw.get("save_dir", "saves"),
-        images_analysis_enabled=img.get("enabled", True),
+        images_analysis_enabled=img.get("enabled", False),
         images_max_images_per_step=img.get("max_images_per_step", 0),
-        evaluation_enabled=ev.get("enabled", True),
+        evaluation_enabled=ev.get("enabled", False),
         rewards_analysis_enabled=ra.get("enabled", True),
         eval_checkpoint_dir=ev.get("checkpoint_dir", ""),
         prompts_file=ev.get("prompts_file", ""),
@@ -131,7 +139,18 @@ def _parse_config(path: str) -> AnalysisConfig:
         num_gpus=model.get("num_gpus", 1),
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
+        max_workers=max_workers,
     )
+
+
+def _validate_config(config: AnalysisConfig) -> None:
+    """Validate dependencies between enabled analysis sources and configuration."""
+    needs_reward_models = config.images_analysis_enabled or config.evaluation_enabled
+    if needs_reward_models and not config.rewards:
+        raise ValueError(
+            "rewards must be configured when images_analysis.enabled or "
+            "evaluation.enabled is true"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +249,6 @@ def _build_step_data(
 # ---------------------------------------------------------------------------
 
 
-
 def _dispatch_plots(
     all_step_data: Dict[int, Dict[str, Any]],
     reward_names: List[str],
@@ -238,146 +256,63 @@ def _dispatch_plots(
     title_prefix: str,
     label_name: str = "Step",
     window_size: int = 20,
+    normalization_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
+    max_workers: int = 0,
 ) -> None:
     """Generate plots for a single dataset/source combination.
 
-    Uses the same dispatch logic for both images→reward_model and rewards/
-    pickle data paths: ≥2 reward dims → convex hull suite, else 1-D distribution.
+    Multi-reward data is analyzed in its full dimensionality.  Pairwise hull
+    projections are intentionally not generated because they can hide or
+    invent dominance relationships from the original reward space.
     """
     n_models = len(reward_names)
+    if n_models == 0:
+        raise ValueError("At least one reward is required to generate plots")
+    combination_slug = "__".join(reward_names)
+    combination_dir = os.path.join(out_dir, "reward_combinations", combination_slug)
+    os.makedirs(combination_dir, exist_ok=True)
     if n_models >= 2:
-        # Phase 1: independent 2-D plots
-        run_tasks(
-            [
-                (
-                    "convex hull overlay",
-                    plot_convex_hulls_2d,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "convex_hulls_2d.png"),
-                        "title": f"{title_prefix} Reward Convex Hulls",
-                        "label_name": label_name,
-                    },
-                ),
-                (
-                    "faceted hull grid",
-                    plot_convex_hulls_faceted,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "convex_hulls_faceted.png"),
-                        "title": f"{title_prefix} Convex Hulls — Per-Step Evolution",
-                        "label_name": label_name,
-                    },
-                ),
-                (
-                    "hull area curve",
-                    plot_hull_area_curve,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "hull_area_curve.png"),
-                        "title": f"{title_prefix} Convex Hull Area Over Steps",
-                        "label_name": label_name,
-                    },
-                ),
-            ]
+        pareto_dir = os.path.join(combination_dir, "pareto_convexity")
+        plot_pareto_convexity_metrics(
+            all_step_data,
+            reward_names,
+            pareto_dir,
+            title=f"{title_prefix} Pareto Convexity",
+            label_name=label_name,
+            normalization_bounds=normalization_bounds,
+            max_workers=max_workers,
+        )
+        percentile_path = os.path.join(combination_dir, "reward_percentiles.png")
+        percentile_start = time.perf_counter()
+        plot_reward_percentiles(
+            all_step_data,
+            reward_names,
+            percentile_path,
+            title=f"{title_prefix} Reward Percentile Trends",
+            label_name=label_name,
+            window_size=window_size,
+        )
+        print(
+            f"  [Plot] Reward percentiles: {percentile_path} "
+            f"({time.perf_counter() - percentile_start:.1f}s)"
         )
 
-        # Phase 2: late-stage faceted (depends on mid, cheap to compute)
-        all_steps_sorted = sorted(all_step_data.keys())
-        if len(all_steps_sorted) >= 2:
-            mid = all_steps_sorted[len(all_steps_sorted) // 2]
-            print(f"  [Plot] Generating late-stage faceted hulls (step >= {mid}) ...")
-            plot_convex_hulls_faceted(
-                all_step_data,
-                reward_names,
-                os.path.join(out_dir, "convex_hulls_faceted_late.png"),
-                title=f"{title_prefix} Convex Hulls — Late Stage ({label_name} {mid}+)",
-                label_name=label_name,
-                step_range=(mid, all_steps_sorted[-1]),
-            )
-
-        # Phase 3: window + percentile + Pareto in parallel
-        phase3_tasks = [
-            (
-                "window-averaged hull",
-                plot_convex_hulls_windows,
-                (all_step_data, reward_names),
-                {
-                    "output_path": os.path.join(out_dir, "convex_hulls_windows.png"),
-                    "title": f"{title_prefix} Convex Hull Trend (Window-Averaged)",
-                    "label_name": label_name,
-                    "window_size": window_size,
-                },
-            ),
-            (
-                "cumulative window frames",
-                plot_convex_hulls_windows_cumulative,
-                (all_step_data, reward_names),
-                {
-                    "output_dir": os.path.join(out_dir, "convex_hulls_windows_frames"),
-                    "title": f"{title_prefix} Convex Hull",
-                    "label_name": label_name,
-                    "window_size": window_size,
-                },
-            ),
-            (
-                "reward percentiles",
-                plot_reward_percentiles,
-                (all_step_data, reward_names),
-                {
-                    "output_path": os.path.join(out_dir, "reward_percentiles.png"),
-                    "title": f"{title_prefix} Reward Percentile Trends",
-                    "label_name": label_name,
-                    "window_size": window_size,
-                },
-            ),
-            (
-                "per-group hypervolume + hull gap",
-                plot_per_group_hypervolume_and_gap,
-                (all_step_data, reward_names),
-                {
-                    "output_path": os.path.join(out_dir, "per_group_hypervolume.png"),
-                    "title": f"{title_prefix} Per-Group Hypervolume & Hull Gap",
-                    "label_name": label_name,
-                },
-            ),
-        ]
-        run_tasks(phase3_tasks)
-
     else:
-        # 1-D: distribution first, then percentiles + Pareto in parallel
         print(f"  [Plot] Generating 1-D reward distribution ...")
         plot_distribution_1d(
             all_step_data,
             reward_names[0],
-            os.path.join(out_dir, "distribution_1d.png"),
+            os.path.join(combination_dir, "distribution_1d.png"),
             title=f"{title_prefix} Reward Distribution",
             label_name=label_name,
         )
-        run_tasks(
-            [
-                (
-                    "reward percentiles",
-                    plot_reward_percentiles,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "reward_percentiles.png"),
-                        "title": f"{title_prefix} Reward Percentile Trends",
-                        "label_name": label_name,
-                        "window_size": window_size,
-                    },
-                ),
-                (
-                    "per-group hypervolume",
-                    plot_per_group_hypervolume_and_gap,
-                    (all_step_data, reward_names),
-                    {
-                        "output_path": os.path.join(out_dir, "per_group_hypervolume.png"),
-                        "title": f"{title_prefix} Per-Group Hypervolume",
-                        "label_name": label_name,
-                    },
-                ),
-            ]
+        plot_reward_percentiles(
+            all_step_data,
+            reward_names,
+            os.path.join(combination_dir, "reward_percentiles.png"),
+            title=f"{title_prefix} Reward Percentile Trends",
+            label_name=label_name,
+            window_size=window_size,
         )
 
 
@@ -390,7 +325,6 @@ def _run_images_analysis(
     config: AnalysisConfig,
     run_name: str,
     computer: Optional[Union[StandaloneRewardComputer, MultiGPUComputer]],
-    all_prompts: List[str],
     output_dir: str,
     reward_names: List[str],
     dataset_filter: List[str],
@@ -527,6 +461,7 @@ def _run_images_analysis(
         title_prefix=f"{label} Rollout",
         label_name="Step",
         window_size=_eval_window,
+        max_workers=config.max_workers,
     )
     print(f"  {label} → {out_dir}/")
     return all_step_data
@@ -690,6 +625,7 @@ def _run_evaluation(
         title_prefix="Evaluation (Test Prompts)",
         label_name="Epoch",
         window_size=1,
+        max_workers=config.max_workers,
     )
     print(f"  Evaluation results saved to {ev_out}/")
     return all_epoch_data
@@ -698,6 +634,27 @@ def _run_evaluation(
 # ---------------------------------------------------------------------------
 # Workflow: Rewards/ pickles → distribution / percentile / Pareto
 # ---------------------------------------------------------------------------
+
+
+def _compute_run_wide_reward_bounds(
+    combination_data: Dict[Tuple[str, ...], Dict[int, Dict[str, Any]]],
+) -> Dict[str, Tuple[float, float]]:
+    """Compute one fixed finite min/max pair per reward across combinations."""
+    values_by_reward: Dict[str, List[np.ndarray]] = {}
+    for combination, step_data in combination_data.items():
+        for data in step_data.values():
+            points = np.asarray(data.get("points", []), dtype=float)
+            if points.size == 0:
+                continue
+            for index, reward_name in enumerate(combination):
+                values_by_reward.setdefault(reward_name, []).append(points[:, index])
+    return {
+        reward_name: (
+            float(np.concatenate(blocks).min()),
+            float(np.concatenate(blocks).max()),
+        )
+        for reward_name, blocks in sorted(values_by_reward.items())
+    }
 
 
 def _run_rewards_analysis(
@@ -719,35 +676,56 @@ def _run_rewards_analysis(
         return
 
     print(f"[Rewards Analysis] Loading reward pickles from {rewards_dir} ...")
+    load_start = time.perf_counter()
 
-    # train_data: {step: {...}}, train_rnames: [str, ...]
-    train_data, train_rnames = load_train_rewards(rewards_dir)
+    # train_combinations: {reward-name tuple: {step: {...}}}
+    train_combinations, train_rnames = load_train_rewards(rewards_dir)
     # eval_data: {dataset_name: {step: {...}}}, eval_rnames: {dataset_name: [str, ...]}
     eval_data, eval_rnames = load_eval_rewards(rewards_dir)
+    train_steps = set()
+    for step_data in train_combinations.values():
+        train_steps.update(step_data)
+    eval_step_records = sum(len(step_data) for step_data in eval_data.values())
+    print(
+        "  Loaded reward data: "
+        f"train_steps({len(train_steps)}), "
+        f"train_combinations({len(train_combinations)}), "
+        f"eval_datasets({len(eval_data)}), "
+        f"eval_step_records({eval_step_records}) "
+        f"in {time.perf_counter() - load_start:.1f}s"
+    )
 
-    if not train_data and not eval_data:
+    if not train_combinations and not eval_data:
         print("[Rewards Analysis] No reward pickle files found.")
         return
 
     # --- Train ---
-    if train_data:
+    if train_combinations:
         tr_out = os.path.join(output_dir, "train_rewards")
         os.makedirs(tr_out, exist_ok=True)
-        first_step = sorted(train_data.keys())[0]
-        n_scores = train_data[first_step]["n_total"]
+        normalization_bounds = _compute_run_wide_reward_bounds(train_combinations)
+        n_steps = len(next(iter(train_combinations.values())))
         print(
-            f"  Train: {len(train_data)} steps, {n_scores} scores/step, "
-            f"rewards={train_rnames}"
+            f"  Train: {n_steps} steps, reward combinations="
+            f"{list(train_combinations.keys())}, rewards={train_rnames}"
         )
-
-        _dispatch_plots(
-            train_data,
-            train_rnames,
-            tr_out,
-            title_prefix="Train Rewards (from pickles)",
-            label_name="Step",
-            window_size=20,
-        )
+        for combination, step_data in train_combinations.items():
+            first_step = sorted(step_data)[0]
+            n_groups = step_data[first_step].get("n_groups", 0)
+            print(
+                f"    Combination {combination}: {n_groups} groups/step, "
+                f"{step_data[first_step]['n_total']} scores/step"
+            )
+            _dispatch_plots(
+                step_data,
+                list(combination),
+                tr_out,
+                title_prefix="Train Rewards (from pickles)",
+                label_name="Step",
+                window_size=20,
+                normalization_bounds=normalization_bounds,
+                max_workers=config.max_workers,
+            )
         print(f"  Train rewards → {tr_out}/")
 
     # --- Eval (per dataset) ---
@@ -775,6 +753,7 @@ def _run_rewards_analysis(
                 title_prefix=f"Eval/{ds_name} Rewards (from pickles)",
                 label_name="Step",
                 window_size=1,
+                max_workers=config.max_workers,
             )
             print(f"  Eval/{ds_name} → {ds_out}/")
 
@@ -877,24 +856,21 @@ def _save_reward_cache(
 # ---------------------------------------------------------------------------
 
 
-def main(config_path: str):
+def main(config_path: str) -> None:
     print(f"Loading config: {config_path}")
     config = _parse_config(config_path)
-
-    if not config.rewards:
-        print("ERROR: No reward models configured.")
-        sys.exit(1)
+    _validate_config(config)
 
     run_name = _resolve_run_name(config)
     print(f"Run name: {run_name}")
 
-    output_dir = os.path.join(config.output_dir, "reward_convex_hull_analysis", run_name)
+    output_dir = os.path.join(config.output_dir, "reward_pareto_analysis", run_name)
     os.makedirs(output_dir, exist_ok=True)
 
     with open(os.path.join(output_dir, "config.yaml"), "w") as f:
         yaml.dump({k: v for k, v in config.__dict__.items() if not k.startswith("_")}, f)
 
-    all_prompts = _load_prompts(config)
+    all_prompts = _load_prompts(config) if config.evaluation_enabled else []
     reward_names = [r.get("name", r.get("reward_model", "?")) for r in config.rewards]
 
     # --- Check if images-based sources are fully cached ---
@@ -954,17 +930,16 @@ def main(config_path: str):
         except FileNotFoundError:
             pass
 
+    image_based_sources_enabled = config.images_analysis_enabled or config.evaluation_enabled
     need_compute = (config.images_analysis_enabled and not (train_cached and eval_cached)) or (
         config.evaluation_enabled and not ev_cached
     )
 
     if need_compute:
         print(f"Loading reward models: {reward_names}")
-        import torch as _torch
-
         device = config.device
-        if device == "cuda" and _torch.cuda.is_available():
-            free_mem = _torch.cuda.mem_get_info()[0] / (1024**3)
+        if device == "cuda" and torch.cuda.is_available():
+            free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
             print(f"  GPU free: {free_mem:.1f} GiB")
             if free_mem < 4.0:
                 print(f'  [WARN] Low GPU memory — consider device: "cpu"')
@@ -978,8 +953,11 @@ def main(config_path: str):
         else:
             computer = StandaloneRewardComputer(config.rewards, device=config.device)
         print(f"  Reward models loaded in {time.time() - t0:.1f}s: {reward_names}")
-    else:
+    elif image_based_sources_enabled:
         print(f"All image caches valid — skipping model loading ({reward_names}).")
+        computer = None
+    else:
+        print("Image-based analysis disabled — skipping reward model loading.")
         computer = None
 
     # --- Images path: train ---
@@ -989,7 +967,6 @@ def main(config_path: str):
             config,
             run_name,
             computer,
-            all_prompts,
             output_dir,
             reward_names,
             dataset_filter=["train"],
@@ -1005,7 +982,6 @@ def main(config_path: str):
             config,
             run_name,
             computer,
-            all_prompts,
             output_dir,
             reward_names,
             dataset_filter=["eval"],
@@ -1030,11 +1006,11 @@ def main(config_path: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Reward Convex Hull Analysis")
+    parser = argparse.ArgumentParser(description="Reward Pareto Analysis")
     parser.add_argument(
         "-c",
         "--config",
-        default=os.path.join(os.path.dirname(__file__), "default_config.yaml"),
+        default=os.path.join(os.path.dirname(__file__), "default.yaml"),
         help="Path to config YAML file",
     )
     args = parser.parse_args()

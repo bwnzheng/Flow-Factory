@@ -1,4 +1,18 @@
-"""Checkpoint discovery, pipeline loading, LoRA merging, and image generation.
+# Copyright 2026 Jayce-Ping
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Checkpoint discovery, pipeline loading, LoRA adapter loading, and image generation.
 
 All implementations are freshly written using the underlying library APIs
 (diffusers, peft, transformers) — not copied from existing analysis tools.
@@ -56,7 +70,9 @@ def _resolve_dtype(dtype_str: str) -> torch.dtype:
 _pipe_load_lock = threading.Lock()
 
 
-def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
+def load_base_pipeline(
+    base_model: str, dtype_str: str, device: str = "cuda"
+) -> StableDiffusion3Pipeline:
     """Load SD3.5 pipeline with FlowMatch ODE scheduler.
 
     Serialised across threads via a module-level lock — parallel
@@ -79,7 +95,7 @@ def load_base_pipeline(base_model: str, dtype_str: str, device: str = "cuda"):
     return pipe
 
 
-def apply_lora(pipe, checkpoint_path: str, dtype: torch.dtype):
+def apply_lora(pipe: StableDiffusion3Pipeline, checkpoint_path: str, dtype: torch.dtype) -> None:
     """Load LoRA weights as a PEFT adapter (no merge)."""
     pipe.transformer = PeftModel.from_pretrained(
         pipe.transformer,
@@ -88,7 +104,7 @@ def apply_lora(pipe, checkpoint_path: str, dtype: torch.dtype):
     )
 
 
-def unload_lora(pipe):
+def unload_lora(pipe: StableDiffusion3Pipeline) -> None:
     """Unload the LoRA adapter, restoring the original base transformer."""
     pipe.transformer = pipe.transformer.unload()
 
@@ -186,7 +202,7 @@ class EvaluationRunner:
         self._pipe = None
 
     @property
-    def pipe(self):
+    def pipe(self) -> StableDiffusion3Pipeline:
         """Lazy-load the base pipeline (model download is slow)."""
         if self._pipe is None:
             self._pipe = load_base_pipeline(self.base_model, self.dtype_str, self.device)
@@ -252,7 +268,7 @@ class EvaluationRunner:
 
         return paths
 
-    def unload_lora(self):
+    def unload_lora(self) -> None:
         """Unload LoRA adapter, keeping the base pipeline loaded."""
         if self._pipe is not None:
             unload_lora(self._pipe)
