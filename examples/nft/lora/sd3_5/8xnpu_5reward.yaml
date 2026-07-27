@@ -3,8 +3,8 @@
 # Training rewards (5): PickScore, HPSv2, CLIPScore, GenEval, OCR
 # Eval rewards (7):    all 5 training + AestheticScore + HPSv2.1
 #
-# GenEval requires CUDA for mmdet ops (Mask2Former); set device to "cuda"
-# as a best-effort attempt on NPU machines with CUDA fallback.
+# GenEval uses the Ascend-specific implementation. MMCV must be compiled for
+# Ascend NPU and torch_npu must be installed.
 #
 # Datasets (3 sources, 1:1:1):
 #   - pickscore — generic prompts (PickScore / HPSv2 / CLIPScore)
@@ -12,7 +12,7 @@
 #   - ocr       — text-rendering prompts with quoted target text (OCR + general)
 #
 # Dependencies (beyond core Flow-Factory):
-#   bash scripts/install_geneval_deps.sh                           # GenEval (mmdet + open_clip, CUDA)
+#   mmdet + open_clip with an Ascend-compatible MMCV build          # GenEval
 #   pip install paddleocr python-Levenshtein                       # OCR
 #   uv pip install hpsv2 --no-deps                                 # HPSv2
 #
@@ -183,13 +183,11 @@ rewards:
     dtype: bfloat16
 
   # --- Specialist: GenEval (routes to geneval source only) ---
-  # mmdet uses CUDA ops; on NPU machines this will likely fail.
-  # Keep "cuda" device — if a CUDA device is present, GenEval can use it.
   - name: "geneval_reward"
-    reward_model: "GenEval"
+    reward_model: "geneval_ascend"
     weight: 1.0
     batch_size: 32
-    device: "cuda"
+    device: "npu"
     dtype: float32
     applicable_datasets: ["geneval"]
 
@@ -243,11 +241,10 @@ eval_rewards:
     dtype: bfloat16
 
   # --- Specialist: GenEval eval (routes to geneval source only) ---
-  # CUDA-only (mmdet); keep "cuda" device.
   - name: "geneval_reward"
-    reward_model: "GenEval"
+    reward_model: "geneval_ascend"
     batch_size: 32
-    device: "cuda"
+    device: "npu"
     dtype: float32
     applicable_datasets: ["geneval"]
 

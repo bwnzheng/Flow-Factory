@@ -86,6 +86,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Multi-source offline tools should validate dependencies per enabled source. Lightweight, read-only analysis should be the explicit safe default, while GPU/model workflows require opt-in configuration.
 - **Related Constraint**: N/A
 
+### GRPO-Guard bypassed sample metadata and source propagation
+- **Date**: 2026-07-27
+- **Symptom**: Multi-source GRPO-Guard failed with `GenEval reward requires 'metadata' containing 'include'`, and specialist rewards could run on the wrong dataset.
+- **Root Cause**: `GRPOGuardTrainer.sample()` called `adapter.inference()` directly instead of the standard `generate_samples()` / `sample_batch()` pipeline, so generated samples never received dataset metadata, source, or source ID.
+- **Fix**: `trainers/grpo.py` now delegates GRPO-Guard sampling to `generate_samples()` while requesting the `next_latents_mean` callback; a regression test verifies the delegation contract.
+- **Lesson**: Algorithm-specific sampling parameters belong in `generate_samples()` keyword arguments. Reward-based trainers must not bypass `sample_batch()`, because it owns metadata injection, source-aware reward routing, and sample bookkeeping.
+- **Related Constraint**: #6
+
 ### Convex-support LP returned an unknown HiGHS status
 - **Date**: 2026-07-17
 - **Symptom**: Four-dimensional Pareto analysis intermittently failed with HiGHS Status 15 (`model_status is Unknown; primal_status is Infeasible`) even though selecting the target point itself guarantees LP feasibility.
