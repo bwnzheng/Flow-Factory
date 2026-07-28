@@ -119,6 +119,7 @@ train:
     evolution_generations: 3      # Number of GA generations
     parent_ratio: 0.25            # Fraction of group selected as parents (top by advantage)
     mutation_std: 0.05            # Gaussian noise stddev applied to child latents
+    survivor_score: "advantage"   # Options: 'advantage', 'abs_advantage'
     # Logging
     log_rewards: true             # Log per-reward parent vs child stats
 

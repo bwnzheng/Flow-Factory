@@ -162,6 +162,44 @@ scheduler:
 ```
 > ‼️ **Note**: Currently, `grpo-guard` reweighting is only compatible with `Flow-GRPO` dynamics. Therefore, dynamics_type must be explicitly set to `Flow-SDE`.
 
+#### Crossover GRPO-Guard
+
+`crossover-grpo-guard` intentionally augments GRPO-Guard with off-policy latent
+interventions. Within each prompt group, a genetic algorithm selects parents,
+crosses or mutates an intermediate latent, denoises the offspring, and keeps a
+fixed population of `group_size` survivors. The primary parent supplies the
+pre-crossover trajectory prefix; its earlier transitions are deliberately
+reward-relabelled with the offspring reward. The crossover boundary stores
+old-policy statistics recomputed for the actual intervention latent, so PPO
+ratios remain transition-consistent even though the data distribution is
+intentionally off-policy.
+
+This trainer requires `Flow-SDE`, `group_contiguous` sampling, and pointwise
+reward models. `sampler_type: auto` resolves to `group_contiguous`; incompatible
+explicit samplers fail at configuration time.
+
+```yaml
+train:
+  trainer_type: crossover-grpo-guard
+  crossover:
+    enabled: true
+    step_sampling: uniform
+    step_range: [0.3, 0.6]
+    strategy: block
+    augmentation_factor: 1.25
+    parent_ratio: 0.25
+    mutation_std: 0.05
+    survivor_score: advantage  # Options: advantage, abs_advantage
+scheduler:
+  dynamics_type: Flow-SDE
+```
+
+`survivor_score: advantage` prefers high-fitness candidates when the Pareto set
+must be trimmed or filled. `abs_advantage` also preserves strongly negative
+samples for contrastive training. The genetic algorithm always considers the
+merged parent-plus-offspring candidate population and returns exactly
+`group_size` survivors.
+
 ## DPPO
 
 Flow-DPPO (Divergence Proximal Policy Optimization) [[15]](#ref15) is a strict Flow-GRPO variant that keeps GRPO's group advantages and the optional KL-vs-reference penalty, but **replaces the PPO ratio-clip with a divergence proximal constraint**. The argument is that the single-sample probability ratio is a noisy estimate of the true policy divergence, so ratio clipping over-constrains some steps and under-constrains others. Because the per-step policy in a flow model is Gaussian, the KL between the old and new policies is exact and cheap to compute. DPPO uses this in an **asymmetric divergence mask**: it zeroes the gradient for any sample whose per-step KL(current ‖ rollout-old) exceeds `kl_mask_threshold` *and* whose update would push the action further in the wrong direction (`ratio > 1 & adv > 0`, or `ratio < 1 & adv < 0`).
@@ -387,6 +425,12 @@ train:
 ```
 
 > **Tip**: The `piecewise_linear` schedule is recommended for DiffusionNFT. It starts with a lower decay rate to allow faster initial policy divergence and gradually increases the decay to stabilize later training. You can fine-tune this behavior with `flat_steps` and `ramp_rate`.
+
+`crossover-nft` uses the same fixed-population genetic algorithm and
+`survivor_score` setting, but keeps NFT's decoupled matching objective. When
+`off_policy: true`, both parent and offspring denoising use the EMA sampling
+policy. Like the GRPO-Guard variant, it currently requires pointwise rewards
+and complete prompt groups on one rank (`group_contiguous`).
 
 ## AWM: Advantage Weighted Matching
 

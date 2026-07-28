@@ -18,7 +18,8 @@ Genetic Algorithm for per-group population evolution.
 
 Replaces the old Pareto-parent crossover + multi-generation re-crossover
 with a true GA: select top parents by advantage, crossover + mutation,
-filter by Pareto expansion, trim by |advantage| to maintain group size K.
+filter by Pareto expansion, then rank with the configured survivor score
+to maintain group size K.
 
 Usage::
 
@@ -46,6 +47,7 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -56,6 +58,7 @@ import torch
 import tqdm as tqdm_
 
 from ...samples import BaseSample
+from ...utils.base import filter_kwargs, move_tensors_to_device
 from ...utils.logger_utils import setup_logger
 from .abc import BaseCrossover
 from .pareto import compute_pareto_mask
@@ -111,7 +114,7 @@ class GeneticAlgorithm:
        - ``"mutation"``  — clone a single parent + Gaussian mutation, no crossover
     3. Denoise children → compute rewards
     4. Merge population → keep non-dominated (Pareto front expanders)
-    5. Fill back to K by keeping dominated samples with largest |advantage|
+    5. Fill or trim back to K with ``crossover.survivor_score``
 
     Args:
         crossover_strategy: Pluggable crossover strategy (used only in
@@ -154,6 +157,12 @@ class GeneticAlgorithm:
         self._n_generations = max(1, int(evolution_generations))
         self._offspring_mode = offspring_mode
         self._reward_weights = reward_weights or {}
+        self._survivor_score = training_args.crossover.survivor_score
+        if self._survivor_score not in {"advantage", "abs_advantage"}:
+            raise ValueError(
+                "crossover.survivor_score must be 'advantage' or 'abs_advantage'; "
+                f"got {self._survivor_score!r}."
+            )
 
         # Environment (constant across epochs)
         self._adapter = adapter
@@ -319,6 +328,7 @@ class GeneticAlgorithm:
                     pop_rewards=pop_rewards,
                     reward_keys=reward_keys,
                     valid_reward_keys=valid_reward_keys,
+                    source=population[0].source,
                     epoch=epoch,
                     ctx=ctx,
                 )
@@ -417,6 +427,7 @@ class GeneticAlgorithm:
         pop_rewards: Dict[str, np.ndarray],
         reward_keys: List[str],
         valid_reward_keys: List[str],
+        source: Optional[str],
         epoch: int,
         ctx: _EvolveCtx,
     ) -> Tuple[
@@ -434,7 +445,7 @@ class GeneticAlgorithm:
         when there aren't enough parents.
         """
         # 1. Compute advantage (only on valid reward dimensions)
-        adv = self._compute_advantage(pop_rewards, valid_reward_keys)
+        adv = self._compute_advantage(pop_rewards, valid_reward_keys, source)
 
         # 2–3. Generate children by offspring mode
         device = self.device
@@ -447,8 +458,10 @@ class GeneticAlgorithm:
                 batch_size=n_children,
                 latent_shape=template_latent.shape,
                 dtype=template_latent.dtype,
-                rng_seed=epoch + ctx.gid + ctx.gen_idx,
+                rng_seed=self._operation_seed(epoch, ctx.gid, ctx.gen_idx, "resample"),
             )
+            prefix_indices = None
+            secondary_indices = None
         elif self._offspring_mode == "mutation":
             # ---- Mutation-only: clone single parent + noise, no crossover ----
             parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
@@ -457,7 +470,12 @@ class GeneticAlgorithm:
             parent_latents = torch.stack(
                 [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
             )
-            child_latents = self._mutate_only(parent_latents, epoch + ctx.gid + ctx.gen_idx)
+            child_latents, selected_parent_indices = self._mutate_only(
+                parent_latents,
+                self._operation_seed(epoch, ctx.gid, ctx.gen_idx, "mutation"),
+            )
+            prefix_indices = parent_idx[selected_parent_indices]
+            secondary_indices = None
         else:
             # ---- Crossover (default): two-parent crossover + optional mutation ----
             parent_idx, n_parents = self._select_parents(adv, pop_rewards, valid_reward_keys)
@@ -466,9 +484,14 @@ class GeneticAlgorithm:
             parent_latents = torch.stack(
                 [self._get_crossover_latent(population[pi], device) for pi in parent_idx]
             )
-            child_latents = self._crossover_and_mutate(
-                parent_latents, epoch + ctx.gid + ctx.gen_idx
+            child_latents, selected_parent_indices, selected_secondary_indices = (
+                self._crossover_and_mutate(
+                    parent_latents,
+                    self._operation_seed(epoch, ctx.gid, ctx.gen_idx, "crossover"),
+                )
             )
+            prefix_indices = parent_idx[selected_parent_indices]
+            secondary_indices = parent_idx[selected_secondary_indices]
 
         # 4. Denoise → child samples.
         #    Crossover / mutation start from cxo_step (mid-denoising).
@@ -482,9 +505,18 @@ class GeneticAlgorithm:
         children = self._denoise_and_create_children(
             child_latents=child_latents,
             cxo_step=denoise_start,
-            template=population[0],
+            population=population,
+            prefix_indices=prefix_indices,
             ctx=ctx,
         )
+        for child_idx, child in enumerate(children):
+            child.extra_kwargs["primary_parent_index"] = (
+                int(prefix_indices[child_idx]) if prefix_indices is not None else None
+            )
+            child.extra_kwargs["secondary_parent_index"] = (
+                int(secondary_indices[child_idx]) if secondary_indices is not None else None
+            )
+            child.extra_kwargs["offspring_mode"] = self._offspring_mode
 
         # 5. Evaluate children
         child_rewards_dict_raw = self._reward_buffer.rp.compute_rewards(
@@ -501,6 +533,7 @@ class GeneticAlgorithm:
             child_rewards=child_rewards_dict,
             reward_keys=reward_keys,
             valid_reward_keys=valid_reward_keys,
+            source=source,
         )
 
         return population, pop_rewards, stats
@@ -541,15 +574,29 @@ class GeneticAlgorithm:
 
         return np.array(selected), n_parents
 
-    def _crossover_and_mutate(self, parent_latents: torch.Tensor, rng_seed: int) -> torch.Tensor:
+    def _crossover_and_mutate(
+        self, parent_latents: torch.Tensor, rng_seed: int
+    ) -> Tuple[torch.Tensor, np.ndarray, np.ndarray]:
         """Apply crossover strategy + Gaussian mutation."""
         gen_rng = torch.Generator()
         gen_rng.manual_seed(rng_seed)
         out = self._strategy.crossover(parent_latents, generator=gen_rng)
-        child_latents = out.child_latents.float()
+        child_latents = out.child_latents
         if self._mutation_std > 0:
-            child_latents = child_latents + torch.randn_like(child_latents) * self._mutation_std
-        return child_latents
+            device_gen = torch.Generator(device=child_latents.device)
+            device_gen.manual_seed(rng_seed + 1)
+            noise = torch.randn(
+                child_latents.shape,
+                device=child_latents.device,
+                dtype=child_latents.dtype,
+                generator=device_gen,
+            )
+            child_latents = child_latents + noise * self._mutation_std
+        return (
+            child_latents,
+            out.parent_indices_i.detach().cpu().numpy(),
+            out.parent_indices_j.detach().cpu().numpy(),
+        )
 
     def _resample_children(
         self,
@@ -576,7 +623,9 @@ class GeneticAlgorithm:
         child_latents = torch.randn(shape, device=device, dtype=dtype, generator=gen_rng)
         return child_latents
 
-    def _mutate_only(self, parent_latents: torch.Tensor, rng_seed: int) -> torch.Tensor:
+    def _mutate_only(
+        self, parent_latents: torch.Tensor, rng_seed: int
+    ) -> Tuple[torch.Tensor, np.ndarray]:
         """Clone a single parent + Gaussian mutation (no crossover).
 
         Each child is a noisy copy of one randomly selected parent.
@@ -592,10 +641,10 @@ class GeneticAlgorithm:
         """
         K = parent_latents.shape[0]
         M = self._strategy.num_children(K)
-        gen_rng = torch.Generator()
+        gen_rng = torch.Generator(device=parent_latents.device)
         gen_rng.manual_seed(rng_seed)
         # Randomly select one parent for each child
-        pick = torch.randint(0, K, (M,), generator=gen_rng)
+        pick = torch.randint(0, K, (M,), device=parent_latents.device, generator=gen_rng)
         child_latents = parent_latents[pick].clone()
         # Mutation
         std = self._mutation_std
@@ -605,9 +654,14 @@ class GeneticAlgorithm:
                 f"offspring_mode='mutation' but mutation_std={self._mutation_std}. "
                 f"Falling back to mutation_std={std} to avoid producing identical clones."
             )
-        noise = torch.randn_like(child_latents)
+        noise = torch.randn(
+            child_latents.shape,
+            device=child_latents.device,
+            dtype=child_latents.dtype,
+            generator=gen_rng,
+        )
         child_latents = child_latents + noise * std
-        return child_latents
+        return child_latents, pick.detach().cpu().numpy()
 
     # ------------------------------------------------------------------
     # Step 3: Denoise → child samples
@@ -617,30 +671,26 @@ class GeneticAlgorithm:
         self,
         child_latents: torch.Tensor,
         cxo_step: int,
-        template: BaseSample,
+        population: List[BaseSample],
+        prefix_indices: Optional[np.ndarray],
         ctx: _EvolveCtx,
     ) -> List[BaseSample]:
         """Denoise child latents and create samples via child_factory."""
         device = self.device
+        templates = (
+            [population[int(i)] for i in prefix_indices]
+            if prefix_indices is not None
+            else [population[0] for _ in range(child_latents.shape[0])]
+        )
 
-        # Build the denoising batch from the template sample.
-        # Must also check extra_kwargs because subclasses like SD3_5Sample
-        # declare pooled_prompt_embeds as a direct dataclass field (default
-        # None), which shadows the extra_kwargs fallback of __getattr__.
-        child_batch: Dict[str, Any] = {}
-        for k in ("prompt_embeds", "pooled_prompt_embeds", "prompt_ids"):
-            val = getattr(template, k, None)
-            if val is None:
-                val = template.extra_kwargs.get(k)
-            if val is not None:
-                child_batch[k] = val.to(device)
-            elif k == "pooled_prompt_embeds":
-                logger.warning(
-                    f"_denoise_and_create_children: template is missing "
-                    f"'{k}'.  The adapter may fail if it requires it."
-                )
+        # Reuse the exact optimize-time stacking contract so every adapter-specific
+        # condition (negative CFG embeds, edit latents, connector embeds, etc.) is
+        # propagated instead of maintaining a fragile field allowlist. Move each
+        # template before stacking because multi-generation populations can mix
+        # CPU-offloaded parents with device-resident children.
+        child_batch = self._stack_templates_on_device(templates, device)
 
-        timesteps = template.timesteps.to(device)
+        timesteps = templates[0].timesteps.to(device)
         raw = run_denoising_phase(
             adapter=self._adapter,
             accelerator=self._accelerator,
@@ -660,16 +710,43 @@ class GeneticAlgorithm:
         self._device_sync()
 
         return self._child_factory(
-            template=template,
+            templates=templates,
             child_latents=child_latents,
             cxo_step=cxo_step,
             denoise_output=raw,
             ctx=ctx,
         )
 
+    def _stack_templates_on_device(
+        self,
+        templates: List[BaseSample],
+        device: torch.device,
+    ) -> Dict[str, Any]:
+        """Move filtered template fields before applying sample stacking rules."""
+        if not templates:
+            raise ValueError("Cannot stack an empty crossover template list.")
+
+        sample_cls = type(templates[0])
+        template_dicts = []
+        for template in templates:
+            forward_kwargs = filter_kwargs(self._adapter.forward, **template.to_dict())
+            template_dicts.append(move_tensors_to_device(forward_kwargs, device))
+
+        all_keys = set()
+        for template_dict in template_dicts:
+            all_keys.update(template_dict.keys())
+
+        return {
+            key: sample_cls._stack_values(
+                key,
+                [template_dict.get(key) for template_dict in template_dicts],
+            )
+            for key in all_keys
+        }
+
     def _default_child_factory(
         self,
-        template: BaseSample,
+        templates: List[BaseSample],
         child_latents: torch.Tensor,
         cxo_step: int,
         denoise_output: tuple,
@@ -689,6 +766,7 @@ class GeneticAlgorithm:
         children: List[BaseSample] = []
 
         for m in range(n_children):
+            template = templates[m]
             final = finals[m : m + 1]
             imgs = self._adapter.decode_latents(final)
             al = final.expand(ctx.n_stored, *final.shape[1:]).clone()
@@ -730,6 +808,7 @@ class GeneticAlgorithm:
         child_rewards: Dict[str, np.ndarray],
         reward_keys: List[str],
         valid_reward_keys: List[str],
+        source: Optional[str],
     ) -> Tuple[
         List[BaseSample],
         Dict[str, np.ndarray],
@@ -739,7 +818,8 @@ class GeneticAlgorithm:
 
         Advantage is computed *after* merging so all K+M samples share the
         same normalization (combined mean/std).  Pareto and |advantage|
-        trimming use only *valid_reward_keys*; *reward_keys* is the full
+        ranking uses ``crossover.survivor_score``. Pareto and advantage
+        computation use only *valid_reward_keys*; *reward_keys* is the full
         global set for dict iteration and stats bookkeeping.
         """
         n_pop = len(population)
@@ -751,7 +831,7 @@ class GeneticAlgorithm:
             combined_rewards[k] = np.concatenate([pop_rewards[k], child_rewards[k]])
 
         # Compute advantage on the FULL combined set (unified normalization)
-        combined_adv = self._compute_advantage(combined_rewards, valid_reward_keys)
+        combined_adv = self._compute_advantage(combined_rewards, valid_reward_keys, source)
 
         # ---- Reward stats before replacement ----
         pop_rw_stats = {
@@ -773,25 +853,19 @@ class GeneticAlgorithm:
         else:
             pareto = np.ones(len(combined_adv), dtype=bool)
 
-        # Keep non-dominated
-        keep = pareto.copy()
-        n_pareto = int(keep.sum())
-
-        # Fill to group_size with dominated by |advantage|
+        score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)
+        pareto_indices = np.where(pareto)[0]
+        dominated_indices = np.where(~pareto)[0]
         K = self._group_size
-        n_filled = 0
-        if n_pareto < K:
-            dominated = ~keep
-            dom_idx = np.where(dominated)[0]
-            if len(dom_idx) > 0:
-                dom_adv_abs = np.abs(combined_adv[dom_idx])
-                n_fill = min(K - n_pareto, len(dom_idx))
-                fill_order = dom_idx[dom_adv_abs.argsort()[::-1][:n_fill]]
-                keep[fill_order] = True
-                n_filled = n_fill
-
-        # Trim to K
-        keep_indices = np.where(keep)[0][:K]
+        pareto_order = pareto_indices[np.argsort(score[pareto_indices])[::-1]]
+        if len(pareto_order) >= K:
+            keep_indices = pareto_order[:K]
+            n_filled = 0
+        else:
+            dominated_order = dominated_indices[np.argsort(score[dominated_indices])[::-1]]
+            n_filled = min(K - len(pareto_order), len(dominated_order))
+            keep_indices = np.concatenate([pareto_order, dominated_order[:n_filled]])
+        n_pareto = len(pareto_indices)
         n_keep_final = len(keep_indices)
 
         # Build new population
@@ -861,6 +935,7 @@ class GeneticAlgorithm:
         self,
         rewards_dict: Dict[str, np.ndarray],
         valid_reward_keys: List[str],
+        source: Optional[str],
     ) -> np.ndarray:
         """Per-group GDPO-style advantage (valid dimensions only).
 
@@ -879,7 +954,18 @@ class GeneticAlgorithm:
 
         agg = np.zeros(n, dtype=np.float32)
         for key in valid_reward_keys:
-            w = next(iter(self._reward_weights.get(key, {"default": 1.0}).values()))
+            weight_map = self._reward_weights.get(key, {"default": 1.0})
+            if source is not None and source in weight_map:
+                w = weight_map[source]
+            elif "default" in weight_map:
+                w = weight_map["default"]
+            elif len(weight_map) == 1:
+                w = next(iter(weight_map.values()))
+            else:
+                raise ValueError(
+                    f"Missing reward weight for reward={key!r}, source={source!r}; "
+                    f"available sources={sorted(weight_map)}."
+                )
             vals = rewards_dict[key].astype(np.float32)
             mean = vals.mean()
             std = vals.std()
@@ -888,6 +974,11 @@ class GeneticAlgorithm:
             agg += vals * w
 
         return agg.astype(np.float32)
+
+    def _operation_seed(self, epoch: int, gid: int, generation: int, operation: str) -> int:
+        """Derive a stable non-colliding seed for one GA operation."""
+        payload = f"{self._seed}:{epoch}:{gid}:{generation}:{operation}".encode()
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % (2**31)
 
     def _device_sync(self) -> None:
         """Synchronize CUDA/NPU stream."""

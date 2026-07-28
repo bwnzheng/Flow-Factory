@@ -100,38 +100,17 @@ class CrossoverArguments(ArgABC):
             )
         },
     )
-    include_parents: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether to include the original K parent samples in the training batch "
-            "alongside the M crossover children."
-        },
-    )
-    selective_crossover: bool = field(
-        default=True,
-        metadata={
-            "help": "Only crossover non-dominated parents (identified via per-reward scores).  "
-            "Dominated parents are kept but do not produce children."
-        },
-    )
-    pareto_filter: bool = field(
-        default=True,
-        metadata={
-            "help": "After all rewards are computed, remove Pareto-dominated samples "
-            "from the training batch before advantage computation."
-        },
-    )
     log_rewards: bool = field(
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
-    child_warmup_epochs: int = field(
-        default=0,
+    survivor_score: Literal["advantage", "abs_advantage"] = field(
+        default="advantage",
         metadata={
             "help": (
-                "Number of epochs over which to linearly warm up child advantages.  "
-                "At epoch 0, children have zero influence; after warmup_epochs they have "
-                "full influence.  Default 0 = no warmup (full influence from the start)."
+                "Score used to rank candidates when the Pareto set must be trimmed or filled. "
+                "'advantage' prefers high-fitness samples; 'abs_advantage' also preserves "
+                "strong negative samples."
             )
         },
     )

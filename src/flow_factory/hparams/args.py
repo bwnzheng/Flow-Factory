@@ -540,6 +540,17 @@ class Arguments(ArgABC):
         user_choice = self.data_args.sampler_type
 
         trainer_type = str(ta.trainer_type).lower()
+        crossover_enabled = bool(
+            trainer_type.startswith("crossover-")
+            and getattr(getattr(ta, "crossover", None), "enabled", False)
+        )
+
+        if crossover_enabled and user_choice not in {"auto", "group_contiguous"}:
+            raise ValueError(
+                f"trainer_type='{trainer_type}' requires sampler_type='group_contiguous' "
+                "because each genetic-algorithm population must be complete on one rank; "
+                f"got sampler_type={user_choice!r}."
+            )
 
         if (
             user_choice in {"distributed_k_repeat", "group_distributed"}
@@ -556,7 +567,9 @@ class Arguments(ArgABC):
             )
             self.data_args.sampler_type = "group_contiguous"
         
-        if user_choice == "auto" and trainer_type != "dgpo":
+        if user_choice == "auto" and crossover_enabled:
+            self.data_args.sampler_type = "group_contiguous"
+        elif user_choice == "auto" and trainer_type != "dgpo":
             # auto: prefer `group_contiguous` (all K copies on same rank → no cross-rank all-gather for rewards/advantages),
             # fall back to `distributed_k_repeat` (all K copies scattered across ranks → cross-rank all-gather for rewards/advantages)
             # There are two geometric constraints:

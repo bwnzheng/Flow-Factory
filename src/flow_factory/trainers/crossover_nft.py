@@ -1,7 +1,16 @@
 # Copyright 2026 Bowen-Zheng
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# ...
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # src/flow_factory/trainers/crossover_nft.py
 """
@@ -9,20 +18,17 @@ CrossoverNFT — DiffusionNFT trainer with Genetic Algorithm augmentation.
 
 Parents generated during ``sample()`` store crossover-step latents.  In
 ``prepare_feedback()``, a per-group genetic algorithm evolves the
-population: select top parents by advantage, crossover + mutation, filter
-by Pareto expansion, trim by |advantage|.
+population: select parents by advantage, crossover + mutation, preserve
+Pareto candidates, and trim with the configured survivor score.
 """
 
 from __future__ import annotations
 
 import hashlib
 import time
-from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-import numpy as np
 import torch
-import tqdm as tqdm_
 
 from ..hparams import CrossoverNFTTrainingArguments
 from ..samples import BaseSample
@@ -30,13 +36,11 @@ from ..utils.base import create_generator
 from ..utils.logger_utils import setup_logger
 from .crossover import (
     GeneticAlgorithm,
-    compute_pareto_mask,
     create_crossover_strategy,
     sample_crossover_step,
 )
 from .nft import DiffusionNFTTrainer
 
-tqdm = tqdm_.tqdm
 logger = setup_logger(__name__)
 
 
@@ -48,6 +52,11 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         cxo_args = self.training_args.crossover
         self._crossover_enabled = cxo_args.enabled
         if self._crossover_enabled:
+            if self.reward_processor._groupwise_models:
+                raise ValueError(
+                    "Crossover trainers currently support pointwise rewards only; "
+                    "groupwise rewards require candidate-population-wide rescoring."
+                )
             strategy = create_crossover_strategy(
                 name=cxo_args.strategy,
                 augmentation_factor=cxo_args.augmentation_factor,
@@ -112,12 +121,21 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             reward_buffer=self.reward_buffer,
             compute_log_prob=False,
             trajectory_indices=ext_idx,
+            _crossover_rollout=True,
         )
 
     def sample_batch(
         self, batch: Dict[str, Any], reward_buffer=None, **extra_inference_kwargs
     ) -> List[BaseSample]:
         """Like the base implementation, but also assigns per-prompt cxo_step."""
+        crossover_rollout = bool(extra_inference_kwargs.pop("_crossover_rollout", False))
+        if not self._crossover_enabled or not crossover_rollout:
+            return super().sample_batch(
+                batch,
+                reward_buffer=reward_buffer,
+                **extra_inference_kwargs,
+            )
+
         cxo_cfg = self.training_args.crossover
         base_seed = self.training_args.seed + self.epoch
         num_steps = self.training_args.num_inference_steps
@@ -135,10 +153,9 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # Standard batched inference (uses trajectory_indices from extra_inference_kwargs)
         samples = super().sample_batch(batch, reward_buffer=reward_buffer, **extra_inference_kwargs)
 
-        # Assign per-prompt cxo_step to each of the K group members
-        K = self.training_args.group_size
-        expanded_steps = [s for s in cxo_steps for _ in range(K)]
-        for s, step in zip(samples, expanded_steps):
+        # The data sampler has already materialized all K repeated rows. Adapter
+        # inference returns one sample per row, so assignments stay row-aligned.
+        for s, step in zip(samples, cxo_steps):
             s.extra_kwargs["_cxo_step"] = step
 
         return samples
@@ -156,13 +173,14 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             )
             applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
             t_ga = time.time()
-            evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
-                parent_samples=samples,
-                parent_rewards=rewards,
-                applicable=applicable,
-                epoch=self.epoch,
-                verbose=self.log_args.verbose,
-            )
+            with self.sampling_context():
+                evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
+                    parent_samples=samples,
+                    parent_rewards=rewards,
+                    applicable=applicable,
+                    epoch=self.epoch,
+                    verbose=self.log_args.verbose,
+                )
             t_ga = time.time() - t_ga
             logger.info(
                 f"[rank {rank}] prepare_feedback: GA returned "
@@ -186,14 +204,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             samples[:] = evolved_samples
             rewards = {k: v.to(device) for k, v in evolved_rewards.items()}
 
-        self.advantage_processor._child_advantage_scale = 1.0
-
         logger.info(f"[rank {rank}] prepare_feedback: calling compute_advantages")
-        self.compute_advantages(samples, rewards, store_to_samples=True)
-        logger.info(f"[rank {rank}] prepare_feedback: compute_advantages done")
-        stats = self.advantage_processor.pop_all_stats()
-        if stats:
-            self.log_data(stats, step=self.step)
         self.compute_advantages(samples, rewards, store_to_samples=True)
         logger.info(f"[rank {rank}] prepare_feedback: compute_advantages done")
         stats = self.advantage_processor.pop_all_stats()

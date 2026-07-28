@@ -109,8 +109,13 @@ All three registries map string keys → lazy import paths. Resolution: registry
 | `awm` | `AWMTrainer` | Decoupled | `BaseTrainer` |
 | `crd` | `CRDTrainer` | Decoupled | `BaseTrainer` |
 | `diffusion-opd` | `DiffusionOPDTrainer` | Distillation (on-policy) | `BaseTrainer` |
+| `crossover-grpo-guard` | `CrossoverGRPOGuardTrainer` | Coupled + intentional off-policy intervention | `GRPOGuardTrainer` |
+| `crossover-nft` | `CrossoverNFTTrainer` | Decoupled + genetic augmentation | `DiffusionNFTTrainer` |
 
-**Flat hierarchy**: New trainers inherit from `BaseTrainer` directly. The sanctioned exceptions are `GRPOGuardTrainer → GRPOTrainer` and `DPPOTrainer → GRPOTrainer` (strict GRPO loss variants; see constraint #11).
+**Flat hierarchy**: New trainers inherit from `BaseTrainer` directly. The sanctioned exceptions are
+`GRPOGuardTrainer → GRPOTrainer` and `DPPOTrainer → GRPOTrainer` (strict GRPO loss
+variants; see constraint #11), plus registered crossover augmentation wrappers around
+their base optimization algorithms.
 
 **Model Adapters** (`models/registry.py`):
 | Key | Class | Task |
