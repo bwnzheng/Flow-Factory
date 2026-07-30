@@ -95,6 +95,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             logger.info(
                 f"CrossoverGRPOGuard GA: offspring_mode={offspring_mode} "
                 f"strategy={cxo_args.strategy} "
+                f"advantage_aggregation({self._ga._advantage_aggregation}) "
                 f"parent_ratio={self._ga._parent_ratio} "
                 f"mutation_std={self._ga._mutation_std} "
                 f"generations={self._ga._n_generations}"

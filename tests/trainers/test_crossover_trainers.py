@@ -153,11 +153,31 @@ def test_grpo_crossover_sample_batch_bypasses_non_crossover_rollouts(
 def test_ga_rejects_unknown_survivor_score():
     training_args = SimpleNamespace(
         crossover=SimpleNamespace(survivor_score="largest"),
+        advantage_aggregation="gdpo",
         num_inference_steps=4,
         group_size=2,
     )
 
     with pytest.raises(ValueError, match="survivor_score"):
+        GeneticAlgorithm(
+            crossover_strategy=None,
+            adapter=None,
+            accelerator=None,
+            autocast=None,
+            training_args=training_args,
+            reward_buffer=None,
+        )
+
+
+def test_ga_rejects_unknown_advantage_aggregation():
+    training_args = SimpleNamespace(
+        crossover=SimpleNamespace(survivor_score="advantage"),
+        advantage_aggregation="unknown",
+        num_inference_steps=4,
+        group_size=2,
+    )
+
+    with pytest.raises(ValueError, match="advantage_aggregation"):
         GeneticAlgorithm(
             crossover_strategy=None,
             adapter=None,
@@ -352,6 +372,7 @@ def test_grpo_parent_statistics_are_densified_for_mixed_parent_child_batches():
 
 def test_ga_advantage_uses_group_source_weight():
     ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._advantage_aggregation = "gdpo"
     ga._reward_weights = {"quality": {"source_a": 1.0, "source_b": 3.0}}
     rewards = {"quality": np.array([0.0, 1.0], dtype=np.float32)}
 
@@ -361,9 +382,49 @@ def test_ga_advantage_uses_group_source_weight():
     np.testing.assert_allclose(advantage_b, advantage_a * 3.0)
 
 
+def test_ga_advantage_follows_configured_aggregation():
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._reward_weights = {
+        "quality": {"default": 1.0},
+        "safety": {"default": 2.0},
+    }
+    rewards = {
+        "quality": np.array([0.0, 10.0, 11.0], dtype=np.float32),
+        "safety": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+    }
+
+    ga._advantage_aggregation = "sum"
+    sum_advantage = ga._compute_advantage(rewards, ["quality", "safety"], None)
+    weighted_sum = rewards["quality"] + 2.0 * rewards["safety"]
+    expected_sum = (weighted_sum - weighted_sum.mean()) / weighted_sum.std()
+
+    ga._advantage_aggregation = "gdpo"
+    gdpo_advantage = ga._compute_advantage(rewards, ["quality", "safety"], None)
+    quality_advantage = (rewards["quality"] - rewards["quality"].mean()) / rewards["quality"].std()
+    safety_advantage = (rewards["safety"] - rewards["safety"].mean()) / rewards["safety"].std()
+    expected_gdpo = quality_advantage + 2.0 * safety_advantage
+
+    np.testing.assert_allclose(sum_advantage, expected_sum)
+    np.testing.assert_allclose(gdpo_advantage, expected_gdpo)
+    assert not np.allclose(sum_advantage, gdpo_advantage)
+
+
+@pytest.mark.parametrize("aggregation", ["sum", "gdpo"])
+def test_ga_advantage_zero_centers_constant_rewards(aggregation):
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._advantage_aggregation = aggregation
+    ga._reward_weights = {"quality": {"default": 1.0}}
+    rewards = {"quality": np.array([3.0, 3.0, 3.0], dtype=np.float32)}
+
+    advantage = ga._compute_advantage(rewards, ["quality"], None)
+
+    np.testing.assert_array_equal(advantage, np.zeros(3, dtype=np.float32))
+
+
 def test_survivor_score_controls_pareto_trimming():
     ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
     ga._group_size = 2
+    ga._advantage_aggregation = "gdpo"
     ga._reward_weights = {"quality": {"default": 1.0}}
     population = [_dense_parent(), _dense_parent()]
     children = [_dense_parent(), _dense_parent()]

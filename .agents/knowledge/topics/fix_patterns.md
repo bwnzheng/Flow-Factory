@@ -110,6 +110,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: An intentional off-policy intervention still needs internally consistent transition tuples. Whenever parent and offspring samples share an optimize batch, their shared trajectory maps must have the same semantics, offspring generation must use the same model-policy context and full conditioning contract as parent generation, and distributed statistic tensors must use a backend-supported explicit dtype rather than inheriting Python or NumPy defaults. Trainer callbacks must use attributes guaranteed by the trainer hierarchy—not similarly named state owned by a helper object—and `sample_batch()` overrides need an explicit training/evaluation contract rather than depending on caller side effects or indirect signals. With CPU offload, normalize tensor devices per sample before any collation operation; moving an already-stacked batch is too late.
 - **Related Constraint**: #6, #7
 
+### Crossover genetic selection ignored configured advantage aggregation
+- **Date**: 2026-07-30
+- **Symptom**: Crossover parent and survivor selection always used GDPO-style per-reward normalization even when `train.advantage_aggregation` was configured as `sum`; constant-reward populations also retained a non-zero genetic selection score.
+- **Root Cause**: The genetic-algorithm refactor introduced a private GDPO-only advantage implementation instead of preserving the trainer's configured aggregation contract and the formal processor's zero-mean normalization behavior.
+- **Fix**: `trainers/crossover/genetic_algorithm.py` now validates and applies `advantage_aggregation` for both parent and merged-population survivor ranking: `sum` aggregates weighted raw rewards before group normalization, while `gdpo` normalizes each reward before weighting. Both crossover trainers log the resolved aggregation, and regression tests cover aggregation-specific results, source-aware weights, invalid values, and zero-variance groups.
+- **Lesson**: Any helper that performs intermediate policy-data selection must honor the same user-facing objective configuration as the final optimizer. Distributed helpers may reproduce the communication-free local-group ordering, but must not call collective-bearing processors from rank-asynchronous per-group loops.
+- **Related Constraint**: #6
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

@@ -198,7 +198,9 @@ scheduler:
 must be trimmed or filled. `abs_advantage` also preserves strongly negative
 samples for contrastive training. The genetic algorithm always considers the
 merged parent-plus-offspring candidate population and returns exactly
-`group_size` survivors.
+`group_size` survivors. Genetic parent/survivor ranking follows the configured
+`advantage_aggregation` (`sum` or `gdpo`), matching the aggregation rule used
+for the final policy-training advantages.
 
 ## DPPO
 

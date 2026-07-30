@@ -157,6 +157,12 @@ class GeneticAlgorithm:
         self._n_generations = max(1, int(evolution_generations))
         self._offspring_mode = offspring_mode
         self._reward_weights = reward_weights or {}
+        self._advantage_aggregation = training_args.advantage_aggregation
+        if self._advantage_aggregation not in {"sum", "gdpo"}:
+            raise ValueError(
+                "Crossover genetic evolution requires advantage_aggregation to be "
+                f"'sum' or 'gdpo'; got {self._advantage_aggregation!r}."
+            )
         self._survivor_score = training_args.crossover.survivor_score
         if self._survivor_score not in {"advantage", "abs_advantage"}:
             raise ValueError(
@@ -937,10 +943,13 @@ class GeneticAlgorithm:
         valid_reward_keys: List[str],
         source: Optional[str],
     ) -> np.ndarray:
-        """Per-group GDPO-style advantage (valid dimensions only).
+        """Compute selection advantages with the configured aggregation.
 
         Only *valid_reward_keys* participate; all-NaN columns from
-        non-applicable rewards are already excluded by the caller.
+        non-applicable rewards are already excluded by the caller.  This
+        mirrors the local-group ordering produced by ``AdvantageProcessor``:
+        ``sum`` aggregates raw weighted rewards before normalization, while
+        ``gdpo`` normalizes each reward before weighted aggregation.
         """
         if not valid_reward_keys:
             if not rewards_dict:
@@ -952,7 +961,7 @@ class GeneticAlgorithm:
         if n == 0:
             return np.array([])
 
-        agg = np.zeros(n, dtype=np.float32)
+        weighted_values: List[Tuple[np.ndarray, float]] = []
         for key in valid_reward_keys:
             weight_map = self._reward_weights.get(key, {"default": 1.0})
             if source is not None and source in weight_map:
@@ -966,14 +975,26 @@ class GeneticAlgorithm:
                     f"Missing reward weight for reward={key!r}, source={source!r}; "
                     f"available sources={sorted(weight_map)}."
                 )
-            vals = rewards_dict[key].astype(np.float32)
-            mean = vals.mean()
-            std = vals.std()
-            if std > 1e-8 and n > 1:
-                vals = (vals - mean) / std
-            agg += vals * w
+            weighted_values.append((rewards_dict[key].astype(np.float64), float(w)))
 
-        return agg.astype(np.float32)
+        if self._advantage_aggregation == "sum":
+            aggregated = np.zeros(n, dtype=np.float64)
+            for values, weight in weighted_values:
+                aggregated += values * weight
+            advantages = self._normalize_group_values(aggregated)
+        else:
+            advantages = np.zeros(n, dtype=np.float64)
+            for values, weight in weighted_values:
+                advantages += self._normalize_group_values(values) * weight
+
+        return advantages.astype(np.float32)
+
+    @staticmethod
+    def _normalize_group_values(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+        """Return zero-mean group values with a numerically safe standard deviation."""
+        mean = float(np.mean(values))
+        std = max(float(np.std(values)), eps)
+        return (values - mean) / std
 
     def _operation_seed(self, epoch: int, gid: int, generation: int, operation: str) -> int:
         """Derive a stable non-colliding seed for one GA operation."""
