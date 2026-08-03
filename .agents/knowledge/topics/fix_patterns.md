@@ -118,6 +118,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Any helper that performs intermediate policy-data selection must honor the same user-facing objective configuration as the final optimizer. Distributed helpers may reproduce the communication-free local-group ordering, but must not call collective-bearing processors from rank-asynchronous per-group loops.
 - **Related Constraint**: #6
 
+### Pareto filtering mishandled equal leading coordinates
+- **Date**: 2026-08-03
+- **Symptom**: Pareto-first crossover selection removed one of two identical reward vectors, and could retain a dominated candidate when its dominator had the same first reward coordinate but appeared later in input order.
+- **Root Cause**: `compute_pareto_mask` omitted the required strict-improvement check and used a one-direction scan whose first-coordinate sort did not establish an order among equal leading coordinates.
+- **Fix**: `trainers/crossover/pareto.py` now applies the direct `O(N²d)` dominance definition over finite candidates; regression tests cover duplicate vectors and domination with equal leading coordinates.
+- **Lesson**: Pareto dominance is a strict partial order, and sorting by one objective only permits one-direction pruning when ties in that objective are handled explicitly. A direct definition is safer for the small genetic candidate pools used here.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

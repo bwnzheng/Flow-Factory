@@ -46,6 +46,7 @@ def test_crossover_arguments_expose_only_effective_selection_controls():
     args = CrossoverArguments()
 
     assert args.survivor_score == "advantage"
+    assert not hasattr(args, "covariance_reward_bounds")
     assert not hasattr(args, "include_parents")
     assert not hasattr(args, "selective_crossover")
     assert not hasattr(args, "pareto_filter")

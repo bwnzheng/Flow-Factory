@@ -50,26 +50,15 @@ def compute_pareto_mask(points: np.ndarray) -> np.ndarray:
     if N <= 1:
         return np.ones(N, dtype=bool)
 
-    # Handle NaN: keep those samples automatically
+    # NaN candidates are kept and excluded from dominance comparisons.
     nan_mask = np.any(np.isnan(points), axis=1)
-
     is_pareto = np.ones(N, dtype=bool)
-
-    # Sort by first dimension descending for early termination
-    order = np.argsort(-points[:, 0])
-    sorted_pts = points[order]
-
-    for i in range(N):
-        if not is_pareto[order[i]]:
-            continue
-        for j in range(i + 1, N):
-            if not is_pareto[order[j]]:
-                continue
-            if np.all(sorted_pts[i] >= sorted_pts[j]):
-                is_pareto[order[j]] = False
-
-    # Restore NaN-marked samples
-    is_pareto[nan_mask] = True
+    finite_points = points[~nan_mask]
+    finite_indices = np.flatnonzero(~nan_mask)
+    for index, point in zip(finite_indices, finite_points):
+        weakly_better = np.all(finite_points >= point, axis=1)
+        strictly_better = np.any(finite_points > point, axis=1)
+        is_pareto[index] = not np.any(weakly_better & strictly_better)
 
     return is_pareto
 

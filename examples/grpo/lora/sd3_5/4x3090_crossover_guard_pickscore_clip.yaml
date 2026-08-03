@@ -107,7 +107,7 @@ train:
       mixing_ratio: 0.3           # Fraction of blocks from primary parent
       block_size: 8               # Spatial block size (H, W)
       block_size_c: 4             # Channel block size (C). 1=no ch split, 4=blocks of 4ch
-    survivor_score: "advantage"   # Options: 'advantage', 'abs_advantage'
+    survivor_score: "advantage"   # Options: 'advantage', 'abs_advantage', 'covariance'
     log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration

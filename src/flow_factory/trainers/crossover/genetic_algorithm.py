@@ -18,8 +18,8 @@ Genetic Algorithm for per-group population evolution.
 
 Replaces the old Pareto-parent crossover + multi-generation re-crossover
 with a true GA: select top parents by advantage, crossover + mutation,
-filter by Pareto expansion, then rank with the configured survivor score
-to maintain group size K.
+filter by Pareto expansion, then apply the configured fixed-size environmental
+selection rule to maintain group size K.
 
 Usage::
 
@@ -61,6 +61,7 @@ from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
 from ...utils.logger_utils import setup_logger
 from .abc import BaseCrossover
+from .covariance import population_covariance, select_covariance_guided_group
 from .pareto import compute_pareto_mask
 from .sampling import run_denoising_phase
 
@@ -164,11 +165,23 @@ class GeneticAlgorithm:
                 f"'sum' or 'gdpo'; got {self._advantage_aggregation!r}."
             )
         self._survivor_score = training_args.crossover.survivor_score
-        if self._survivor_score not in {"advantage", "abs_advantage"}:
+        if self._survivor_score not in {"advantage", "abs_advantage", "covariance"}:
             raise ValueError(
-                "crossover.survivor_score must be 'advantage' or 'abs_advantage'; "
+                "crossover.survivor_score must be 'advantage', 'abs_advantage', "
+                "or 'covariance'; "
                 f"got {self._survivor_score!r}."
             )
+        if self._survivor_score == "covariance" and not self._reward_weights:
+            raise ValueError(
+                "crossover.survivor_score='covariance' requires configured reward weights."
+            )
+        self._survivor_selection_aggregation = (
+            "weighted_sum" if self._survivor_score == "covariance" else self._advantage_aggregation
+        )
+        trainer_type = str(getattr(training_args, "trainer_type", "")).lower()
+        self._covariance_objective = (
+            "locally_linear_nft" if trainer_type == "crossover-nft" else "standardized_grpo"
+        )
 
         # Environment (constant across epochs)
         self._adapter = adapter
@@ -353,6 +366,14 @@ class GeneticAlgorithm:
                     f" | child {stats['child_rewards'][k]['mean']:.3f}"
                     for k in _logged_keys
                 )
+                selection_line = ""
+                if "covariance_selection" in stats:
+                    selection = stats["covariance_selection"]
+                    selection_line = (
+                        f" | covariance={selection['branch']} "
+                        f"J={selection['score']} variance={selection['scalar_variance']:.6g} "
+                        f"degenerate_fallback={selection['degenerate_fallback']}"
+                    )
                 logger.info(
                     f"[rank {rank}] GA gid={gid} gen={gen_idx}: "
                     f"pop={stats['n_pop']} "
@@ -360,7 +381,7 @@ class GeneticAlgorithm:
                     f"(children_kept={stats['n_children_kept']}/{stats['n_children']}, "
                     f"pareto={stats['n_pareto_parents']}+{stats['n_pareto_children']}, "
                     f"filled={stats['n_filled']}) | "
-                    f"{rw_lines}"
+                    f"{rw_lines}{selection_line}"
                 )
 
                 # ---- Accumulate aggregate stats ----
@@ -390,18 +411,19 @@ class GeneticAlgorithm:
 
                 # ---- Record per-sample rewards ----
                 for si in range(len(population)):
-                    ga_samples.append(
-                        {
-                            "gen": gen_idx,
-                            "gid": int(gid),
-                            "rank": int(rank),
-                            "sample_idx": si,
-                            "is_child": bool(
-                                population[si].extra_kwargs.get("is_crossover_child", False)
-                            ),
-                            "rewards": {k: float(pop_rewards[k][si]) for k in reward_keys},
-                        }
-                    )
+                    sample_record = {
+                        "gen": gen_idx,
+                        "gid": int(gid),
+                        "rank": int(rank),
+                        "sample_idx": si,
+                        "is_child": bool(
+                            population[si].extra_kwargs.get("is_crossover_child", False)
+                        ),
+                        "rewards": {k: float(pop_rewards[k][si]) for k in reward_keys},
+                    }
+                    if si == 0 and "covariance_selection" in stats:
+                        sample_record["selection_diagnostics"] = stats["covariance_selection"]
+                    ga_samples.append(sample_record)
 
             all_evolved.extend(population)
             for k in reward_keys:
@@ -803,7 +825,7 @@ class GeneticAlgorithm:
         return children
 
     # ------------------------------------------------------------------
-    # Step 4: Select survivors (Pareto + |advantage| trim)
+    # Step 4: Select survivors
     # ------------------------------------------------------------------
 
     def _select_survivors(
@@ -823,8 +845,8 @@ class GeneticAlgorithm:
         """Merge population + children, compute unified advantage, trim to K.
 
         Advantage is computed *after* merging so all K+M samples share the
-        same normalization (combined mean/std).  Pareto and |advantage|
-        ranking uses ``crossover.survivor_score``. Pareto and advantage
+        same normalization (combined mean/std). Selection uses
+        ``crossover.survivor_score``. Pareto, covariance, and advantage
         computation use only *valid_reward_keys*; *reward_keys* is the full
         global set for dict iteration and stats bookkeeping.
         """
@@ -859,18 +881,62 @@ class GeneticAlgorithm:
         else:
             pareto = np.ones(len(combined_adv), dtype=bool)
 
-        score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)
         pareto_indices = np.where(pareto)[0]
-        dominated_indices = np.where(~pareto)[0]
         K = self._group_size
-        pareto_order = pareto_indices[np.argsort(score[pareto_indices])[::-1]]
-        if len(pareto_order) >= K:
-            keep_indices = pareto_order[:K]
-            n_filled = 0
+        covariance_stats = None
+        if self._survivor_score == "covariance":
+            reward_matrix, weights = self._prepare_covariance_inputs(
+                combined_rewards, valid_reward_keys, source
+            )
+            covariance_fallback = np.abs(
+                self._compute_weighted_sum_advantage(combined_rewards, valid_reward_keys, source)
+            )
+            selection = select_covariance_guided_group(
+                reward_matrix=reward_matrix,
+                weights=weights,
+                target_size=K,
+                objective=self._covariance_objective,
+                fallback_scores=covariance_fallback,
+                candidate_ids=np.arange(len(combined_adv)),
+            )
+            keep_indices = selection.selected_indices
+            n_filled = max(0, K - len(pareto_indices))
+            before_covariance = population_covariance(reward_matrix)
+            group_score = selection.group_score
+            finite_score = np.isfinite(group_score.score)
+            covariance_stats = {
+                "branch": selection.branch,
+                "selected_ids": keep_indices.tolist(),
+                "rejected_ids": selection.rejected_indices.tolist(),
+                "raw_rewards": np.stack(
+                    [combined_rewards[key] for key in valid_reward_keys], axis=1
+                ).tolist(),
+                "covariance_before": before_covariance.tolist(),
+                "covariance_after": group_score.covariance.tolist(),
+                "contribution_vector": (
+                    group_score.contribution_vector.tolist() if finite_score else None
+                ),
+                "score": group_score.score if finite_score else None,
+                "scalar_variance": group_score.scalar_variance,
+                "mean_scalar_reward": group_score.mean_scalar_reward,
+                "normalized_covariance_conflict": (
+                    max(0.0, -group_score.score) if finite_score else None
+                ),
+                "degenerate_fallback": selection.degenerate_fallback,
+                "selection_aggregation": self._survivor_selection_aggregation,
+                "policy_advantage_aggregation": self._advantage_aggregation,
+            }
         else:
-            dominated_order = dominated_indices[np.argsort(score[dominated_indices])[::-1]]
-            n_filled = min(K - len(pareto_order), len(dominated_order))
-            keep_indices = np.concatenate([pareto_order, dominated_order[:n_filled]])
+            score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)
+            dominated_indices = np.where(~pareto)[0]
+            pareto_order = pareto_indices[np.argsort(score[pareto_indices])[::-1]]
+            if len(pareto_order) >= K:
+                keep_indices = pareto_order[:K]
+                n_filled = 0
+            else:
+                dominated_order = dominated_indices[np.argsort(score[dominated_indices])[::-1]]
+                n_filled = min(K - len(pareto_order), len(dominated_order))
+                keep_indices = np.concatenate([pareto_order, dominated_order[:n_filled]])
         n_pareto = len(pareto_indices)
         n_keep_final = len(keep_indices)
 
@@ -915,6 +981,8 @@ class GeneticAlgorithm:
             "child_rewards": child_rw_stats,
             "new_rewards": new_rw_stats,
         }
+        if covariance_stats is not None:
+            stats["covariance_selection"] = covariance_stats
         return new_population, new_rewards, stats
 
     # ------------------------------------------------------------------
@@ -961,33 +1029,80 @@ class GeneticAlgorithm:
         if n == 0:
             return np.array([])
 
-        weighted_values: List[Tuple[np.ndarray, float]] = []
-        for key in valid_reward_keys:
-            weight_map = self._reward_weights.get(key, {"default": 1.0})
-            if source is not None and source in weight_map:
-                w = weight_map[source]
-            elif "default" in weight_map:
-                w = weight_map["default"]
-            elif len(weight_map) == 1:
-                w = next(iter(weight_map.values()))
-            else:
-                raise ValueError(
-                    f"Missing reward weight for reward={key!r}, source={source!r}; "
-                    f"available sources={sorted(weight_map)}."
-                )
-            weighted_values.append((rewards_dict[key].astype(np.float64), float(w)))
-
         if self._advantage_aggregation == "sum":
-            aggregated = np.zeros(n, dtype=np.float64)
-            for values, weight in weighted_values:
-                aggregated += values * weight
-            advantages = self._normalize_group_values(aggregated)
+            advantages = self._compute_weighted_sum_advantage(
+                rewards_dict, valid_reward_keys, source
+            )
         else:
             advantages = np.zeros(n, dtype=np.float64)
-            for values, weight in weighted_values:
+            for key in valid_reward_keys:
+                values = rewards_dict[key].astype(np.float64)
+                weight = self._get_reward_weight(key, source)
                 advantages += self._normalize_group_values(values) * weight
 
         return advantages.astype(np.float32)
+
+    def _compute_weighted_sum_advantage(
+        self,
+        rewards_dict: Dict[str, np.ndarray],
+        valid_reward_keys: List[str],
+        source: Optional[str],
+    ) -> np.ndarray:
+        """Compute group-normalized weighted-sum rewards for selection."""
+        if not valid_reward_keys:
+            if not rewards_dict:
+                return np.array([])
+            return np.zeros(len(next(iter(rewards_dict.values()))), dtype=np.float32)
+
+        aggregated = np.zeros(len(rewards_dict[valid_reward_keys[0]]), dtype=np.float64)
+        for key in valid_reward_keys:
+            aggregated += rewards_dict[key].astype(np.float64) * self._get_reward_weight(
+                key, source
+            )
+        return self._normalize_group_values(aggregated).astype(np.float32)
+
+    def _prepare_covariance_inputs(
+        self,
+        rewards_dict: Dict[str, np.ndarray],
+        valid_reward_keys: List[str],
+        source: Optional[str],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Stack raw rewards and resolve source-aware covariance weights."""
+        if not valid_reward_keys:
+            raise ValueError("Covariance survivor selection requires applicable rewards.")
+
+        reward_columns = []
+        weights = []
+        for key in valid_reward_keys:
+            values = rewards_dict[key].astype(np.float64)
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"Covariance survivor selection received non-finite reward {key!r}."
+                )
+            reward_columns.append(values)
+            weights.append(self._get_reward_weight(key, source))
+
+        weight_vector = np.asarray(weights, dtype=np.float64)
+        if np.any(weight_vector < 0) or np.count_nonzero(weight_vector > 0) < 2:
+            raise ValueError(
+                "Covariance survivor selection requires at least two positive reward weights "
+                "and does not support negative weights."
+            )
+        return np.stack(reward_columns, axis=1), weight_vector
+
+    def _get_reward_weight(self, key: str, source: Optional[str]) -> float:
+        """Resolve one reward's scalarization weight for the current source."""
+        weight_map = self._reward_weights.get(key, {"default": 1.0})
+        if source is not None and source in weight_map:
+            return float(weight_map[source])
+        if "default" in weight_map:
+            return float(weight_map["default"])
+        if len(weight_map) == 1:
+            return float(next(iter(weight_map.values())))
+        raise ValueError(
+            f"Missing reward weight for reward={key!r}, source={source!r}; "
+            f"available sources={sorted(weight_map)}."
+        )
 
     @staticmethod
     def _normalize_group_values(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:

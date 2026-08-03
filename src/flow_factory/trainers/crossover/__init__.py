@@ -17,6 +17,13 @@
 intermediate denoising states during RL training."""
 
 from .abc import BaseCrossover, CrossoverOutput
+from .covariance import (
+    CovarianceGroupScore,
+    CovarianceSelectionResult,
+    covariance_group_score,
+    population_covariance,
+    select_covariance_guided_group,
+)
 from .genetic_algorithm import GeneticAlgorithm
 from .pareto import (
     compute_pareto_mask,
@@ -40,15 +47,20 @@ __all__ = [
     "BaseCrossover",
     "BlockCrossover",
     "ConvexCrossover",
+    "CovarianceGroupScore",
+    "CovarianceSelectionResult",
     "CrossoverOutput",
     "GeneticAlgorithm",
     "UniformCrossover",
     "compute_pareto_mask",
+    "covariance_group_score",
     "create_crossover_strategy",
     "filter_by_group",
     "list_crossover_strategies",
+    "population_covariance",
     "resolve_crossover_step",
     "run_denoising_phase",
     "sample_crossover_step",
+    "select_covariance_guided_group",
     "select_non_dominated_parents",
 ]

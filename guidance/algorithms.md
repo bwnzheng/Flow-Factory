@@ -181,6 +181,9 @@ explicit samplers fail at configuration time.
 ```yaml
 train:
   trainer_type: crossover-grpo-guard
+  advantage_aggregation: gdpo
+  global_std: true
+  stddev_reweighting: false
   crossover:
     enabled: true
     step_sampling: uniform
@@ -189,18 +192,44 @@ train:
     augmentation_factor: 1.25
     parent_ratio: 0.25
     mutation_std: 0.05
-    survivor_score: advantage  # Options: advantage, abs_advantage
+    survivor_score: covariance  # Options: advantage, abs_advantage, covariance
 scheduler:
   dynamics_type: Flow-SDE
 ```
 
 `survivor_score: advantage` prefers high-fitness candidates when the Pareto set
 must be trimmed or filled. `abs_advantage` also preserves strongly negative
-samples for contrastive training. The genetic algorithm always considers the
-merged parent-plus-offspring candidate population and returns exactly
-`group_size` survivors. Genetic parent/survivor ranking follows the configured
-`advantage_aggregation` (`sum` or `gdpo`), matching the aggregation rule used
-for the final policy-training advantages.
+samples for contrastive training. `covariance` keeps Pareto non-dominance as a
+hard quality gate, then greedily constructs the fixed-size survivor group by
+maximizing its weakest active reward contribution. Oversized Pareto fronts are
+pruned backward; undersized fronts retain every non-dominated candidate and are
+filled forward from the dominated pool. This is a group-level subset score, so
+the covariance is recomputed for every hypothetical add or removal.
+
+Covariance selection operates directly on the raw outputs of the configured
+reward models and uses their existing source-aware training weights. Those
+weights therefore define both the preference vector and the calibration across
+reward units. A fixed positive affine rescaling of one reward does not change
+the method when its weight is transformed inversely; selector-only bounds would
+cancel algebraically and are not required. Do not z-score rewards separately
+per prompt before selection, because that changes the intended reward geometry.
+
+The selector requires at least two rewards with positive weights. Covariance
+selection always uses a fixed weighted sum of raw rewards, independently of the
+policy-side `advantage_aggregation`, `stddev_reweighting`, and `global_std`
+settings. A zero-variance comparison falls back deterministically to absolute
+group-normalized weighted-sum reward rather than the configured policy
+advantage. The startup log reports both `advantage_aggregation` and
+`survivor_selection_aggregation` so this decoupling is explicit.
+
+With `advantage_aggregation: sum` and fixed policy weights, the covariance
+score directly matches the policy scalarization. With `gdpo` or dynamic policy
+reweighting, it is an independent survivor-selection proxy and must not be
+interpreted as the exact weakest contribution to the final policy gradient.
+The genetic algorithm always considers the merged parent-plus-offspring
+candidate population and returns exactly `group_size` survivors. Advantage-
+based parent/survivor ranking continues to follow the configured
+`advantage_aggregation` (`sum` or `gdpo`).
 
 ## DPPO
 
@@ -430,6 +459,10 @@ train:
 
 `crossover-nft` uses the same fixed-population genetic algorithm and
 `survivor_score` setting, but keeps NFT's decoupled matching objective. When
+covariance selection is enabled, NFT uses the locally linear score
+`min_k w_k [Sigma w]_k / Z_S^2`. Under the required group-local scalar
+normalization, `Z_S^2` is the hypothetical subset's scalar-reward population
+variance and is recomputed for every add or removal. When
 `off_policy: true`, both parent and offspring denoising use the EMA sampling
 policy. Like the GRPO-Guard variant, it currently requires pointwise rewards
 and complete prompt groups on one rank (`group_contiguous`).

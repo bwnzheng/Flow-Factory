@@ -104,13 +104,14 @@ class CrossoverArguments(ArgABC):
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
-    survivor_score: Literal["advantage", "abs_advantage"] = field(
+    survivor_score: Literal["advantage", "abs_advantage", "covariance"] = field(
         default="advantage",
         metadata={
             "help": (
                 "Score used to rank candidates when the Pareto set must be trimmed or filled. "
                 "'advantage' prefers high-fitness samples; 'abs_advantage' also preserves "
-                "strong negative samples."
+                "strong negative samples; 'covariance' greedily maximizes the weakest active "
+                "reward contribution of each hypothetical survivor group."
             )
         },
     )
