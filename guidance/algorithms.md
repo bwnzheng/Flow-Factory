@@ -216,6 +216,16 @@ candidate ID. This path does not apply Pareto filtering or recompute covariance
 for hypothetical subsets. It logs both the frozen-reference lower-bound
 diagnostics and the true recentered covariance of the selected group.
 
+Its per-group console line reports the scalar elite origin, `frozen_J`, the
+separable `lower_bound`, their approximation `gap`, the recentered `true_J`,
+scalar variance, and `degenerate_scalar_contrast`. Cross-rank logging packs the
+fixed-size metric accumulators into a float32 tensor for reduction and exposes
+the following platform metrics per
+generation under `ga/genN/cov_per_sample/`: `frozen_score`, `lower_bound`,
+`approximation_gap`, `true_score`, `scalar_variance`, `elite_child_rate`, and
+`degenerate_scalar_contrast_rate`. Full candidate-level arrays remain in the
+rank-local `ga/samples` JSONL diagnostics and are not gathered across ranks.
+
 Both covariance strategies operate directly on the raw outputs of the configured
 reward models and use their existing source-aware training weights. Those
 weights therefore define both the preference vector and the calibration across

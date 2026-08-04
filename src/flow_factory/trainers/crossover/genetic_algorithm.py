@@ -101,6 +101,29 @@ def _resolve_cxo_step(sample: BaseSample, num_steps: int) -> int:
     return num_steps // 2
 
 
+def _format_covariance_selection_log(selection: Dict[str, Any], n_pop: int) -> str:
+    """Format strategy-specific covariance selection diagnostics."""
+    if selection["branch"] != "cov_per_sample":
+        return (
+            f"covariance={selection['branch']} "
+            f"J={selection['score']} variance={selection['scalar_variance']:.6g} "
+            f"degenerate_fallback={selection['degenerate_fallback']}"
+        )
+
+    elite_id = int(selection["elite_id"])
+    elite_origin = "child" if elite_id >= n_pop else "parent"
+    true_score = selection["score"]
+    true_score_text = "None" if true_score is None else f"{true_score:.6g}"
+    return (
+        f"selection=cov_per_sample elite={elite_origin}:{elite_id} "
+        f"frozen_J={selection['frozen_score']:.6g} "
+        f"lower_bound={selection['lower_bound']:.6g} "
+        f"gap={selection['approximation_gap']:.6g} "
+        f"true_J={true_score_text} variance={selection['scalar_variance']:.6g} "
+        f"degenerate_scalar_contrast={selection['degenerate_scalar_contrast']}"
+    )
+
+
 # ============================================================================
 # Genetic Algorithm
 # ============================================================================
@@ -325,6 +348,16 @@ class GeneticAlgorithm:
             acc[f"gen{gen}_n_pareto_parents"] = 0
             acc[f"gen{gen}_n_pareto_children"] = 0
             acc[f"gen{gen}_n_filled"] = 0
+            if self._survivor_score == "cov_per_sample":
+                acc[f"gen{gen}_cov_per_sample_count"] = 0
+                acc[f"gen{gen}_cov_per_sample_frozen_score_sum"] = 0.0
+                acc[f"gen{gen}_cov_per_sample_lower_bound_sum"] = 0.0
+                acc[f"gen{gen}_cov_per_sample_approximation_gap_sum"] = 0.0
+                acc[f"gen{gen}_cov_per_sample_true_score_sum"] = 0.0
+                acc[f"gen{gen}_cov_per_sample_true_score_count"] = 0
+                acc[f"gen{gen}_cov_per_sample_scalar_variance_sum"] = 0.0
+                acc[f"gen{gen}_cov_per_sample_elite_child_count"] = 0
+                acc[f"gen{gen}_cov_per_sample_degenerate_count"] = 0
         ga_samples: List[Dict[str, Any]] = []
 
         gid_items = sorted(gid_to_indices.items())
@@ -381,18 +414,27 @@ class GeneticAlgorithm:
                 selection_line = ""
                 if "covariance_selection" in stats:
                     selection = stats["covariance_selection"]
-                    selection_line = (
-                        f" | covariance={selection['branch']} "
-                        f"J={selection['score']} variance={selection['scalar_variance']:.6g} "
-                        f"degenerate_fallback={selection['degenerate_fallback']}"
+                    selection_line = " | " + _format_covariance_selection_log(
+                        selection, stats["n_pop"]
+                    )
+                if (
+                    "covariance_selection" in stats
+                    and stats["covariance_selection"]["branch"] == "cov_per_sample"
+                ):
+                    population_line = (
+                        f"children_kept={stats['n_children_kept']}/{stats['n_children']}"
+                    )
+                else:
+                    population_line = (
+                        f"children_kept={stats['n_children_kept']}/{stats['n_children']}, "
+                        f"pareto={stats['n_pareto_parents']}+{stats['n_pareto_children']}, "
+                        f"filled={stats['n_filled']}"
                     )
                 logger.info(
                     f"[rank {rank}] GA gid={gid} gen={gen_idx}: "
                     f"pop={stats['n_pop']} "
                     f"replaced={stats['n_replaced']}/{stats['n_pop']} "
-                    f"(children_kept={stats['n_children_kept']}/{stats['n_children']}, "
-                    f"pareto={stats['n_pareto_parents']}+{stats['n_pareto_children']}, "
-                    f"filled={stats['n_filled']}) | "
+                    f"({population_line}) | "
                     f"{rw_lines}{selection_line}"
                 )
 
@@ -404,6 +446,26 @@ class GeneticAlgorithm:
                 acc[f"gen{gen_idx}_n_pareto_parents"] += stats["n_pareto_parents"]
                 acc[f"gen{gen_idx}_n_pareto_children"] += stats["n_pareto_children"]
                 acc[f"gen{gen_idx}_n_filled"] += stats["n_filled"]
+                if (
+                    "covariance_selection" in stats
+                    and stats["covariance_selection"]["branch"] == "cov_per_sample"
+                ):
+                    selection = stats["covariance_selection"]
+                    prefix = f"gen{gen_idx}_cov_per_sample"
+                    acc[f"{prefix}_count"] += 1
+                    acc[f"{prefix}_frozen_score_sum"] += selection["frozen_score"]
+                    acc[f"{prefix}_lower_bound_sum"] += selection["lower_bound"]
+                    acc[f"{prefix}_approximation_gap_sum"] += selection["approximation_gap"]
+                    acc[f"{prefix}_scalar_variance_sum"] += selection["scalar_variance"]
+                    if selection["score"] is not None:
+                        acc[f"{prefix}_true_score_sum"] += selection["score"]
+                        acc[f"{prefix}_true_score_count"] += 1
+                    acc[f"{prefix}_elite_child_count"] += int(
+                        selection["elite_id"] >= stats["n_pop"]
+                    )
+                    acc[f"{prefix}_degenerate_count"] += int(
+                        selection["degenerate_scalar_contrast"]
+                    )
                 n_pop = float(stats["n_pop"])
                 for k in _logged_keys:
                     pop_m = stats["pop_rewards"][k]["mean"]
@@ -1216,6 +1278,20 @@ class GeneticAlgorithm:
                     "new_sum_sq",
                 ]:
                     count_keys.append(f"gen{gen}_{rk}_{suffix}")
+            covariance_prefix = f"gen{gen}_cov_per_sample"
+            if f"{covariance_prefix}_count" in ga_acc:
+                for suffix in [
+                    "count",
+                    "frozen_score_sum",
+                    "lower_bound_sum",
+                    "approximation_gap_sum",
+                    "true_score_sum",
+                    "true_score_count",
+                    "scalar_variance_sum",
+                    "elite_child_count",
+                    "degenerate_count",
+                ]:
+                    count_keys.append(f"{covariance_prefix}_{suffix}")
 
         values = [float(ga_acc.get(k, 0)) for k in count_keys]
         t = torch.tensor(values, device=accelerator.device, dtype=torch.float32)
@@ -1261,6 +1337,35 @@ class GeneticAlgorithm:
                         stats[f"{p}/{rk}/{prefix}"] = round(mean, 6)
                     else:
                         stats[f"{p}/{rk}/{prefix.replace('mean', 'std')}"] = round(var**0.5, 6)
+
+            covariance_prefix = f"gen{gen}_cov_per_sample"
+            covariance_count = reduced.get(f"{covariance_prefix}_count", 0.0)
+            if covariance_count > 0:
+                metric_prefix = f"{p}/cov_per_sample"
+                for metric in [
+                    "frozen_score",
+                    "lower_bound",
+                    "approximation_gap",
+                    "scalar_variance",
+                ]:
+                    stats[f"{metric_prefix}/{metric}"] = round(
+                        reduced[f"{covariance_prefix}_{metric}_sum"] / covariance_count,
+                        6,
+                    )
+                true_score_count = reduced[f"{covariance_prefix}_true_score_count"]
+                if true_score_count > 0:
+                    stats[f"{metric_prefix}/true_score"] = round(
+                        reduced[f"{covariance_prefix}_true_score_sum"] / true_score_count,
+                        6,
+                    )
+                stats[f"{metric_prefix}/elite_child_rate"] = round(
+                    reduced[f"{covariance_prefix}_elite_child_count"] / covariance_count,
+                    6,
+                )
+                stats[f"{metric_prefix}/degenerate_scalar_contrast_rate"] = round(
+                    reduced[f"{covariance_prefix}_degenerate_count"] / covariance_count,
+                    6,
+                )
 
         if ga_samples:
             stats["ga/samples"] = ga_samples

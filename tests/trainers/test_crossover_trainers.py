@@ -21,7 +21,10 @@ import torch
 from flow_factory.hparams import CrossoverArguments
 from flow_factory.hparams.args import Arguments
 from flow_factory.samples import BaseSample
-from flow_factory.trainers.crossover.genetic_algorithm import GeneticAlgorithm
+from flow_factory.trainers.crossover.genetic_algorithm import (
+    GeneticAlgorithm,
+    _format_covariance_selection_log,
+)
 from flow_factory.trainers.crossover_grpo_guard import CrossoverGRPOGuardTrainer
 from flow_factory.trainers.crossover_nft import CrossoverNFTTrainer
 from flow_factory.trainers.grpo import GRPOGuardTrainer
@@ -472,3 +475,80 @@ def test_ga_distributed_stats_reduce_uses_float32():
 
     assert accelerator.reduced_dtype == torch.float32
     assert stats["ga/n_groups"] == 2
+
+
+def test_cov_per_sample_console_log_uses_selection_specific_metrics():
+    line = _format_covariance_selection_log(
+        {
+            "branch": "cov_per_sample",
+            "elite_id": 3,
+            "frozen_score": 0.25,
+            "lower_bound": 0.2,
+            "approximation_gap": 0.05,
+            "score": -0.1,
+            "scalar_variance": 1.5,
+            "degenerate_scalar_contrast": False,
+        },
+        n_pop=2,
+    )
+
+    assert "selection=cov_per_sample" in line
+    assert "elite=child:3" in line
+    assert "frozen_J=0.25" in line
+    assert "lower_bound=0.2" in line
+    assert "gap=0.05" in line
+    assert "true_J=-0.1" in line
+    assert "degenerate_scalar_contrast=False" in line
+    assert "degenerate_fallback" not in line
+
+
+def test_group_covariance_console_log_remains_backward_compatible():
+    line = _format_covariance_selection_log(
+        {
+            "branch": "prune",
+            "score": 0.3,
+            "scalar_variance": 2.0,
+            "degenerate_fallback": False,
+        },
+        n_pop=2,
+    )
+
+    assert line == "covariance=prune J=0.3 variance=2 degenerate_fallback=False"
+
+
+def test_cov_per_sample_stats_reduce_to_float32_platform_metrics():
+    class DtypeCheckingAccelerator:
+        num_processes = 2
+        device = torch.device("cpu")
+
+        def reduce(self, tensor, reduction):
+            assert reduction == "sum"
+            assert tensor.dtype == torch.float32
+            return tensor * self.num_processes
+
+    stats = GeneticAlgorithm.reduce_stats(
+        ga_acc={
+            "n_groups": 2,
+            "gen0_count": 2,
+            "gen0_cov_per_sample_count": 2,
+            "gen0_cov_per_sample_frozen_score_sum": 3.0,
+            "gen0_cov_per_sample_lower_bound_sum": 2.0,
+            "gen0_cov_per_sample_approximation_gap_sum": 1.0,
+            "gen0_cov_per_sample_true_score_sum": 0.5,
+            "gen0_cov_per_sample_true_score_count": 1,
+            "gen0_cov_per_sample_scalar_variance_sum": 4.0,
+            "gen0_cov_per_sample_elite_child_count": 1,
+            "gen0_cov_per_sample_degenerate_count": 1,
+        },
+        ga_samples=[],
+        accelerator=DtypeCheckingAccelerator(),
+    )
+
+    prefix = "ga/gen0/cov_per_sample"
+    assert stats[f"{prefix}/frozen_score"] == pytest.approx(1.5)
+    assert stats[f"{prefix}/lower_bound"] == pytest.approx(1.0)
+    assert stats[f"{prefix}/approximation_gap"] == pytest.approx(0.5)
+    assert stats[f"{prefix}/true_score"] == pytest.approx(0.5)
+    assert stats[f"{prefix}/scalar_variance"] == pytest.approx(2.0)
+    assert stats[f"{prefix}/elite_child_rate"] == pytest.approx(0.5)
+    assert stats[f"{prefix}/degenerate_scalar_contrast_rate"] == pytest.approx(0.5)
