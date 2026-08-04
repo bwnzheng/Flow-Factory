@@ -61,7 +61,11 @@ from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
 from ...utils.logger_utils import setup_logger
 from .abc import BaseCrossover
-from .covariance import population_covariance, select_covariance_guided_group
+from .covariance import (
+    population_covariance,
+    select_covariance_guided_group,
+    select_sample_wise_covariance_group,
+)
 from .pareto import compute_pareto_mask
 from .sampling import run_denoising_phase
 
@@ -165,18 +169,26 @@ class GeneticAlgorithm:
                 f"'sum' or 'gdpo'; got {self._advantage_aggregation!r}."
             )
         self._survivor_score = training_args.crossover.survivor_score
-        if self._survivor_score not in {"advantage", "abs_advantage", "covariance"}:
+        if self._survivor_score not in {
+            "advantage",
+            "abs_advantage",
+            "covariance",
+            "cov_per_sample",
+        }:
             raise ValueError(
                 "crossover.survivor_score must be 'advantage', 'abs_advantage', "
-                "or 'covariance'; "
+                "'covariance', or 'cov_per_sample'; "
                 f"got {self._survivor_score!r}."
             )
-        if self._survivor_score == "covariance" and not self._reward_weights:
+        if self._survivor_score in {"covariance", "cov_per_sample"} and not self._reward_weights:
             raise ValueError(
-                "crossover.survivor_score='covariance' requires configured reward weights."
+                f"crossover.survivor_score={self._survivor_score!r} requires configured "
+                "reward weights."
             )
         self._survivor_selection_aggregation = (
-            "weighted_sum" if self._survivor_score == "covariance" else self._advantage_aggregation
+            "weighted_sum"
+            if self._survivor_score in {"covariance", "cov_per_sample"}
+            else self._advantage_aggregation
         )
         trainer_type = str(getattr(training_args, "trainer_type", "")).lower()
         self._covariance_objective = (
@@ -884,28 +896,60 @@ class GeneticAlgorithm:
         pareto_indices = np.where(pareto)[0]
         K = self._group_size
         covariance_stats = None
-        if self._survivor_score == "covariance":
+        if self._survivor_score in {"covariance", "cov_per_sample"}:
             reward_matrix, weights = self._prepare_covariance_inputs(
                 combined_rewards, valid_reward_keys, source
             )
-            covariance_fallback = np.abs(
-                self._compute_weighted_sum_advantage(combined_rewards, valid_reward_keys, source)
-            )
-            selection = select_covariance_guided_group(
-                reward_matrix=reward_matrix,
-                weights=weights,
-                target_size=K,
-                objective=self._covariance_objective,
-                fallback_scores=covariance_fallback,
-                candidate_ids=np.arange(len(combined_adv)),
-            )
+            if self._survivor_score == "covariance":
+                covariance_fallback = np.abs(
+                    self._compute_weighted_sum_advantage(
+                        combined_rewards, valid_reward_keys, source
+                    )
+                )
+                selection = select_covariance_guided_group(
+                    reward_matrix=reward_matrix,
+                    weights=weights,
+                    target_size=K,
+                    objective=self._covariance_objective,
+                    fallback_scores=covariance_fallback,
+                    candidate_ids=np.arange(len(combined_adv)),
+                )
+                sample_wise_stats = {}
+                branch = selection.branch
+                degenerate_fallback = selection.degenerate_fallback
+            else:
+                selection = select_sample_wise_covariance_group(
+                    reward_matrix=reward_matrix,
+                    weights=weights,
+                    target_size=K,
+                    objective=self._covariance_objective,
+                    candidate_ids=np.arange(len(combined_adv)),
+                )
+                sample_scores = selection.sample_scores
+                sample_wise_stats = {
+                    "elite_id": selection.elite_index,
+                    "pool_mean_rewards": sample_scores.pool_mean.tolist(),
+                    "scalar_rewards": sample_scores.scalar_rewards.tolist(),
+                    "scalar_advantages": sample_scores.scalar_advantages.tolist(),
+                    "sample_contributions": sample_scores.contribution_matrix.tolist(),
+                    "sample_fitness": sample_scores.fitness.tolist(),
+                    "frozen_contribution_vector": selection.frozen_contribution_vector.tolist(),
+                    "frozen_score": selection.frozen_score,
+                    "lower_bound": selection.lower_bound,
+                    "approximation_gap": selection.frozen_score - selection.lower_bound,
+                    "degenerate_scalar_contrast": sample_scores.degenerate_scalar_contrast,
+                }
+                branch = "cov_per_sample"
+                degenerate_fallback = False
             keep_indices = selection.selected_indices
-            n_filled = max(0, K - len(pareto_indices))
+            n_filled = (
+                max(0, K - len(pareto_indices)) if self._survivor_score == "covariance" else 0
+            )
             before_covariance = population_covariance(reward_matrix)
             group_score = selection.group_score
             finite_score = np.isfinite(group_score.score)
             covariance_stats = {
-                "branch": selection.branch,
+                "branch": branch,
                 "selected_ids": keep_indices.tolist(),
                 "rejected_ids": selection.rejected_indices.tolist(),
                 "raw_rewards": np.stack(
@@ -922,9 +966,10 @@ class GeneticAlgorithm:
                 "normalized_covariance_conflict": (
                     max(0.0, -group_score.score) if finite_score else None
                 ),
-                "degenerate_fallback": selection.degenerate_fallback,
+                "degenerate_fallback": degenerate_fallback,
                 "selection_aggregation": self._survivor_selection_aggregation,
                 "policy_advantage_aggregation": self._advantage_aggregation,
+                **sample_wise_stats,
             }
         else:
             score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)

@@ -104,14 +104,15 @@ class CrossoverArguments(ArgABC):
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
-    survivor_score: Literal["advantage", "abs_advantage", "covariance"] = field(
+    survivor_score: Literal["advantage", "abs_advantage", "covariance", "cov_per_sample"] = field(
         default="advantage",
         metadata={
             "help": (
-                "Score used to rank candidates when the Pareto set must be trimmed or filled. "
+                "Environmental-selection score for the merged parent-offspring pool. "
                 "'advantage' prefers high-fitness samples; 'abs_advantage' also preserves "
-                "strong negative samples; 'covariance' greedily maximizes the weakest active "
-                "reward contribution of each hypothetical survivor group."
+                "strong negative samples; 'covariance' greedily scores complete "
+                "Pareto-guided groups; 'cov_per_sample' preserves one scalar elite and "
+                "fills remaining slots by frozen-pool per-sample covariance contribution."
             )
         },
     )

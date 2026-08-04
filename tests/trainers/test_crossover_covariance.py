@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from itertools import combinations
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,7 +23,9 @@ from flow_factory.samples import BaseSample
 from flow_factory.trainers.crossover.covariance import (
     covariance_group_score,
     population_covariance,
+    sample_wise_covariance_contributions,
     select_covariance_guided_group,
+    select_sample_wise_covariance_group,
 )
 from flow_factory.trainers.crossover.genetic_algorithm import GeneticAlgorithm
 from flow_factory.trainers.crossover.pareto import compute_pareto_mask
@@ -446,3 +449,161 @@ def test_ga_rejects_missing_reward_weights_during_initialization():
             training_args=training_args,
             reward_buffer=None,
         )
+
+
+def test_sample_wise_concordant_pair_has_equal_positive_fitness():
+    scores = sample_wise_covariance_contributions(
+        np.array([[0.0, 0.0], [1.0, 1.0]]),
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(scores.contribution_matrix, [[0.5, 0.5], [0.5, 0.5]])
+    np.testing.assert_allclose(scores.fitness, [0.5, 0.5])
+    assert not scores.degenerate_scalar_contrast
+
+
+def test_sample_wise_equal_scalar_specialists_are_degenerate():
+    scores = sample_wise_covariance_contributions(
+        np.array([[1.0, 0.0], [0.0, 1.0]]),
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(scores.scalar_advantages, 0.0)
+    np.testing.assert_allclose(scores.contribution_matrix, 0.0)
+    np.testing.assert_allclose(scores.fitness, 0.0)
+    assert scores.degenerate_scalar_contrast
+
+
+def test_sample_wise_candidate_at_pool_mean_has_zero_contribution():
+    scores = sample_wise_covariance_contributions(
+        np.array([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]),
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(scores.centered_rewards[1], 0.0)
+    assert scores.scalar_advantages[1] == pytest.approx(0.0)
+    np.testing.assert_allclose(scores.contribution_matrix[1], 0.0)
+    assert scores.fitness[1] == pytest.approx(0.0)
+
+
+def test_sample_wise_selected_frozen_score_respects_lower_bound():
+    rng = np.random.default_rng(7)
+    rewards = rng.normal(size=(20, 4))
+    result = select_sample_wise_covariance_group(
+        rewards,
+        np.array([0.1, 0.2, 0.3, 0.4]),
+        target_size=7,
+        objective="standardized_grpo",
+    )
+
+    assert result.frozen_score >= result.lower_bound - 1e-12
+
+
+def test_sample_wise_top_k_maximizes_conditional_lower_bound():
+    rewards = np.array([[10.0, 0.0], [4.0, 4.0], [0.0, 0.0], [3.0, 3.0], [2.0, 5.0]])
+    target_size = 3
+    result = select_sample_wise_covariance_group(
+        rewards,
+        np.ones(2),
+        target_size=target_size,
+        objective="standardized_grpo",
+    )
+    elite = result.elite_index
+    fitness = result.sample_scores.fitness
+    selected_lower_bound = float(np.mean(fitness[result.selected_indices]))
+    alternatives = [index for index in range(len(rewards)) if index != elite]
+    oracle = max(
+        float(np.mean(fitness[[elite, *subset]]))
+        for subset in combinations(alternatives, target_size - 1)
+    )
+
+    assert selected_lower_bound == pytest.approx(oracle)
+
+
+def test_sample_wise_selector_is_translation_scaling_and_permutation_invariant():
+    rewards = np.array([[1.0, 0.0], [0.0, 1.0], [0.8, 0.8], [0.3, 0.3]])
+    weights = np.array([0.4, 0.6])
+    candidate_ids = np.array([10, 11, 12, 13])
+    original = select_sample_wise_covariance_group(
+        rewards,
+        weights,
+        2,
+        "standardized_grpo",
+        candidate_ids,
+    )
+    permutation = np.array([2, 0, 3, 1])
+    transformed = select_sample_wise_covariance_group(
+        (rewards[permutation] + np.array([8.0, -3.0])) * 7.0,
+        weights,
+        2,
+        "standardized_grpo",
+        candidate_ids[permutation],
+    )
+
+    np.testing.assert_array_equal(
+        candidate_ids[original.selected_indices],
+        candidate_ids[permutation][transformed.selected_indices],
+    )
+
+
+def test_sample_wise_selector_always_retains_scalar_elite():
+    rewards = np.array([[10.0, 0.0], [4.0, 4.0], [0.0, 0.0], [3.0, 3.0]])
+    result = select_sample_wise_covariance_group(
+        rewards,
+        np.ones(2),
+        2,
+        "standardized_grpo",
+    )
+    contribution_only = np.argsort(result.sample_scores.fitness)[::-1][:2]
+
+    assert result.elite_index == 0
+    assert result.elite_index in result.selected_indices
+    assert result.elite_index not in contribution_only
+
+
+def test_ga_cov_per_sample_selection_exposes_frozen_and_true_diagnostics():
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._group_size = 2
+    ga._advantage_aggregation = "sum"
+    ga._survivor_score = "cov_per_sample"
+    ga._survivor_selection_aggregation = "weighted_sum"
+    ga._covariance_objective = "standardized_grpo"
+    ga._reward_weights = {
+        "quality": {"default": 1.0},
+        "safety": {"default": 1.0},
+    }
+    population = [BaseSample(), BaseSample()]
+    children = [BaseSample(), BaseSample()]
+    pop_rewards = {
+        "quality": np.array([10.0, 4.0]),
+        "safety": np.array([0.0, 4.0]),
+    }
+    child_rewards = {
+        "quality": np.array([0.0, 3.0]),
+        "safety": np.array([0.0, 3.0]),
+    }
+
+    survivors, _, stats = ga._select_survivors(
+        population,
+        children,
+        pop_rewards,
+        child_rewards,
+        ["quality", "safety"],
+        ["quality", "safety"],
+        None,
+    )
+
+    diagnostics = stats["covariance_selection"]
+    assert len(survivors) == 2
+    assert diagnostics["branch"] == "cov_per_sample"
+    assert diagnostics["elite_id"] == 0
+    assert diagnostics["elite_id"] in diagnostics["selected_ids"]
+    assert len(diagnostics["sample_fitness"]) == 4
+    assert diagnostics["frozen_score"] >= diagnostics["lower_bound"] - 1e-12
+    assert np.asarray(diagnostics["covariance_after"]).shape == (2, 2)
+
+
+def test_crossover_arguments_parse_cov_per_sample_configuration():
+    args = CrossoverArguments.from_dict({"survivor_score": "cov_per_sample"})
+
+    assert args.survivor_score == "cov_per_sample"

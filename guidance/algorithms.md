@@ -192,7 +192,7 @@ train:
     augmentation_factor: 1.25
     parent_ratio: 0.25
     mutation_std: 0.05
-    survivor_score: covariance  # Options: advantage, abs_advantage, covariance
+    survivor_score: cov_per_sample  # Options: advantage, abs_advantage, covariance, cov_per_sample
 scheduler:
   dynamics_type: Flow-SDE
 ```
@@ -206,15 +206,29 @@ pruned backward; undersized fronts retain every non-dominated candidate and are
 filled forward from the dominated pool. This is a group-level subset score, so
 the covariance is recomputed for every hypothetical add or removal.
 
-Covariance selection operates directly on the raw outputs of the configured
-reward models and uses their existing source-aware training weights. Those
+`cov_per_sample` is the scalar-elitist, sample-wise approximation. It merges
+parents and offspring, freezes the merged pool's reward and scalar-reward
+means, and computes each candidate's weakest active reward contribution
+`min_k w_k (r_ik - mean_k) (R_i - mean_R)` exactly once. The highest scalar
+reward candidate is always retained; the remaining `group_size - 1` slots are
+filled by descending contribution fitness, then scalar reward, then stable
+candidate ID. This path does not apply Pareto filtering or recompute covariance
+for hypothetical subsets. It logs both the frozen-reference lower-bound
+diagnostics and the true recentered covariance of the selected group.
+
+Both covariance strategies operate directly on the raw outputs of the configured
+reward models and use their existing source-aware training weights. Those
 weights therefore define both the preference vector and the calibration across
 reward units. A fixed positive affine rescaling of one reward does not change
 the method when its weight is transformed inversely; selector-only bounds would
 cancel algebraically and are not required. Do not z-score rewards separately
 per prompt before selection, because that changes the intended reward geometry.
+For `cov_per_sample`, reward units directly affect candidate ranking, so use
+fixed run-wide reward calibration or source-aware weights that compensate for
+known scale differences; never estimate normalization statistics separately
+for each prompt pool.
 
-The selector requires at least two rewards with positive weights. Covariance
+The selectors require at least two rewards with positive weights. Covariance
 selection always uses a fixed weighted sum of raw rewards, independently of the
 policy-side `advantage_aggregation`, `stddev_reweighting`, and `global_std`
 settings. A zero-variance comparison falls back deterministically to absolute

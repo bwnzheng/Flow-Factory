@@ -20,9 +20,13 @@ from .abc import BaseCrossover, CrossoverOutput
 from .covariance import (
     CovarianceGroupScore,
     CovarianceSelectionResult,
+    SampleWiseContributionScore,
+    SampleWiseCovarianceSelectionResult,
     covariance_group_score,
     population_covariance,
+    sample_wise_covariance_contributions,
     select_covariance_guided_group,
+    select_sample_wise_covariance_group,
 )
 from .genetic_algorithm import GeneticAlgorithm
 from .pareto import (
@@ -51,6 +55,8 @@ __all__ = [
     "CovarianceSelectionResult",
     "CrossoverOutput",
     "GeneticAlgorithm",
+    "SampleWiseContributionScore",
+    "SampleWiseCovarianceSelectionResult",
     "UniformCrossover",
     "compute_pareto_mask",
     "covariance_group_score",
@@ -61,6 +67,8 @@ __all__ = [
     "resolve_crossover_step",
     "run_denoising_phase",
     "sample_crossover_step",
+    "sample_wise_covariance_contributions",
     "select_covariance_guided_group",
+    "select_sample_wise_covariance_group",
     "select_non_dominated_parents",
 ]
