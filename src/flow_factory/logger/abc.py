@@ -12,20 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/logger/abc.py
 import json
 import os
 import pickle
-import imageio
-import numpy as np
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
+import imageio
+import numpy as np
+import torch
 from PIL import Image as PILImage
 
 from ..hparams import *
-from .formatting import LogFormatter, LogImage, LogVideo, LogTable
+from .formatting import LogFormatter, LogImage, LogTable, LogVideo
 
 
 class Logger(ABC):
@@ -180,10 +180,17 @@ class Logger(ABC):
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     def _strip_media(self, value: Any) -> Any:
-        """Strip LogImage/LogVideo from nested structures, returning None for empty."""
+        """Strip media and normalize nested values for JSON serialization."""
         if isinstance(value, (LogImage, LogVideo)):
             return None
-        if isinstance(value, list):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return self._strip_media(value.tolist())
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach().cpu()
+            return tensor.item() if tensor.ndim == 0 else self._strip_media(tensor.tolist())
+        if isinstance(value, (list, tuple)):
             result = [self._strip_media(v) for v in value]
             result = [v for v in result if v is not None]
             return result if result else None

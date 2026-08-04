@@ -118,7 +118,7 @@ def covariance_group_score(
     variance_tolerance, _ = _scalar_tolerances(matrix, weight_vector)
 
     if objective in {"standardized_grpo", "locally_linear_nft"}:
-        degenerate = scalar_variance <= variance_tolerance
+        degenerate = bool(scalar_variance <= variance_tolerance)
         if degenerate:
             contribution = np.full(int(active.sum()), np.nan, dtype=np.float64)
             score = float("-inf")
@@ -172,7 +172,7 @@ def sample_wise_covariance_contributions(
         scalar_advantages=scalar_advantages,
         contribution_matrix=contributions,
         fitness=fitness,
-        degenerate_scalar_contrast=scalar_variance <= variance_tolerance,
+        degenerate_scalar_contrast=bool(scalar_variance <= variance_tolerance),
     )
 
 

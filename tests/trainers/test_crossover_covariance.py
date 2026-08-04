@@ -40,7 +40,7 @@ def test_concordant_pair_has_equal_grpo_contributions():
 
     np.testing.assert_allclose(score.contribution_vector, [0.5, 0.5])
     assert score.score == pytest.approx(0.5)
-    assert not score.degenerate
+    assert score.degenerate is False
 
 
 def test_equal_scalar_reward_specialists_are_degenerate():
@@ -50,7 +50,7 @@ def test_equal_scalar_reward_specialists_are_degenerate():
         "standardized_grpo",
     )
 
-    assert score.degenerate
+    assert score.degenerate is True
     assert score.score == float("-inf")
     assert np.isnan(score.contribution_vector).all()
 
@@ -459,7 +459,7 @@ def test_sample_wise_concordant_pair_has_equal_positive_fitness():
 
     np.testing.assert_allclose(scores.contribution_matrix, [[0.5, 0.5], [0.5, 0.5]])
     np.testing.assert_allclose(scores.fitness, [0.5, 0.5])
-    assert not scores.degenerate_scalar_contrast
+    assert scores.degenerate_scalar_contrast is False
 
 
 def test_sample_wise_equal_scalar_specialists_are_degenerate():
@@ -471,7 +471,7 @@ def test_sample_wise_equal_scalar_specialists_are_degenerate():
     np.testing.assert_allclose(scores.scalar_advantages, 0.0)
     np.testing.assert_allclose(scores.contribution_matrix, 0.0)
     np.testing.assert_allclose(scores.fitness, 0.0)
-    assert scores.degenerate_scalar_contrast
+    assert scores.degenerate_scalar_contrast is True
 
 
 def test_sample_wise_candidate_at_pool_mean_has_zero_contribution():

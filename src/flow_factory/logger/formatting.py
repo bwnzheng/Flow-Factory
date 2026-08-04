@@ -962,7 +962,7 @@ class LogFormatter:
     @classmethod
     def is_numerical(cls, value: Any) -> bool:
         """Check if value is a single numerical scalar (int, float, or 0-dim tensor/array)."""
-        if isinstance(value, (int, float, complex, np.number)):
+        if isinstance(value, (int, float, complex, np.number, np.bool_)):
             return True
         if isinstance(value, torch.Tensor) and value.ndim == 0:
             return True
@@ -986,6 +986,8 @@ class LogFormatter:
     def to_scalar(cls, value: Any) -> Optional[Union[int, float]]:
         """Convert numerical value/collection to scalar. Returns None if not numerical."""
         if cls.is_numerical(value):
+            if isinstance(value, (bool, np.bool_)):
+                return bool(value)
             if isinstance(value, int):  # Keep int as int
                 return value
             if isinstance(value, torch.Tensor):

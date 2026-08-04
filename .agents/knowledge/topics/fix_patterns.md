@@ -126,6 +126,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Pareto dominance is a strict partial order, and sorting by one objective only permits one-direction pruning when ties in that objective are handled explicitly. A direct definition is safer for the small genetic candidate pools used here.
 - **Related Constraint**: N/A
 
+### Nested GA diagnostics contained non-JSON NumPy scalars
+- **Date**: 2026-08-04
+- **Symptom**: Crossover NFT crashed while writing `metrics.jsonl` with `TypeError: Object of type bool_ is not JSON serializable` after `cov_per_sample` diagnostics were added.
+- **Root Cause**: `LogFormatter` normalizes top-level numerical values but intentionally leaves ordinary nested dictionaries unchanged, while `Logger._strip_media()` removed media without converting nested NumPy scalars, arrays, or tensors to JSON-native values.
+- **Fix**: `logger/abc.py` now recursively converts NumPy scalars and arrays plus scalar/vector tensors at the JSON boundary; `logger/formatting.py` recognizes top-level `np.bool_`; the covariance producer also casts its degeneracy flag to a Python `bool`. Regression tests cover nested `np.bool_`, integer/float NumPy scalars, arrays, and tensors.
+- **Lesson**: Algorithm diagnostics should emit Python-native values when practical, but the persistence boundary must still normalize nested scientific-computing types because ordinary diagnostics dictionaries bypass top-level metric formatting.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
