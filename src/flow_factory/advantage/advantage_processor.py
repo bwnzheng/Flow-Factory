@@ -1485,15 +1485,10 @@ class AdvantageProcessor:
             n_c = int(c_mask.sum())
             sum_c = float(arr[c_mask].sum()) if n_c > 0 else 0.0
             sum_sq_c = float((arr[c_mask] ** 2).sum()) if n_c > 0 else 0.0
-            # child_better: children exceeding the local parent mean
-            better = 0.0
-            if n_p > 0 and n_c > 0:
-                parent_mean = sum_p / n_p
-                better = float((arr[c_mask] > parent_mean).sum())
 
             if do_reduce:
                 t = torch.tensor(
-                    [n_p, sum_p, sum_sq_p, n_c, sum_c, sum_sq_c, better],
+                    [n_p, sum_p, sum_sq_p, n_c, sum_c, sum_sq_c],
                     device=self.accelerator.device,
                     dtype=torch.float32,
                 )
@@ -1504,20 +1499,31 @@ class AdvantageProcessor:
                 n_c = int(t[3].item())
                 sum_c = t[4].item()
                 sum_sq_c = t[5].item()
-                better = t[6].item()
+
+            better = 0.0
+            if n_p > 0 and n_c > 0:
+                parent_mean = sum_p / n_p
+                better = float((arr[c_mask] > parent_mean).sum())
+                if do_reduce:
+                    better_tensor = torch.tensor(
+                        [better], device=self.accelerator.device, dtype=torch.float32
+                    )
+                    better = self.accelerator.reduce(better_tensor, reduction="sum")[0].item()
 
             if n_p > 0:
                 mean_p = sum_p / n_p
                 var_p = max(sum_sq_p / n_p - mean_p**2, 1e-12)
-                stats[f"crossover/parent_{key}_mean"] = round(mean_p, 6)
-                stats[f"crossover/parent_{key}_std"] = round(var_p**0.5, 6)
+                stats[f"ga/final_population/parent/{key}/mean"] = round(mean_p, 6)
+                stats[f"ga/final_population/parent/{key}/std"] = round(var_p**0.5, 6)
             if n_c > 0:
                 mean_c = sum_c / n_c
                 var_c = max(sum_sq_c / n_c - mean_c**2, 1e-12)
-                stats[f"crossover/child_{key}_mean"] = round(mean_c, 6)
-                stats[f"crossover/child_{key}_std"] = round(var_c**0.5, 6)
+                stats[f"ga/final_population/child/{key}/mean"] = round(mean_c, 6)
+                stats[f"ga/final_population/child/{key}/std"] = round(var_c**0.5, 6)
             if n_p > 0 and n_c > 0:
-                stats[f"crossover/child_better_{key}"] = round(better / n_c, 4)
+                stats[f"ga/final_population/child/{key}/better_than_parent_mean_rate"] = round(
+                    better / n_c, 4
+                )
 
         self._pending_crossover_stats = stats
 

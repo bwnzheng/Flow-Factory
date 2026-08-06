@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 
+from flow_factory.advantage import AdvantageProcessor
 from flow_factory.hparams import (
     CrossoverArguments,
     CrossoverGRPOGuardTrainingArguments,
@@ -509,7 +510,7 @@ def test_ga_distributed_stats_reduce_uses_float32():
     accelerator = DtypeCheckingAccelerator()
     stats = GeneticAlgorithm.reduce_stats(
         ga_acc={"n_groups": 1, "gen0_count": 1},
-        ga_samples=[],
+        ga_selection_events=[],
         accelerator=accelerator,
     )
 
@@ -580,7 +581,7 @@ def test_cov_per_sample_stats_reduce_to_float32_platform_metrics():
             "gen0_cov_per_sample_elite_child_count": 1,
             "gen0_cov_per_sample_degenerate_count": 1,
         },
-        ga_samples=[],
+        ga_selection_events=[],
         accelerator=DtypeCheckingAccelerator(),
     )
 
@@ -592,3 +593,158 @@ def test_cov_per_sample_stats_reduce_to_float32_platform_metrics():
     assert stats[f"{prefix}/scalar_variance"] == pytest.approx(2.0)
     assert stats[f"{prefix}/elite_child_rate"] == pytest.approx(0.5)
     assert stats[f"{prefix}/degenerate_scalar_contrast_rate"] == pytest.approx(0.5)
+
+
+def test_ga_stats_use_global_sample_denominators_and_preserve_raw_events():
+    class SingleProcessAccelerator:
+        num_processes = 1
+        device = torch.device("cpu")
+
+    raw_event = {"rank": 0, "gid": 4, "gen": 0}
+    stats = GeneticAlgorithm.reduce_stats(
+        ga_acc={
+            "n_groups": 1,
+            "gen0_count": 1,
+            "gen0_n_pop": 2,
+            "gen0_n_children": 1,
+            "gen0_quality_pop_sum": 3.0,
+            "gen0_quality_pop_sum_sq": 5.0,
+            "gen0_quality_child_sum": 4.0,
+            "gen0_quality_child_sum_sq": 16.0,
+            "gen0_quality_new_sum": 6.0,
+            "gen0_quality_new_sum_sq": 20.0,
+        },
+        ga_selection_events=[raw_event],
+        accelerator=SingleProcessAccelerator(),
+    )
+
+    assert stats["ga/gen0/quality/pop_mean"] == pytest.approx(1.5)
+    assert stats["ga/gen0/quality/pop_std"] == pytest.approx(0.5)
+    assert stats["ga/gen0/quality/child_mean"] == pytest.approx(4.0)
+    assert stats["ga/gen0/quality/child_std"] == pytest.approx(0.0)
+    assert stats["ga/gen0/quality/new_mean"] == pytest.approx(3.0)
+    assert stats["ga/gen0/quality/new_std"] == pytest.approx(1.0)
+    assert stats["ga/raw_selections"] == [raw_event]
+    assert "ga/samples" not in stats
+
+
+def test_ga_stats_gather_raw_selection_events_from_every_rank(monkeypatch):
+    class TwoProcessAccelerator:
+        num_processes = 2
+        device = torch.device("cpu")
+
+        def reduce(self, tensor, reduction):
+            assert reduction == "sum"
+            return tensor * self.num_processes
+
+    local_event = {
+        "rank": 0,
+        "gid": 4,
+        "gen": 0,
+        "selection_scores": np.asarray([1.0, 2.0], dtype=np.float64),
+        "diagnostics": {
+            "gap": np.float64(0.25),
+            "weights": [0.5, torch.tensor([0.75], dtype=torch.float64)],
+        },
+    }
+    gathered = [
+        local_event,
+        {"rank": 1, "gid": 9, "gen": 0},
+    ]
+
+    captured = {}
+
+    def fake_gather_object(local_events):
+        captured["local_events"] = local_events
+        return [*local_events, gathered[1]]
+
+    monkeypatch.setattr(
+        "flow_factory.trainers.crossover.genetic_algorithm.gather_object",
+        fake_gather_object,
+    )
+
+    stats = GeneticAlgorithm.reduce_stats(
+        ga_acc={"n_groups": 1, "gen0_count": 1},
+        ga_selection_events=[local_event],
+        accelerator=TwoProcessAccelerator(),
+    )
+
+    gathered_local = captured["local_events"][0]
+    assert gathered_local["selection_scores"].dtype == np.float32
+    assert isinstance(gathered_local["diagnostics"]["gap"], np.float32)
+    assert isinstance(gathered_local["diagnostics"]["weights"][0], np.float32)
+    gathered_tensor = gathered_local["diagnostics"]["weights"][1]
+    assert gathered_tensor.dtype == torch.float32
+    assert gathered_tensor.device.type == "cpu"
+
+    assert len(stats["ga/raw_selections"]) == 2
+    assert {event["rank"] for event in stats["ga/raw_selections"]} == {0, 1}
+
+
+def test_final_population_crossover_metrics_share_ga_namespace():
+    processor = AdvantageProcessor.__new__(AdvantageProcessor)
+    processor.accelerator = SimpleNamespace(num_processes=1)
+    processor.group_on_same_rank = True
+    processor._pending_crossover_stats = None
+    samples = [
+        BaseSample(extra_kwargs={"is_crossover_child": False}),
+        BaseSample(extra_kwargs={"is_crossover_child": False}),
+        BaseSample(extra_kwargs={"is_crossover_child": True}),
+        BaseSample(extra_kwargs={"is_crossover_child": True}),
+    ]
+
+    processor._build_crossover_stats(
+        gathered_rewards={"quality": np.asarray([1.0, 3.0, 2.0, 4.0], dtype=np.float32)},
+        group_indices=np.zeros(4, dtype=np.int64),
+        samples=samples,
+    )
+
+    assert processor._pending_crossover_stats == {
+        "ga/final_population/parent/quality/mean": 2.0,
+        "ga/final_population/parent/quality/std": 1.0,
+        "ga/final_population/child/quality/mean": 3.0,
+        "ga/final_population/child/quality/std": 1.0,
+        "ga/final_population/child/quality/better_than_parent_mean_rate": 0.5,
+    }
+    assert not any(key.startswith("crossover/") for key in processor._pending_crossover_stats)
+
+
+def test_final_population_child_rate_uses_global_parent_mean_and_float32_reduce():
+    class TwoProcessAccelerator:
+        num_processes = 2
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.reduce_dtypes = []
+
+        def reduce(self, tensor, reduction):
+            assert reduction == "sum"
+            self.reduce_dtypes.append(tensor.dtype)
+            if tensor.numel() == 6:
+                return torch.tensor([2, 6, 20, 2, 8, 34], dtype=torch.float32)
+            assert tensor.numel() == 1
+            return torch.tensor([1], dtype=torch.float32)
+
+    accelerator = TwoProcessAccelerator()
+    processor = AdvantageProcessor.__new__(AdvantageProcessor)
+    processor.accelerator = accelerator
+    processor.group_on_same_rank = True
+    processor._pending_crossover_stats = None
+
+    processor._build_crossover_stats(
+        gathered_rewards={"quality": np.asarray([1.0, 3.0], dtype=np.float32)},
+        group_indices=np.zeros(2, dtype=np.int64),
+        samples=[
+            BaseSample(extra_kwargs={"is_crossover_child": False}),
+            BaseSample(extra_kwargs={"is_crossover_child": True}),
+        ],
+    )
+
+    assert processor._pending_crossover_stats == {
+        "ga/final_population/parent/quality/mean": 3.0,
+        "ga/final_population/parent/quality/std": 1.0,
+        "ga/final_population/child/quality/mean": 4.0,
+        "ga/final_population/child/quality/std": 1.0,
+        "ga/final_population/child/quality/better_than_parent_mean_rate": 0.5,
+    }
+    assert accelerator.reduce_dtypes == [torch.float32, torch.float32]

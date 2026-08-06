@@ -178,7 +178,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
             t_ga = time.time()
             with self.sampling_context():
-                evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
+                evolved_samples, evolved_rewards, ga_acc, ga_selection_events = self._ga.evolve(
                     parent_samples=samples,
                     parent_rewards=rewards,
                     applicable=applicable,
@@ -200,7 +200,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
             self.accelerator.wait_for_everyone()
 
             # Reduce GA stats across ranks
-            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_samples, self.accelerator)
+            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_selection_events, self.accelerator)
             if ga_stats and self.accelerator.is_main_process:
                 self.log_data(ga_stats, step=self.step)
 

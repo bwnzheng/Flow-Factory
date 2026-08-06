@@ -601,6 +601,15 @@ def test_ga_cov_per_sample_selection_exposes_frozen_and_true_diagnostics():
     assert len(diagnostics["sample_fitness"]) == 4
     assert diagnostics["frozen_score"] >= diagnostics["lower_bound"] - 1e-12
     assert np.asarray(diagnostics["covariance_after"]).shape == (2, 2)
+    event = stats["selection_event"]
+    assert event["survivor_score"] == "cov_per_sample"
+    assert event["reward_keys"] == ["quality", "safety"]
+    assert event["valid_reward_keys"] == ["quality", "safety"]
+    assert event["candidate_origin"] == ["population", "population", "child", "child"]
+    np.testing.assert_array_equal(event["candidate_ids"], np.arange(4))
+    np.testing.assert_array_equal(event["selected_ids"], diagnostics["selected_ids"])
+    np.testing.assert_allclose(event["selection_scores"], diagnostics["sample_fitness"])
+    np.testing.assert_allclose(event["candidate_rewards"]["quality"], [10.0, 4.0, 0.0, 3.0])
 
 
 def test_crossover_arguments_parse_cov_per_sample_configuration():

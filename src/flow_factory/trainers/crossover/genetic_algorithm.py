@@ -56,6 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import tqdm as tqdm_
+from accelerate.utils.operations import gather_object
 
 from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
@@ -307,10 +308,10 @@ class GeneticAlgorithm:
                 (single-source / homogeneous training).
 
         Returns:
-            ``(evolved_samples, evolved_rewards, ga_stats, ga_samples)``.
+            ``(evolved_samples, evolved_rewards, ga_stats, ga_selection_events)``.
             *ga_stats* is a dict of per-generation accumulators (to be
-            reduced across ranks).  *ga_samples* is a list of per-sample
-            reward records.
+            reduced across ranks). *ga_selection_events* contains one raw,
+            replayable selection record per group and generation.
         """
         t_start = time.time()
         reward_keys = sorted(parent_rewards.keys())
@@ -342,6 +343,7 @@ class GeneticAlgorithm:
         acc: Dict[str, Any] = {"n_groups": 0}
         for gen in range(self._n_generations):
             acc[f"gen{gen}_count"] = 0
+            acc[f"gen{gen}_n_pop"] = 0
             for k in reward_keys:
                 acc[f"gen{gen}_{k}_pop_sum"] = 0.0
                 acc[f"gen{gen}_{k}_pop_sum_sq"] = 0.0
@@ -365,7 +367,7 @@ class GeneticAlgorithm:
                 acc[f"gen{gen}_cov_per_sample_scalar_variance_sum"] = 0.0
                 acc[f"gen{gen}_cov_per_sample_elite_child_count"] = 0
                 acc[f"gen{gen}_cov_per_sample_degenerate_count"] = 0
-        ga_samples: List[Dict[str, Any]] = []
+        ga_selection_events: List[Dict[str, Any]] = []
 
         gid_items = sorted(gid_to_indices.items())
         if verbose and rank == 0:
@@ -405,6 +407,20 @@ class GeneticAlgorithm:
                 )
                 if stats is None:
                     break
+
+                selection_event = stats.pop("selection_event")
+                ga_selection_events.append(
+                    {
+                        "epoch": int(epoch),
+                        "rank": int(rank),
+                        "gid": int(gid),
+                        "gen": gen_idx,
+                        "prompt": population[0].prompt,
+                        "source": population[0].source,
+                        "source_id": population[0].source_id,
+                        **selection_event,
+                    }
+                )
 
                 # ---- Log to console ----
                 _logged_keys = sorted(
@@ -447,6 +463,7 @@ class GeneticAlgorithm:
 
                 # ---- Accumulate aggregate stats ----
                 acc[f"gen{gen_idx}_count"] += 1
+                acc[f"gen{gen_idx}_n_pop"] += stats["n_pop"]
                 acc[f"gen{gen_idx}_n_replaced"] += stats["n_replaced"]
                 acc[f"gen{gen_idx}_n_children"] += stats["n_children"]
                 acc[f"gen{gen_idx}_n_children_kept"] += stats["n_children_kept"]
@@ -490,22 +507,6 @@ class GeneticAlgorithm:
                     acc[f"gen{gen_idx}_{k}_new_sum"] += new_m * n_pop
                     acc[f"gen{gen_idx}_{k}_new_sum_sq"] += (new_s**2 + new_m**2) * n_pop
 
-                # ---- Record per-sample rewards ----
-                for si in range(len(population)):
-                    sample_record = {
-                        "gen": gen_idx,
-                        "gid": int(gid),
-                        "rank": int(rank),
-                        "sample_idx": si,
-                        "is_child": bool(
-                            population[si].extra_kwargs.get("is_crossover_child", False)
-                        ),
-                        "rewards": {k: float(pop_rewards[k][si]) for k in reward_keys},
-                    }
-                    if si == 0 and "covariance_selection" in stats:
-                        sample_record["selection_diagnostics"] = stats["covariance_selection"]
-                    ga_samples.append(sample_record)
-
             all_evolved.extend(population)
             for k in reward_keys:
                 all_evolved_rewards[k].extend(pop_rewards[k].tolist())
@@ -524,7 +525,7 @@ class GeneticAlgorithm:
             k: torch.tensor(v, device=device, dtype=torch.float32)
             for k, v in all_evolved_rewards.items()
         }
-        return all_evolved, evolved_rewards_tensors, acc, ga_samples
+        return all_evolved, evolved_rewards_tensors, acc, ga_selection_events
 
     # ------------------------------------------------------------------
     # Generation step
@@ -555,6 +556,12 @@ class GeneticAlgorithm:
         """
         # 1. Compute advantage (only on valid reward dimensions)
         adv = self._compute_advantage(pop_rewards, valid_reward_keys, source)
+        parent_idx: Optional[np.ndarray] = None
+        parent_pareto_mask = (
+            compute_pareto_mask(np.stack([pop_rewards[key] for key in valid_reward_keys], axis=1))
+            if valid_reward_keys
+            else np.ones(len(population), dtype=bool)
+        )
 
         # 2–3. Generate children by offspring mode
         device = self.device
@@ -644,6 +651,20 @@ class GeneticAlgorithm:
             valid_reward_keys=valid_reward_keys,
             source=source,
         )
+
+        stats["selection_event"]["parent_selection"] = {
+            "applied": self._offspring_mode != "resample",
+            "advantages": adv.copy(),
+            "pareto_mask": parent_pareto_mask,
+            "selected_ids": (
+                parent_idx.astype(np.int64, copy=True)
+                if parent_idx is not None
+                else np.empty(0, dtype=np.int64)
+            ),
+        }
+        stats["selection_event"]["offspring"]["denoise_start"] = int(denoise_start)
+        stats["selection_event"]["offspring"]["strategy"] = ctx.strategy_name
+        stats["selection_event"]["offspring"]["mutation_std"] = self._mutation_std
 
         return population, pop_rewards, stats
 
@@ -965,6 +986,7 @@ class GeneticAlgorithm:
         pareto_indices = np.where(pareto)[0]
         K = self._group_size
         covariance_stats = None
+        selection_scores = None
         if self._survivor_score in {"covariance", "cov_per_sample"}:
             reward_matrix, weights = self._prepare_covariance_inputs(
                 combined_rewards, valid_reward_keys, source
@@ -1011,6 +1033,8 @@ class GeneticAlgorithm:
                 branch = "cov_per_sample"
                 degenerate_fallback = False
             keep_indices = selection.selected_indices
+            if self._survivor_score == "cov_per_sample":
+                selection_scores = selection.sample_scores.fitness.copy()
             n_filled = (
                 max(0, K - len(pareto_indices)) if self._survivor_score == "covariance" else 0
             )
@@ -1036,12 +1060,15 @@ class GeneticAlgorithm:
                     max(0.0, -group_score.score) if finite_score else None
                 ),
                 "degenerate_fallback": degenerate_fallback,
-                "selection_aggregation": self._survivor_selection_aggregation,
+                "selection_aggregation": getattr(
+                    self, "_survivor_selection_aggregation", self._advantage_aggregation
+                ),
                 "policy_advantage_aggregation": self._advantage_aggregation,
                 **sample_wise_stats,
             }
         else:
             score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)
+            selection_scores = score.copy()
             dominated_indices = np.where(~pareto)[0]
             pareto_order = pareto_indices[np.argsort(score[pareto_indices])[::-1]]
             if len(pareto_order) >= K:
@@ -1051,6 +1078,10 @@ class GeneticAlgorithm:
                 dominated_order = dominated_indices[np.argsort(score[dominated_indices])[::-1]]
                 n_filled = min(K - len(pareto_order), len(dominated_order))
                 keep_indices = np.concatenate([pareto_order, dominated_order[:n_filled]])
+        rejected_indices = np.asarray(
+            [index for index in range(len(combined_adv)) if index not in set(keep_indices)],
+            dtype=np.int64,
+        )
         n_pareto = len(pareto_indices)
         n_keep_final = len(keep_indices)
 
@@ -1094,6 +1125,76 @@ class GeneticAlgorithm:
             "pop_rewards": pop_rw_stats,
             "child_rewards": child_rw_stats,
             "new_rewards": new_rw_stats,
+            "selection_event": {
+                "survivor_score": self._survivor_score,
+                "covariance_objective": getattr(self, "_covariance_objective", None),
+                "selection_aggregation": getattr(
+                    self, "_survivor_selection_aggregation", self._advantage_aggregation
+                ),
+                "policy_advantage_aggregation": self._advantage_aggregation,
+                "reward_weights": {
+                    key: self._get_reward_weight(key, source) for key in valid_reward_keys
+                },
+                "reward_keys": list(reward_keys),
+                "valid_reward_keys": list(valid_reward_keys),
+                "n_population": n_pop,
+                "n_children": n_children,
+                "candidate_ids": np.arange(len(combined_adv), dtype=np.int64),
+                "candidate_origin": ["population"] * n_pop + ["child"] * n_children,
+                "candidate_is_crossover_child": np.asarray(
+                    [
+                        bool(sample.extra_kwargs.get("is_crossover_child", False))
+                        for sample in population + children
+                    ],
+                    dtype=bool,
+                ),
+                "candidate_generation": np.asarray(
+                    [
+                        (
+                            int(sample.extra_kwargs.get("generation", -1))
+                            if sample.extra_kwargs.get("generation") is not None
+                            else -1
+                        )
+                        for sample in population + children
+                    ],
+                    dtype=np.int64,
+                ),
+                "candidate_rewards": {
+                    key: values.copy() for key, values in combined_rewards.items()
+                },
+                "selection_advantages": combined_adv.copy(),
+                "pareto_mask": pareto.copy(),
+                "selection_scores": selection_scores,
+                "selected_ids": np.asarray(keep_indices, dtype=np.int64),
+                "rejected_ids": rejected_indices,
+                "selection_diagnostics": covariance_stats,
+                "offspring": {
+                    "mode": getattr(self, "_offspring_mode", "unknown"),
+                    "candidate_ids": np.arange(n_pop, n_pop + n_children, dtype=np.int64),
+                    "primary_parent_ids": np.asarray(
+                        [
+                            (
+                                child.extra_kwargs.get("primary_parent_index", -1)
+                                if child.extra_kwargs.get("primary_parent_index") is not None
+                                else -1
+                            )
+                            for child in children
+                        ],
+                        dtype=np.int64,
+                    ),
+                    "secondary_parent_ids": np.asarray(
+                        [
+                            (
+                                child.extra_kwargs.get("secondary_parent_index", -1)
+                                if child.extra_kwargs.get("secondary_parent_index") is not None
+                                else -1
+                            )
+                            for child in children
+                        ],
+                        dtype=np.int64,
+                    ),
+                },
+            },
         }
         if covariance_stats is not None:
             stats["covariance_selection"] = covariance_stats
@@ -1243,13 +1344,57 @@ class GeneticAlgorithm:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _normalize_selection_event_dtypes(value: Any) -> Any:
+        """Normalize floating raw-selection data before cross-rank gathering.
+
+        Covariance calculations may use float64 locally for numerical stability,
+        but distributed payloads and persisted replay records use float32.
+        """
+        if isinstance(value, np.ndarray):
+            if np.issubdtype(value.dtype, np.floating):
+                return value.astype(np.float32, copy=False)
+            return value
+        if isinstance(value, np.floating):
+            return np.float32(value)
+        if isinstance(value, float):
+            return np.float32(value)
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            return value.float() if value.is_floating_point() else value
+        if isinstance(value, dict):
+            return {
+                key: GeneticAlgorithm._normalize_selection_event_dtypes(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [GeneticAlgorithm._normalize_selection_event_dtypes(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(GeneticAlgorithm._normalize_selection_event_dtypes(item) for item in value)
+        return value
+
+    @staticmethod
     def reduce_stats(
         ga_acc: Dict[str, Any],
-        ga_samples: List[Dict[str, Any]],
+        ga_selection_events: List[Dict[str, Any]],
         accelerator: Any,
     ) -> Dict[str, Any]:
-        """Reduce per-rank GA accumulators across ranks, build final stats."""
+        """Reduce GA statistics and gather raw selection events across ranks.
+
+        Args:
+            ga_acc: Rank-local fixed-size statistic accumulators.
+            ga_selection_events: Rank-local replayable selection records.
+            accelerator: Distributed runtime used for tensor and object collectives.
+
+        Returns:
+            Globally reduced scalar statistics plus gathered raw selection records.
+        """
         num_ranks = accelerator.num_processes
+        ga_selection_events = GeneticAlgorithm._normalize_selection_event_dtypes(
+            ga_selection_events
+        )
+        gathered_selection_events = (
+            gather_object(ga_selection_events) if num_ranks > 1 else list(ga_selection_events)
+        )
 
         max_gen = 0
         while f"gen{max_gen}_count" in ga_acc:
@@ -1267,6 +1412,7 @@ class GeneticAlgorithm:
         for gen in range(max_gen):
             count_keys.append(f"gen{gen}_count")
             for key in [
+                "n_pop",
                 "n_replaced",
                 "n_children",
                 "n_children_kept",
@@ -1317,6 +1463,7 @@ class GeneticAlgorithm:
                 continue
             p = f"ga/gen{gen}"
             for key in [
+                "n_pop",
                 "n_replaced",
                 "n_children",
                 "n_children_kept",
@@ -1327,23 +1474,18 @@ class GeneticAlgorithm:
                 stats[f"{p}/{key}"] = round(reduced[f"gen{gen}_{key}"] / count, 2)
 
             for rk in reward_keys:
-                for prefix, sum_key, sum_sq_key in [
-                    ("pop_mean", "pop_sum", "pop_sum_sq"),
-                    ("child_mean", "child_sum", "child_sum_sq"),
-                    ("new_mean", "new_sum", "new_sum_sq"),
+                for population_name, sum_key, sum_sq_key, denominator_key in [
+                    ("pop", "pop_sum", "pop_sum_sq", "n_pop"),
+                    ("child", "child_sum", "child_sum_sq", "n_children"),
+                    ("new", "new_sum", "new_sum_sq", "n_pop"),
                 ]:
                     s = reduced[f"gen{gen}_{rk}_{sum_key}"]
                     sq = reduced[f"gen{gen}_{rk}_{sum_sq_key}"]
-                    n_eff = count
-                    if "child" in sum_key:
-                        n_child = max(reduced.get(f"gen{gen}_n_children", 1.0), 1.0)
-                        n_eff = n_child
+                    n_eff = reduced[f"gen{gen}_{denominator_key}"]
                     mean = s / max(n_eff, 1.0)
                     var = max(sq / max(n_eff, 1.0) - mean**2, 0.0)
-                    if "mean" in prefix:
-                        stats[f"{p}/{rk}/{prefix}"] = round(mean, 6)
-                    else:
-                        stats[f"{p}/{rk}/{prefix.replace('mean', 'std')}"] = round(var**0.5, 6)
+                    stats[f"{p}/{rk}/{population_name}_mean"] = round(mean, 6)
+                    stats[f"{p}/{rk}/{population_name}_std"] = round(var**0.5, 6)
 
             covariance_prefix = f"gen{gen}_cov_per_sample"
             covariance_count = reduced.get(f"{covariance_prefix}_count", 0.0)
@@ -1374,7 +1516,7 @@ class GeneticAlgorithm:
                     6,
                 )
 
-        if ga_samples:
-            stats["ga/samples"] = ga_samples
+        if gathered_selection_events:
+            stats["ga/raw_selections"] = gathered_selection_events
 
         return stats

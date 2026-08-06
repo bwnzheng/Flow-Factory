@@ -158,6 +158,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Theory claim boundaries must be represented as explicit diagnostics and documentation unless violating them makes the implemented objective undefined or incorrect.
 - **Related Constraint**: #26
 
+### GA population reward summaries used group counts as sample counts
+- **Date**: 2026-08-06
+- **Symptom**: `ga/genN/<reward>/pop_mean` and `new_mean` were inflated by `group_size`, while the corresponding standard deviations were never emitted.
+- **Root Cause**: The accumulator stored sample-weighted sums but `reduce_stats()` divided population and survivor totals by the number of groups; its output branch also treated every `*_mean` prefix as a mean and discarded the computed variance.
+- **Fix**: `trainers/crossover/genetic_algorithm.py` now reduces the total population count, uses sample-count denominators for population, child, and survivor rewards, and writes both mean and standard deviation metrics. Regression tests cover exact known moments.
+- **Lesson**: Distributed moment accumulators must reduce explicit counts in the same unit as their sums. Avoid inferring denominators from fixed group sizes or deriving output metric names through conditions that cannot reach every statistic.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 
 import imageio
 import numpy as np
-import torch
 from PIL import Image as PILImage
 
 from ..hparams import *
@@ -137,18 +136,25 @@ class Logger(ABC):
                 for entry in entries:
                     f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
-    def _save_rewards_pkl(self, data: Dict, step: int):
-        """Save train/eval reward arrays to pickle files, remove keys from dict."""
+    def _save_raw_data_pkl(self, data: Dict, step: int):
+        """Save raw analysis arrays to pickle files and remove them from metrics."""
         out_dir = os.path.join(self._logs_dir, 'rewards')
         for k in list(data.keys()):
             if k == 'train/rewards':
                 groups = data.pop(k)
+                data.pop('train/prompts', None)
+                src_groups = data.pop('train/src_groups', None)
+                nondom_sizes = data.pop('train/nondom_sizes_in_group', None)
                 out = {
                     'step': step,
                     'prompts': [g['prompt'] for g in groups],
                 }
                 for name in groups[0]['rewards'].keys():
                     out[name] = [np.array(g['rewards'][name], dtype=np.float32) for g in groups]
+                if src_groups is not None:
+                    out['src_groups'] = src_groups
+                if nondom_sizes is not None:
+                    out['nondom_sizes_in_group'] = nondom_sizes['values']
                 os.makedirs(out_dir, exist_ok=True)
                 with open(os.path.join(out_dir, f'train_step_{step:06d}.pkl'), 'wb') as f:
                     pickle.dump(out, f)
@@ -162,6 +168,17 @@ class Logger(ABC):
                 os.makedirs(out_dir, exist_ok=True)
                 with open(os.path.join(out_dir, f'{ds_slug}_step_{step:06d}.pkl'), 'wb') as f:
                     pickle.dump(out, f)
+            elif k == 'ga/raw_selections':
+                selections = data.pop(k)
+                ga_out_dir = os.path.join(self._logs_dir, 'ga')
+                out = {
+                    'schema_version': 1,
+                    'step': step,
+                    'selections': selections,
+                }
+                os.makedirs(ga_out_dir, exist_ok=True)
+                with open(os.path.join(ga_out_dir, f'train_step_{step:06d}.pkl'), 'wb') as f:
+                    pickle.dump(out, f)
 
     def _write_metrics_jsonl(self, scalars: Dict[str, Any], step: int):
         record = {'step': step}
@@ -169,36 +186,10 @@ class Logger(ABC):
             scalar = LogFormatter.to_scalar(v)
             if scalar is not None:
                 record[k] = scalar
-            elif isinstance(v, (list, dict)):
-                # Recursively strip non-serializable objects
-                cleaned = self._strip_media(v)
-                if cleaned is not None:
-                    record[k] = cleaned
         if len(record) > 1:
             filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
             with open(filepath, 'a') as f:
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
-
-    def _strip_media(self, value: Any) -> Any:
-        """Strip media and normalize nested values for JSON serialization."""
-        if isinstance(value, (LogImage, LogVideo)):
-            return None
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, np.ndarray):
-            return self._strip_media(value.tolist())
-        if isinstance(value, torch.Tensor):
-            tensor = value.detach().cpu()
-            return tensor.item() if tensor.ndim == 0 else self._strip_media(tensor.tolist())
-        if isinstance(value, (list, tuple)):
-            result = [self._strip_media(v) for v in value]
-            result = [v for v in result if v is not None]
-            return result if result else None
-        if isinstance(value, dict):
-            result = {k: self._strip_media(v) for k, v in value.items()}
-            result = {k: v for k, v in result.items() if v is not None}
-            return result if result else None
-        return value
 
     # ---- main log flow ----
 
@@ -215,8 +206,8 @@ class Logger(ABC):
         if self._should_save_locally:
             self._extract_and_save_media(formatted_dict, step)
 
-        # 3. [NEW] Save reward arrays to pickle
-        self._save_rewards_pkl(formatted_dict, step)
+        # 3. Save raw analysis arrays to pickle and keep them out of metrics JSONL
+        self._save_raw_data_pkl(formatted_dict, step)
 
         # 4. [NEW] Write scalar metrics to local JSONL
         if self._should_log_jsonl:

@@ -208,7 +208,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             )
             applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
             t_ga = time.time()
-            evolved_samples, evolved_rewards, ga_acc, ga_samples = self._ga.evolve(
+            evolved_samples, evolved_rewards, ga_acc, ga_selection_events = self._ga.evolve(
                 parent_samples=samples,
                 parent_rewards=rewards,
                 applicable=applicable,
@@ -229,7 +229,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
             # Increase to e.g. 1800 s via: export HCCL_EXEC_TIMEOUT=1800
             self.accelerator.wait_for_everyone()
 
-            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_samples, self.accelerator)
+            ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_selection_events, self.accelerator)
             if ga_stats and self.accelerator.is_main_process:
                 self.log_data(ga_stats, step=self.step)
             samples[:] = evolved_samples

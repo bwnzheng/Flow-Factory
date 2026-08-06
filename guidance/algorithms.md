@@ -275,8 +275,31 @@ fixed-size metric accumulators into a float32 tensor for reduction and exposes
 the following platform metrics per
 generation under `ga/genN/cov_per_sample/`: `frozen_score`, `lower_bound`,
 `approximation_gap`, `true_score`, `scalar_variance`, `elite_child_rate`, and
-`degenerate_scalar_contrast_rate`. Full candidate-level arrays remain in the
-rank-local `ga/samples` JSONL diagnostics and are not gathered across ranks.
+`degenerate_scalar_contrast_rate`. The metrics JSONL contains only these aggregate
+statistics. Raw selection events from every rank are gathered and stored under
+`logs/ga/train_step_NNNNNN.pkl` with `schema_version`, `step`, and a `selections`
+list. All floating values in this cross-rank object payload are normalized to
+float32 before gathering. Each `(rank, gid, generation)` event records the prompt
+and source, ordered reward keys and weights, parent-selection evidence, child
+parent IDs, every candidate's rewards and selection score, Pareto membership,
+and ordered selected/rejected IDs. Following the selected order from one
+generation into the next reconstructs the complete survivor-selection and
+child-lineage process.
+
+When `crossover.log_rewards` is enabled, the final post-GA population is also
+summarized by original-parent versus crossover-child origin under
+`ga/final_population/{parent,child}/<reward>/{mean,std}`. The child branch also
+reports `better_than_parent_mean_rate`. These are final-survivor composition
+statistics and are distinct from the pre-selection `child_*` and post-selection
+`new_*` moments under `ga/genN/<reward>/`. No `crossover/*` metric namespace is
+emitted.
+
+Training reward pickles under `logs/rewards/train_step_NNNNNN.pkl` remain the
+canonical record of the final population consumed by optimization. They store
+prompt-grouped float32 reward arrays and, when available, raw SRC group
+diagnostics and per-group non-dominated-set sizes. Those raw fields are removed
+from `metrics.jsonl`; only their aggregate metrics remain there and in the
+platform backend.
 
 Both covariance strategies operate directly on the raw outputs of the configured
 reward models and use their existing source-aware training weights. Those
