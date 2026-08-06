@@ -20,20 +20,23 @@ import torch
 
 from flow_factory.advantage import AdvantageProcessor
 from flow_factory.hparams import (
-    CrossoverArguments,
-    CrossoverGRPOGuardTrainingArguments,
-    CrossoverNFTTrainingArguments,
+    GAArguments,
+    GAGRPOGuardTrainingArguments,
+    GANFTTrainingArguments,
+    get_training_args_class,
 )
 from flow_factory.hparams.args import Arguments
+from flow_factory.hparams.training_args import list_registered_training_args
 from flow_factory.samples import BaseSample
 from flow_factory.trainers.crossover.genetic_algorithm import (
     GeneticAlgorithm,
-    _format_covariance_selection_log,
+    _format_src_selection_log,
 )
-from flow_factory.trainers.crossover_grpo_guard import CrossoverGRPOGuardTrainer
-from flow_factory.trainers.crossover_nft import CrossoverNFTTrainer
+from flow_factory.trainers.ga_grpo_guard import GAGRPOGuardTrainer
+from flow_factory.trainers.ga_nft import GANFTTrainer
 from flow_factory.trainers.grpo import GRPOGuardTrainer
 from flow_factory.trainers.nft import DiffusionNFTTrainer
+from flow_factory.trainers.registry import get_trainer_class, list_registered_trainers
 
 
 def _dense_parent(num_steps: int = 4) -> BaseSample:
@@ -50,8 +53,8 @@ def _dense_parent(num_steps: int = 4) -> BaseSample:
     )
 
 
-def test_crossover_arguments_expose_only_effective_selection_controls():
-    args = CrossoverArguments()
+def test_ga_arguments_expose_only_effective_selection_controls():
+    args = GAArguments()
 
     assert args.survivor_score == "advantage"
     assert not hasattr(args, "covariance_reward_bounds")
@@ -61,11 +64,39 @@ def test_crossover_arguments_expose_only_effective_selection_controls():
     assert not hasattr(args, "child_warmup_epochs")
 
 
+def test_ga_trainer_names_replace_crossover_names():
+    assert get_training_args_class("ga_grpo_guard") is GAGRPOGuardTrainingArguments
+    assert get_training_args_class("ga_nft") is GANFTTrainingArguments
+    assert get_trainer_class("ga_grpo_guard") is GAGRPOGuardTrainer
+    assert get_trainer_class("ga_nft") is GANFTTrainer
+    assert "crossover-grpo-guard" not in list_registered_training_args()
+    assert "crossover-nft" not in list_registered_training_args()
+    assert "crossover-grpo-guard" not in list_registered_trainers()
+    assert "crossover-nft" not in list_registered_trainers()
+
+
+@pytest.mark.parametrize(
+    "training_args_cls",
+    [GAGRPOGuardTrainingArguments, GANFTTrainingArguments],
+)
+def test_ga_training_arguments_parse_ga_section(training_args_cls):
+    args = training_args_cls.from_dict(
+        {
+            "advantage_aggregation": "sum",
+            "ga": {"survivor_score": "src"},
+        }
+    )
+
+    assert isinstance(args.ga, GAArguments)
+    assert args.ga.survivor_score == "src"
+    assert not hasattr(args, "crossover")
+
+
 def test_crossover_rejects_non_local_group_sampler():
     config = SimpleNamespace(
         training_args=SimpleNamespace(
-            trainer_type="crossover-nft",
-            crossover=SimpleNamespace(enabled=True),
+            trainer_type="ga_nft",
+            ga=SimpleNamespace(enabled=True),
         ),
         data_args=SimpleNamespace(sampler_type="distributed_k_repeat"),
         reward_args=[],
@@ -77,11 +108,11 @@ def test_crossover_rejects_non_local_group_sampler():
 
 
 def test_grpo_crossover_sample_batch_does_not_require_sample_side_effect(monkeypatch):
-    trainer = CrossoverGRPOGuardTrainer.__new__(CrossoverGRPOGuardTrainer)
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
     trainer._crossover_enabled = True
     trainer.epoch = 0
     trainer.training_args = SimpleNamespace(
-        crossover=CrossoverArguments(step=2),
+        ga=GAArguments(step=2),
         seed=42,
         num_inference_steps=4,
     )
@@ -115,7 +146,7 @@ def test_grpo_crossover_sample_batch_does_not_require_sample_side_effect(monkeyp
 
 
 def test_grpo_crossover_sample_marks_training_rollout():
-    trainer = CrossoverGRPOGuardTrainer.__new__(CrossoverGRPOGuardTrainer)
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
     trainer._crossover_enabled = True
     trainer.epoch = 3
     trainer.training_args = SimpleNamespace(num_inference_steps=4, seed=42)
@@ -140,7 +171,7 @@ def test_grpo_crossover_sample_batch_bypasses_non_crossover_rollouts(
     crossover_enabled,
     compute_log_prob,
 ):
-    trainer = CrossoverGRPOGuardTrainer.__new__(CrossoverGRPOGuardTrainer)
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
     trainer._crossover_enabled = crossover_enabled
     marker = [BaseSample()]
     monkeypatch.setattr(
@@ -159,9 +190,10 @@ def test_grpo_crossover_sample_batch_bypasses_non_crossover_rollouts(
     assert "_cxo_step" not in result[0].extra_kwargs
 
 
-def test_ga_rejects_unknown_survivor_score():
+@pytest.mark.parametrize("survivor_score", ["largest", "covariance", "cov_per_sample"])
+def test_ga_rejects_unknown_or_removed_survivor_score(survivor_score):
     training_args = SimpleNamespace(
-        crossover=SimpleNamespace(survivor_score="largest"),
+        ga=SimpleNamespace(survivor_score=survivor_score),
         advantage_aggregation="gdpo",
         num_inference_steps=4,
         group_size=2,
@@ -180,7 +212,7 @@ def test_ga_rejects_unknown_survivor_score():
 
 def test_ga_rejects_unknown_advantage_aggregation():
     training_args = SimpleNamespace(
-        crossover=SimpleNamespace(survivor_score="advantage"),
+        ga=SimpleNamespace(survivor_score="advantage"),
         advantage_aggregation="unknown",
         num_inference_steps=4,
         group_size=2,
@@ -199,26 +231,26 @@ def test_ga_rejects_unknown_advantage_aggregation():
 
 @pytest.mark.parametrize(
     "training_args_cls",
-    [CrossoverGRPOGuardTrainingArguments, CrossoverNFTTrainingArguments],
+    [GAGRPOGuardTrainingArguments, GANFTTrainingArguments],
 )
-def test_cov_per_sample_config_requires_sum_aggregation(training_args_cls):
-    with pytest.raises(ValueError, match="cov_per_sample.*requires.*advantage_aggregation: sum"):
+def test_src_config_requires_sum_aggregation(training_args_cls):
+    with pytest.raises(ValueError, match="src.*requires.*advantage_aggregation: sum"):
         training_args_cls(
             advantage_aggregation="gdpo",
-            crossover=CrossoverArguments(survivor_score="cov_per_sample"),
+            ga=GAArguments(survivor_score="src"),
         )
 
 
-def test_ga_cov_per_sample_requires_sum_aggregation_for_direct_callers():
+def test_ga_src_requires_sum_aggregation_for_direct_callers():
     training_args = SimpleNamespace(
-        crossover=SimpleNamespace(survivor_score="cov_per_sample"),
+        ga=SimpleNamespace(survivor_score="src"),
         advantage_aggregation="gdpo",
-        trainer_type="crossover-nft",
+        trainer_type="ga_nft",
         num_inference_steps=4,
         group_size=2,
     )
 
-    with pytest.raises(ValueError, match="cov_per_sample.*requires.*advantage_aggregation='sum'"):
+    with pytest.raises(ValueError, match="src.*requires.*advantage_aggregation='sum'"):
         GeneticAlgorithm(
             crossover_strategy=None,
             adapter=None,
@@ -266,10 +298,10 @@ def test_grpo_child_factory_uses_trainer_public_state():
             self.decode_calls += 1
             return None
 
-    trainer = CrossoverGRPOGuardTrainer.__new__(CrossoverGRPOGuardTrainer)
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
     trainer.training_args = SimpleNamespace(
         num_inference_steps=4,
-        crossover=SimpleNamespace(strategy="uniform"),
+        ga=SimpleNamespace(strategy="uniform"),
     )
     trainer.adapter = DecodeAdapter()
     trainer._compute_boundary_statistics = lambda parent, latent, step: {
@@ -303,7 +335,7 @@ def test_grpo_child_factory_uses_trainer_public_state():
 
 
 def test_nft_crossover_sample_batch_bypasses_eval(monkeypatch):
-    trainer = CrossoverNFTTrainer.__new__(CrossoverNFTTrainer)
+    trainer = GANFTTrainer.__new__(GANFTTrainer)
     trainer._crossover_enabled = True
     marker = [BaseSample()]
     monkeypatch.setattr(
@@ -323,11 +355,11 @@ def test_nft_crossover_sample_batch_bypasses_eval(monkeypatch):
 
 
 def test_nft_crossover_sample_batch_consumes_training_marker(monkeypatch):
-    trainer = CrossoverNFTTrainer.__new__(CrossoverNFTTrainer)
+    trainer = GANFTTrainer.__new__(GANFTTrainer)
     trainer._crossover_enabled = True
     trainer.epoch = 0
     trainer.training_args = SimpleNamespace(
-        crossover=CrossoverArguments(step=2),
+        ga=GAArguments(step=2),
         seed=42,
         num_inference_steps=4,
     )
@@ -353,11 +385,11 @@ def test_nft_crossover_sample_batch_consumes_training_marker(monkeypatch):
 
 
 def test_nft_crossover_sample_marks_training_rollout():
-    trainer = CrossoverNFTTrainer.__new__(CrossoverNFTTrainer)
+    trainer = GANFTTrainer.__new__(GANFTTrainer)
     trainer._crossover_enabled = True
     trainer.training_args = SimpleNamespace(
         num_inference_steps=4,
-        crossover=CrossoverArguments(step=2),
+        ga=GAArguments(step=2),
     )
     trainer.reward_buffer = object()
     captured = {}
@@ -369,8 +401,8 @@ def test_nft_crossover_sample_marks_training_rollout():
 
 
 def test_grpo_child_trajectory_places_intervention_and_uses_identity_maps():
-    trainer = CrossoverGRPOGuardTrainer.__new__(CrossoverGRPOGuardTrainer)
-    trainer.training_args = SimpleNamespace(crossover=SimpleNamespace(strategy="uniform"))
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
+    trainer.training_args = SimpleNamespace(ga=SimpleNamespace(strategy="uniform"))
     parent = _dense_parent()
     crossover_latent = torch.tensor([[20.0]])
     post_latents = [torch.tensor([[30.0]]), torch.tensor([[40.0]])]
@@ -407,7 +439,7 @@ def test_grpo_parent_statistics_are_densified_for_mixed_parent_child_batches():
     parent.log_probs = torch.tensor([11.0, 33.0])
     parent.log_prob_index_map = torch.tensor([-1, 0, -1, 1])
 
-    CrossoverGRPOGuardTrainer._densify_parent_maps(parent, num_steps=4)
+    GAGRPOGuardTrainer._densify_parent_maps(parent, num_steps=4)
 
     assert parent.log_probs.tolist() == [0.0, 11.0, 0.0, 33.0]
     assert torch.equal(parent.log_prob_index_map, torch.arange(4))
@@ -518,10 +550,9 @@ def test_ga_distributed_stats_reduce_uses_float32():
     assert stats["ga/n_groups"] == 2
 
 
-def test_cov_per_sample_console_log_uses_selection_specific_metrics():
-    line = _format_covariance_selection_log(
+def test_src_console_log_uses_selection_specific_metrics():
+    line = _format_src_selection_log(
         {
-            "branch": "cov_per_sample",
             "elite_id": 3,
             "frozen_score": 0.25,
             "lower_bound": 0.2,
@@ -533,31 +564,16 @@ def test_cov_per_sample_console_log_uses_selection_specific_metrics():
         n_pop=2,
     )
 
-    assert "selection=cov_per_sample" in line
+    assert "selection=src" in line
     assert "elite=child:3" in line
     assert "frozen_J=0.25" in line
     assert "lower_bound=0.2" in line
     assert "gap=0.05" in line
     assert "true_J=-0.1" in line
     assert "degenerate_scalar_contrast=False" in line
-    assert "degenerate_fallback" not in line
 
 
-def test_group_covariance_console_log_remains_backward_compatible():
-    line = _format_covariance_selection_log(
-        {
-            "branch": "prune",
-            "score": 0.3,
-            "scalar_variance": 2.0,
-            "degenerate_fallback": False,
-        },
-        n_pop=2,
-    )
-
-    assert line == "covariance=prune J=0.3 variance=2 degenerate_fallback=False"
-
-
-def test_cov_per_sample_stats_reduce_to_float32_platform_metrics():
+def test_src_stats_reduce_to_float32_platform_metrics():
     class DtypeCheckingAccelerator:
         num_processes = 2
         device = torch.device("cpu")
@@ -571,21 +587,21 @@ def test_cov_per_sample_stats_reduce_to_float32_platform_metrics():
         ga_acc={
             "n_groups": 2,
             "gen0_count": 2,
-            "gen0_cov_per_sample_count": 2,
-            "gen0_cov_per_sample_frozen_score_sum": 3.0,
-            "gen0_cov_per_sample_lower_bound_sum": 2.0,
-            "gen0_cov_per_sample_approximation_gap_sum": 1.0,
-            "gen0_cov_per_sample_true_score_sum": 0.5,
-            "gen0_cov_per_sample_true_score_count": 1,
-            "gen0_cov_per_sample_scalar_variance_sum": 4.0,
-            "gen0_cov_per_sample_elite_child_count": 1,
-            "gen0_cov_per_sample_degenerate_count": 1,
+            "gen0_src_count": 2,
+            "gen0_src_frozen_score_sum": 3.0,
+            "gen0_src_lower_bound_sum": 2.0,
+            "gen0_src_approximation_gap_sum": 1.0,
+            "gen0_src_true_score_sum": 0.5,
+            "gen0_src_true_score_count": 1,
+            "gen0_src_scalar_variance_sum": 4.0,
+            "gen0_src_elite_child_count": 1,
+            "gen0_src_degenerate_count": 1,
         },
         ga_selection_events=[],
         accelerator=DtypeCheckingAccelerator(),
     )
 
-    prefix = "ga/gen0/cov_per_sample"
+    prefix = "ga/gen0/src"
     assert stats[f"{prefix}/frozen_score"] == pytest.approx(1.5)
     assert stats[f"{prefix}/lower_bound"] == pytest.approx(1.0)
     assert stats[f"{prefix}/approximation_gap"] == pytest.approx(0.5)

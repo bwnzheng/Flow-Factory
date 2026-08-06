@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Training arguments for crossover-augmented algorithms.
+"""Training arguments for genetic-algorithm-augmented trainers.
 
-Provides a shared :class:`CrossoverArguments` dataclass consumed by both
-the coupled (CrossoverGRPOGuard) and decoupled (CrossoverNFT) trainers.
+Provides a shared :class:`GAArguments` dataclass consumed by both
+the coupled (GA GRPO-Guard) and decoupled (GA NFT) trainers.
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from .nft import NFTTrainingArguments
 
 
 @dataclass
-class CrossoverArguments(ArgABC):
-    """Configuration for intermediate denoising-state crossover.
+class GAArguments(ArgABC):
+    """Configure genetic evolution and intermediate-state crossover.
 
-    All fields are namespaced under the ``crossover:`` key in the YAML config
+    All fields are namespaced under the ``ga:`` key in the YAML config
     so they do not collide with base training arguments.
     """
 
@@ -104,15 +104,14 @@ class CrossoverArguments(ArgABC):
         default=True,
         metadata={"help": "Log per-reward statistics separately for parent and child samples."},
     )
-    survivor_score: Literal["advantage", "abs_advantage", "covariance", "cov_per_sample"] = field(
+    survivor_score: Literal["advantage", "abs_advantage", "src"] = field(
         default="advantage",
         metadata={
             "help": (
                 "Environmental-selection score for the merged parent-offspring pool. "
                 "'advantage' prefers high-fitness samples; 'abs_advantage' also preserves "
-                "strong negative samples; 'covariance' greedily scores complete "
-                "Pareto-guided groups; 'cov_per_sample' preserves one scalar elite and "
-                "fills remaining slots by frozen-pool per-sample covariance contribution "
+                "strong negative samples; 'src' preserves one scalar elite and fills "
+                "remaining slots by frozen-pool Sample-wise Reward Concordance "
                 "and requires advantage_aggregation='sum'."
             )
         },
@@ -157,13 +156,13 @@ class CrossoverArguments(ArgABC):
 # ============================================================================
 
 
-def _validate_cov_per_sample_aggregation(
-    crossover: CrossoverArguments,
+def _validate_src_aggregation(
+    ga: GAArguments,
     advantage_aggregation: str,
 ) -> None:
-    if crossover.survivor_score == "cov_per_sample" and advantage_aggregation != "sum":
+    if ga.survivor_score == "src" and advantage_aggregation != "sum":
         raise ValueError(
-            "`crossover.survivor_score: cov_per_sample` requires "
+            "`ga.survivor_score: src` requires "
             "`advantage_aggregation: sum` because its frozen contribution score is "
             "defined against the weighted-sum scalar policy direction; "
             f"got advantage_aggregation={advantage_aggregation!r}."
@@ -171,44 +170,44 @@ def _validate_cov_per_sample_aggregation(
 
 
 @dataclass
-class CrossoverGRPOGuardTrainingArguments(GRPOTrainingArguments):
-    """GRPO-Guard training arguments with crossover augmentation.
+class GAGRPOGuardTrainingArguments(GRPOTrainingArguments):
+    """GRPO-Guard training arguments with genetic-algorithm augmentation.
 
     Inherits all GRPO / GRPO-Guard hyperparameters (clip_range, kl_beta,
-    advantage_aggregation, etc.) and adds a ``crossover`` namespace.
+    advantage_aggregation, etc.) and adds a ``ga`` namespace.
     """
 
-    crossover: CrossoverArguments = field(default_factory=CrossoverArguments)
+    ga: GAArguments = field(default_factory=GAArguments)
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        _validate_cov_per_sample_aggregation(self.crossover, self.advantage_aggregation)
+        _validate_src_aggregation(self.ga, self.advantage_aggregation)
 
     @classmethod
-    def from_dict(cls, args_dict: Dict[str, Any]) -> "CrossoverGRPOGuardTrainingArguments":
-        if "crossover" in args_dict and isinstance(args_dict["crossover"], dict):
+    def from_dict(cls, args_dict: Dict[str, Any]) -> "GAGRPOGuardTrainingArguments":
+        if "ga" in args_dict and isinstance(args_dict["ga"], dict):
             args_dict = dict(args_dict)
-            args_dict["crossover"] = CrossoverArguments.from_dict(args_dict["crossover"])
+            args_dict["ga"] = GAArguments.from_dict(args_dict["ga"])
         return super().from_dict(args_dict)  # type: ignore[return-value]
 
 
 @dataclass
-class CrossoverNFTTrainingArguments(NFTTrainingArguments):
-    """DiffusionNFT training arguments with crossover augmentation.
+class GANFTTrainingArguments(NFTTrainingArguments):
+    """DiffusionNFT training arguments with genetic-algorithm augmentation.
 
     Inherits all NFT hyperparameters (nft_beta, off_policy, time_sampling, etc.)
-    and adds a ``crossover`` namespace.
+    and adds a ``ga`` namespace.
     """
 
-    crossover: CrossoverArguments = field(default_factory=CrossoverArguments)
+    ga: GAArguments = field(default_factory=GAArguments)
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        _validate_cov_per_sample_aggregation(self.crossover, self.advantage_aggregation)
+        _validate_src_aggregation(self.ga, self.advantage_aggregation)
 
     @classmethod
-    def from_dict(cls, args_dict: Dict[str, Any]) -> "CrossoverNFTTrainingArguments":
-        if "crossover" in args_dict and isinstance(args_dict["crossover"], dict):
+    def from_dict(cls, args_dict: Dict[str, Any]) -> "GANFTTrainingArguments":
+        if "ga" in args_dict and isinstance(args_dict["ga"], dict):
             args_dict = dict(args_dict)
-            args_dict["crossover"] = CrossoverArguments.from_dict(args_dict["crossover"])
+            args_dict["ga"] = GAArguments.from_dict(args_dict["ga"])
         return super().from_dict(args_dict)  # type: ignore[return-value]

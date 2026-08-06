@@ -22,18 +22,18 @@ against the monolithic ``training_args.py`` continue to work unchanged:
 """
 from ._base import EvaluationArguments, TrainingArguments
 from ._registry import get_training_args_class, list_registered_training_args
-from .grpo import GRPOTrainingArguments
-from .dppo import DPPOTrainingArguments
-from .nft import NFTTrainingArguments
 from .awm import AWMTrainingArguments
-from .dpo import DPOTrainingArguments
-from .dgpo import DGPOTrainingArguments
 from .crd import CRDTrainingArguments
-from .crossover import (
-    CrossoverArguments,
-    CrossoverGRPOGuardTrainingArguments,
-    CrossoverNFTTrainingArguments,
+from .dgpo import DGPOTrainingArguments
+from .dpo import DPOTrainingArguments
+from .dppo import DPPOTrainingArguments
+from .ga import (
+    GAArguments,
+    GAGRPOGuardTrainingArguments,
+    GANFTTrainingArguments,
 )
+from .grpo import GRPOTrainingArguments
+from .nft import NFTTrainingArguments
 from .opd import DiffusionOPDTrainingArguments, TeacherConfig
 
 __all__ = [
@@ -46,9 +46,9 @@ __all__ = [
     "DPOTrainingArguments",
     "DGPOTrainingArguments",
     "CRDTrainingArguments",
-    "CrossoverArguments",
-    "CrossoverGRPOGuardTrainingArguments",
-    "CrossoverNFTTrainingArguments",
+    "GAArguments",
+    "GAGRPOGuardTrainingArguments",
+    "GANFTTrainingArguments",
     "DiffusionOPDTrainingArguments",
     "TeacherConfig",
     "get_training_args_class",

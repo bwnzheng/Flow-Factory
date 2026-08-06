@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover_nft.py
+# src/flow_factory/trainers/ga_nft.py
 """
-CrossoverNFT — DiffusionNFT trainer with Genetic Algorithm augmentation.
+GA NFT — DiffusionNFT trainer with Genetic Algorithm augmentation.
 
 Parents generated during ``sample()`` store crossover-step latents.  In
 ``prepare_feedback()``, a per-group genetic algorithm evolves the
@@ -30,7 +30,7 @@ from typing import Any, Dict, List
 
 import torch
 
-from ..hparams import CrossoverNFTTrainingArguments
+from ..hparams import GANFTTrainingArguments
 from ..samples import BaseSample
 from ..utils.base import create_generator
 from ..utils.logger_utils import setup_logger
@@ -44,12 +44,12 @@ from .nft import DiffusionNFTTrainer
 logger = setup_logger(__name__)
 
 
-class CrossoverNFTTrainer(DiffusionNFTTrainer):
+class GANFTTrainer(DiffusionNFTTrainer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.training_args: CrossoverNFTTrainingArguments
-        cxo_args = self.training_args.crossover
+        self.training_args: GANFTTrainingArguments
+        cxo_args = self.training_args.ga
         self._crossover_enabled = cxo_args.enabled
         if self._crossover_enabled:
             if self.reward_processor._groupwise_models:
@@ -81,10 +81,10 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 self.advantage_processor._log_crossover_rewards = True
             self.advantage_processor._child_in_norm = True
             logger.info(
-                f"CrossoverNFT GA: offspring_mode={offspring_mode} "
+                f"GA NFT: offspring_mode={offspring_mode} "
                 f"strategy={cxo_args.strategy} "
                 f"advantage_aggregation({self._ga._advantage_aggregation}) "
-                f"crossover.survivor_score({self._ga._survivor_score}) "
+                f"ga.survivor_score({self._ga._survivor_score}) "
                 f"survivor_selection_aggregation("
                 f"{self._ga._survivor_selection_aggregation}) "
                 f"parent_ratio={self._ga._parent_ratio} "
@@ -105,7 +105,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
         # Union of all possible crossover step positions — same pattern as
         # GRPO-Guard.  Enables batched inference via generate_samples().
         num_steps = self.training_args.num_inference_steps
-        cxo_cfg = self.training_args.crossover
+        cxo_cfg = self.training_args.ga
         lo = (
             int(cxo_cfg.step_range[0] * num_steps)
             if cxo_cfg.step_sampling != "fixed"
@@ -140,7 +140,7 @@ class CrossoverNFTTrainer(DiffusionNFTTrainer):
                 **extra_inference_kwargs,
             )
 
-        cxo_cfg = self.training_args.crossover
+        cxo_cfg = self.training_args.ga
         base_seed = self.training_args.seed + self.epoch
         num_steps = self.training_args.num_inference_steps
 

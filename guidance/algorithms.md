@@ -214,9 +214,9 @@ scheduler:
 ```
 > ‼️ **Note**: Currently, `grpo-guard` reweighting is only compatible with `Flow-GRPO` dynamics. Therefore, dynamics_type must be explicitly set to `Flow-SDE`.
 
-#### Crossover GRPO-Guard
+#### GA GRPO-Guard
 
-`crossover-grpo-guard` intentionally augments GRPO-Guard with off-policy latent
+`ga_grpo_guard` intentionally augments GRPO-Guard with off-policy latent
 interventions. Within each prompt group, a genetic algorithm selects parents,
 crosses or mutates an intermediate latent, denoises the offspring, and keeps a
 fixed population of `group_size` survivors. The primary parent supplies the
@@ -232,11 +232,11 @@ explicit samplers fail at configuration time.
 
 ```yaml
 train:
-  trainer_type: crossover-grpo-guard
-  advantage_aggregation: sum  # Required when survivor_score is cov_per_sample
+  trainer_type: ga_grpo_guard
+  advantage_aggregation: sum  # Required when survivor_score is src
   global_std: true
   stddev_reweighting: false
-  crossover:
+  ga:
     enabled: true
     step_sampling: uniform
     step_range: [0.3, 0.6]
@@ -244,21 +244,15 @@ train:
     augmentation_factor: 1.25
     parent_ratio: 0.25
     mutation_std: 0.05
-    survivor_score: cov_per_sample  # Options: advantage, abs_advantage, covariance, cov_per_sample
+    survivor_score: src  # Options: advantage, abs_advantage, src
 scheduler:
   dynamics_type: Flow-SDE
 ```
 
 `survivor_score: advantage` prefers high-fitness candidates when the Pareto set
 must be trimmed or filled. `abs_advantage` also preserves strongly negative
-samples for contrastive training. `covariance` keeps Pareto non-dominance as a
-hard quality gate, then greedily constructs the fixed-size survivor group by
-maximizing its weakest active reward contribution. Oversized Pareto fronts are
-pruned backward; undersized fronts retain every non-dominated candidate and are
-filled forward from the dominated pool. This is a group-level subset score, so
-the covariance is recomputed for every hypothetical add or removal.
-
-`cov_per_sample` is the scalar-elitist, sample-wise approximation. It merges
+samples for contrastive training. `src` is the scalar-elitist Sample-wise Reward
+Concordance selector. It merges
 parents and offspring, freezes the merged pool's reward and scalar-reward
 means, and computes each candidate's weakest active reward contribution
 `min_k w_k (r_ik - mean_k) (R_i - mean_R)` exactly once. The highest scalar
@@ -273,7 +267,7 @@ separable `lower_bound`, their approximation `gap`, the recentered `true_J`,
 scalar variance, and `degenerate_scalar_contrast`. Cross-rank logging packs the
 fixed-size metric accumulators into a float32 tensor for reduction and exposes
 the following platform metrics per
-generation under `ga/genN/cov_per_sample/`: `frozen_score`, `lower_bound`,
+generation under `ga/genN/src/`: `frozen_score`, `lower_bound`,
 `approximation_gap`, `true_score`, `scalar_variance`, `elite_child_rate`, and
 `degenerate_scalar_contrast_rate`. The metrics JSONL contains only these aggregate
 statistics. Raw selection events from every rank are gathered and stored under
@@ -286,7 +280,7 @@ and ordered selected/rejected IDs. Following the selected order from one
 generation into the next reconstructs the complete survivor-selection and
 child-lineage process.
 
-When `crossover.log_rewards` is enabled, the final post-GA population is also
+When `ga.log_rewards` is enabled, the final post-GA population is also
 summarized by original-parent versus crossover-child origin under
 `ga/final_population/{parent,child}/<reward>/{mean,std}`. The child branch also
 reports `better_than_parent_mean_rate`. These are final-survivor composition
@@ -301,36 +295,28 @@ diagnostics and per-group non-dominated-set sizes. Those raw fields are removed
 from `metrics.jsonl`; only their aggregate metrics remain there and in the
 platform backend.
 
-Both covariance strategies operate directly on the raw outputs of the configured
-reward models and use their existing source-aware training weights. Those
+SRC operates directly on the raw outputs of the configured reward models and
+uses their existing source-aware training weights. Those
 weights therefore define both the preference vector and the calibration across
 reward units. A fixed positive affine rescaling of one reward does not change
 the method when its weight is transformed inversely; selector-only bounds would
 cancel algebraically and are not required. Do not z-score rewards separately
 per prompt before selection, because that changes the intended reward geometry.
-For `cov_per_sample`, reward units directly affect candidate ranking, so use
+For `src`, reward units directly affect candidate ranking, so use
 fixed run-wide reward calibration or source-aware weights that compensate for
 known scale differences; never estimate normalization statistics separately
 for each prompt pool.
 
-The selectors require at least two rewards with positive weights. Group-level
-`survivor_score: covariance` continues to use a fixed weighted sum of raw
-rewards independently of the policy-side `advantage_aggregation`,
-`stddev_reweighting`, and `global_std` settings. In contrast,
-`survivor_score: cov_per_sample` requires `advantage_aggregation: sum`, because
+SRC requires at least two rewards with positive weights.
+`survivor_score: src` requires `advantage_aggregation: sum`, because
 its frozen per-sample contribution is defined against that scalar policy
 direction; pairing it with GDPO would make selection and policy advantages
-optimize different directions. A zero-variance comparison falls back
-deterministically to absolute group-normalized weighted-sum reward rather than
-the configured policy advantage. The startup log reports both
+optimize different directions. The startup log reports both
 `advantage_aggregation` and `survivor_selection_aggregation` so this relation is
 explicit.
 
-With `advantage_aggregation: sum` and fixed policy weights, either covariance
-score directly matches the policy scalarization. For group-level `covariance`
-with `gdpo` or dynamic policy reweighting, it remains an independent survivor-
-selection proxy and must not be interpreted as the exact weakest contribution
-to the final policy gradient.
+With `advantage_aggregation: sum` and fixed policy weights, the SRC score uses
+the same scalarization direction as policy training.
 The genetic algorithm always considers the merged parent-plus-offspring
 candidate population and returns exactly `group_size` survivors. Advantage-
 based parent/survivor ranking continues to follow the configured
@@ -578,12 +564,8 @@ train:
 
 > **Tip**: The `piecewise_linear` schedule is recommended for DiffusionNFT. It starts with a lower decay rate to allow faster initial policy divergence and gradually increases the decay to stabilize later training. You can fine-tune this behavior with `flat_steps` and `ramp_rate`.
 
-`crossover-nft` uses the same fixed-population genetic algorithm and
-`survivor_score` setting, but keeps NFT's decoupled matching objective. When
-covariance selection is enabled, NFT uses the locally linear score
-`min_k w_k [Sigma w]_k / Z_S^2`. Under the required group-local scalar
-normalization, `Z_S^2` is the hypothetical subset's scalar-reward population
-variance and is recomputed for every add or removal. When
+`ga_nft` uses the same fixed-population genetic algorithm and `survivor_score`
+setting, but keeps NFT's decoupled matching objective. When
 `off_policy: true`, both parent and offspring denoising use the EMA sampling
 policy. Like the GRPO-Guard variant, it currently requires pointwise rewards
 and complete prompt groups on one rank (`group_contiguous`).

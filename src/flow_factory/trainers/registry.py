@@ -17,9 +17,10 @@
 Trainer Registry System
 Centralized registry for training algorithms with dynamic loading.
 """
-from typing import Type, Dict
 import importlib
 import logging
+from typing import Dict, Type
+
 from ..utils.logger_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -36,8 +37,8 @@ _TRAINER_REGISTRY: Dict[str, str] = {
     'dpo': 'flow_factory.trainers.dpo.DPOTrainer',
     'crd': 'flow_factory.trainers.crd.CRDTrainer',
     'diffusion-opd': 'flow_factory.trainers.opd.trainer.DiffusionOPDTrainer',
-    'crossover-grpo-guard': 'flow_factory.trainers.crossover_grpo_guard.CrossoverGRPOGuardTrainer',
-    'crossover-nft': 'flow_factory.trainers.crossover_nft.CrossoverNFTTrainer',
+    'ga_grpo_guard': 'flow_factory.trainers.ga_grpo_guard.GAGRPOGuardTrainer',
+    'ga_nft': 'flow_factory.trainers.ga_nft.GANFTTrainer',
 }
 
 

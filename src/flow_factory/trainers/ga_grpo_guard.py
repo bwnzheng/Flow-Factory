@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover_grpo_guard.py
+# src/flow_factory/trainers/ga_grpo_guard.py
 """
-CrossoverGRPOGuard — GRPO-Guard trainer with Genetic Algorithm augmentation.
+GA GRPO-Guard — GRPO-Guard trainer with Genetic Algorithm augmentation.
 
 Parents generated during ``sample()`` store crossover-step latents + full
 trajectory.  In ``prepare_feedback()``, a per-group genetic algorithm evolves
@@ -30,7 +30,7 @@ from typing import Any, Dict, List
 
 import torch
 
-from ..hparams import CrossoverGRPOGuardTrainingArguments
+from ..hparams import GAGRPOGuardTrainingArguments
 from ..samples import BaseSample
 from ..utils.base import create_generator, filter_kwargs, move_tensors_to_device
 from ..utils.logger_utils import setup_logger
@@ -44,17 +44,17 @@ from .grpo import GRPOGuardTrainer
 logger = setup_logger(__name__)
 
 
-class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
+class GAGRPOGuardTrainer(GRPOGuardTrainer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.training_args: CrossoverGRPOGuardTrainingArguments
-        cxo_args = self.training_args.crossover
+        self.training_args: GAGRPOGuardTrainingArguments
+        cxo_args = self.training_args.ga
         self._crossover_enabled = cxo_args.enabled
         if self._crossover_enabled:
             if self.adapter.scheduler.dynamics_type != "Flow-SDE":
                 raise ValueError(
-                    "crossover-grpo-guard requires scheduler.dynamics_type='Flow-SDE'; "
+                    "ga_grpo_guard requires scheduler.dynamics_type='Flow-SDE'; "
                     f"got {self.adapter.scheduler.dynamics_type!r}."
                 )
             if self.reward_processor._groupwise_models:
@@ -93,10 +93,10 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 self.advantage_processor._log_crossover_rewards = True
             self.advantage_processor._child_in_norm = True
             logger.info(
-                f"CrossoverGRPOGuard GA: offspring_mode={offspring_mode} "
+                f"GA GRPO-Guard: offspring_mode={offspring_mode} "
                 f"strategy={cxo_args.strategy} "
                 f"advantage_aggregation({self._ga._advantage_aggregation}) "
-                f"crossover.survivor_score({self._ga._survivor_score}) "
+                f"ga.survivor_score({self._ga._survivor_score}) "
                 f"survivor_selection_aggregation("
                 f"{self._ga._survivor_selection_aggregation}) "
                 f"parent_ratio={self._ga._parent_ratio} "
@@ -141,7 +141,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
                 **extra_inference_kwargs,
             )
 
-        cxo_cfg = self.training_args.crossover
+        cxo_cfg = self.training_args.ga
         base_seed = self.training_args.seed + self.epoch
         num_steps = self.training_args.num_inference_steps
         train_ts = self.adapter.scheduler.train_timesteps
@@ -380,7 +380,7 @@ class CrossoverGRPOGuardTrainer(GRPOGuardTrainer):
         extra = parent_dict.get("extra_kwargs", {})
         extra["is_crossover_child"] = True
         extra["crossover_step"] = cxo_step
-        extra["crossover_strategy"] = self.training_args.crossover.strategy
+        extra["crossover_strategy"] = self.training_args.ga.strategy
         if cxo_latent is not None:
             extra["_cxo_latent"] = cxo_latent.detach().cpu()
         merged_nlm = _merge_cb("next_latents_mean")

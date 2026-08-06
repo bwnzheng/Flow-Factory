@@ -18,17 +18,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from flow_factory.hparams import CrossoverArguments
+from flow_factory.hparams import GAArguments
 from flow_factory.samples import BaseSample
-from flow_factory.trainers.crossover.covariance import (
-    covariance_group_score,
-    population_covariance,
-    sample_wise_covariance_contributions,
-    select_covariance_guided_group,
-    select_sample_wise_covariance_group,
-)
 from flow_factory.trainers.crossover.genetic_algorithm import GeneticAlgorithm
 from flow_factory.trainers.crossover.pareto import compute_pareto_mask
+from flow_factory.trainers.crossover.src import (
+    compute_src_contributions,
+    covariance_group_score,
+    population_covariance,
+    select_src_group,
+)
 
 
 def test_concordant_pair_has_equal_grpo_contributions():
@@ -102,7 +101,7 @@ def test_common_positive_reward_scaling_preserves_grpo_score(scale):
     assert original.score == pytest.approx(scaled.score)
 
 
-def test_affine_reward_rescaling_with_inverse_weights_preserves_score_and_selection():
+def test_affine_reward_rescaling_with_inverse_weights_preserves_score():
     rewards = np.array([[0.1, 0.8], [0.7, 0.4], [0.9, 0.9], [0.3, 0.2]], dtype=np.float64)
     weights = np.array([0.4, 0.6])
     scales = np.array([10.0, 2.0])
@@ -114,99 +113,10 @@ def test_affine_reward_rescaling_with_inverse_weights_preserves_score_and_select
     transformed_score = covariance_group_score(
         transformed_rewards, transformed_weights, "standardized_grpo"
     )
-    original_selection = select_covariance_guided_group(
-        rewards,
-        weights,
-        2,
-        "standardized_grpo",
-        fallback_scores=np.arange(len(rewards), dtype=np.float64),
-    )
-    transformed_selection = select_covariance_guided_group(
-        transformed_rewards,
-        transformed_weights,
-        2,
-        "standardized_grpo",
-        fallback_scores=np.arange(len(rewards), dtype=np.float64),
-    )
-
     np.testing.assert_allclose(
         original_score.contribution_vector, transformed_score.contribution_vector
     )
     assert original_score.score == pytest.approx(transformed_score.score)
-    np.testing.assert_array_equal(
-        original_selection.selected_indices, transformed_selection.selected_indices
-    )
-
-
-@pytest.mark.parametrize(
-    ("rewards", "target_size", "expected_branch"),
-    [
-        (np.array([[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]]), 2, "prune"),
-        (np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]), 2, "exact"),
-        (np.array([[1.0, 1.0], [0.8, 0.8], [0.2, 0.2]]), 2, "fill"),
-    ],
-)
-def test_covariance_selector_preserves_pareto_branch_invariants(
-    rewards,
-    target_size,
-    expected_branch,
-):
-    result = select_covariance_guided_group(
-        rewards,
-        weights=np.array([1.0, 1.0]),
-        target_size=target_size,
-        objective="standardized_grpo",
-        fallback_scores=np.arange(len(rewards), dtype=np.float64),
-    )
-    pareto_indices = set(np.flatnonzero(result.pareto_mask))
-    selected = set(result.selected_indices)
-
-    assert result.branch == expected_branch
-    assert len(selected) == target_size
-    if len(pareto_indices) >= target_size:
-        assert selected <= pareto_indices
-    else:
-        assert pareto_indices <= selected
-
-
-def test_covariance_selector_is_deterministic_under_row_permutation():
-    rewards = np.array([[1.0, 0.0], [0.0, 1.0], [0.8, 0.8], [0.3, 0.3]], dtype=np.float64)
-    candidate_ids = np.array([10, 11, 12, 13])
-    original = select_covariance_guided_group(
-        rewards,
-        np.array([1.0, 1.0]),
-        2,
-        "standardized_grpo",
-        fallback_scores=np.ones(4),
-        candidate_ids=candidate_ids,
-    )
-    permutation = np.array([2, 0, 3, 1])
-    permuted = select_covariance_guided_group(
-        rewards[permutation],
-        np.array([1.0, 1.0]),
-        2,
-        "standardized_grpo",
-        fallback_scores=np.ones(4),
-        candidate_ids=candidate_ids[permutation],
-    )
-
-    original_ids = candidate_ids[original.selected_indices]
-    permuted_ids = candidate_ids[permutation][permuted.selected_indices]
-    np.testing.assert_array_equal(original_ids, permuted_ids)
-
-
-def test_all_degenerate_subsets_use_absolute_advantage_fallback():
-    rewards = np.array([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]])
-    result = select_covariance_guided_group(
-        rewards,
-        np.array([1.0, 1.0]),
-        2,
-        "standardized_grpo",
-        fallback_scores=np.array([3.0, 1.0, 2.0]),
-    )
-
-    assert result.degenerate_fallback
-    assert result.selected_indices.tolist() == [0, 2]
 
 
 def test_population_covariance_uses_population_denominator():
@@ -227,30 +137,7 @@ def test_later_equal_first_coordinate_can_dominate_earlier_candidate():
     np.testing.assert_array_equal(compute_pareto_mask(rewards), [False, True, True])
 
 
-def test_degenerate_fallback_tie_preserves_lower_stable_ids():
-    rewards = np.array([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]])
-    candidate_ids = np.array([10, 11, 12])
-
-    result = select_covariance_guided_group(
-        rewards,
-        np.array([1.0, 1.0]),
-        2,
-        "standardized_grpo",
-        fallback_scores=np.ones(3),
-        candidate_ids=candidate_ids,
-    )
-
-    np.testing.assert_array_equal(candidate_ids[result.selected_indices], [10, 11])
-
-
-def test_crossover_arguments_parse_covariance_configuration():
-    args = CrossoverArguments.from_dict({"survivor_score": "covariance"})
-
-    assert args.survivor_score == "covariance"
-    assert not hasattr(args, "covariance_reward_bounds")
-
-
-def test_ga_covariance_inputs_use_raw_rewards_and_source_weights():
+def test_ga_src_inputs_use_raw_rewards_and_source_weights():
     ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
     ga._reward_weights = {
         "quality": {"dataset": 2.0},
@@ -261,112 +148,28 @@ def test_ga_covariance_inputs_use_raw_rewards_and_source_weights():
         "safety": np.array([-1.0, 1.0]),
     }
 
-    reward_matrix, weights = ga._prepare_covariance_inputs(
-        rewards, ["quality", "safety"], "dataset"
-    )
+    reward_matrix, weights = ga._prepare_src_inputs(rewards, ["quality", "safety"], "dataset")
 
     np.testing.assert_allclose(reward_matrix, [[0.0, -1.0], [10.0, 1.0]])
     np.testing.assert_allclose(weights, [2.0, 0.5])
 
 
-def test_ga_survivor_selection_exposes_covariance_diagnostics():
-    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
-    ga._group_size = 2
-    ga._advantage_aggregation = "sum"
-    ga._survivor_score = "covariance"
-    ga._survivor_selection_aggregation = "weighted_sum"
-    ga._covariance_objective = "standardized_grpo"
-    ga._reward_weights = {
-        "quality": {"default": 1.0},
-        "safety": {"default": 1.0},
-    }
-    population = [BaseSample(), BaseSample()]
-    children = [BaseSample(), BaseSample()]
-    pop_rewards = {
-        "quality": np.array([1.0, 0.0]),
-        "safety": np.array([0.0, 1.0]),
-    }
-    child_rewards = {
-        "quality": np.array([0.8, 0.3]),
-        "safety": np.array([0.8, 0.3]),
-    }
-
-    survivors, rewards, stats = ga._select_survivors(
-        population,
-        children,
-        pop_rewards,
-        child_rewards,
-        ["quality", "safety"],
-        ["quality", "safety"],
-        None,
-    )
-
-    diagnostics = stats["covariance_selection"]
-    assert len(survivors) == 2
-    assert len(rewards["quality"]) == 2
-    assert diagnostics["branch"] == "prune"
-    assert len(diagnostics["selected_ids"]) == 2
-    assert np.asarray(diagnostics["covariance_after"]).shape == (2, 2)
-    assert diagnostics["score"] is not None
-    assert diagnostics["selection_aggregation"] == "weighted_sum"
-    assert diagnostics["policy_advantage_aggregation"] == "sum"
-
-
-def test_ga_covariance_degenerate_fallback_uses_weighted_sum_with_gdpo_policy():
-    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
-    ga._group_size = 2
-    ga._advantage_aggregation = "gdpo"
-    ga._survivor_score = "covariance"
-    ga._survivor_selection_aggregation = "weighted_sum"
-    ga._covariance_objective = "standardized_grpo"
-    ga._reward_weights = {
-        "quality": {"default": 1.0},
-        "safety": {"default": 2.0},
-    }
-    population = [BaseSample(), BaseSample()]
-    children = [BaseSample()]
-    pop_rewards = {
-        "quality": np.array([0.0, 1.0]),
-        "safety": np.array([1.0, 0.5]),
-    }
-    child_rewards = {
-        "quality": np.array([2.0]),
-        "safety": np.array([0.0]),
-    }
-
-    _, _, stats = ga._select_survivors(
-        population,
-        children,
-        pop_rewards,
-        child_rewards,
-        ["quality", "safety"],
-        ["quality", "safety"],
-        None,
-    )
-
-    diagnostics = stats["covariance_selection"]
-    assert diagnostics["degenerate_fallback"]
-    assert diagnostics["selected_ids"] == [0, 1]
-    assert diagnostics["selection_aggregation"] == "weighted_sum"
-    assert diagnostics["policy_advantage_aggregation"] == "gdpo"
-
-
-def test_ga_covariance_inputs_reject_nonfinite_raw_rewards():
+def test_ga_src_inputs_reject_nonfinite_raw_rewards():
     ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
     ga._reward_weights = {"quality": {"default": 1.0}, "safety": {"default": 1.0}}
     rewards = {"quality": np.array([1.0, np.nan]), "safety": np.ones(2)}
 
     with pytest.raises(ValueError, match="non-finite reward 'quality'"):
-        ga._prepare_covariance_inputs(rewards, ["quality", "safety"], None)
+        ga._prepare_src_inputs(rewards, ["quality", "safety"], None)
 
 
-def test_ga_selects_covariance_objective_from_trainer_type():
+def test_ga_selects_src_diagnostic_objective_from_trainer_type():
     reward_weights = {
         "quality": {"default": 1.0},
         "safety": {"default": 1.0},
     }
     common = {
-        "crossover": SimpleNamespace(survivor_score="covariance"),
+        "ga": SimpleNamespace(survivor_score="src"),
         "advantage_aggregation": "sum",
         "global_std": False,
         "num_inference_steps": 4,
@@ -378,7 +181,7 @@ def test_ga_selects_covariance_objective_from_trainer_type():
         adapter=None,
         accelerator=None,
         autocast=None,
-        training_args=SimpleNamespace(**common, trainer_type="crossover-grpo-guard"),
+        training_args=SimpleNamespace(**common, trainer_type="ga_grpo_guard"),
         reward_buffer=None,
         reward_weights=reward_weights,
     )
@@ -387,55 +190,22 @@ def test_ga_selects_covariance_objective_from_trainer_type():
         adapter=None,
         accelerator=None,
         autocast=None,
-        training_args=SimpleNamespace(**common, trainer_type="crossover-nft"),
+        training_args=SimpleNamespace(**common, trainer_type="ga_nft"),
         reward_buffer=None,
         reward_weights=reward_weights,
     )
 
-    assert grpo._covariance_objective == "standardized_grpo"
-    assert nft._covariance_objective == "locally_linear_nft"
-
-
-@pytest.mark.parametrize("aggregation", ["sum", "gdpo"])
-@pytest.mark.parametrize("stddev_reweighting", [False, True])
-@pytest.mark.parametrize("global_std", [False, True])
-def test_ga_decouples_covariance_selection_from_policy_advantage_options(
-    aggregation, stddev_reweighting, global_std
-):
-    training_args = SimpleNamespace(
-        crossover=SimpleNamespace(survivor_score="covariance"),
-        advantage_aggregation=aggregation,
-        stddev_reweighting=stddev_reweighting,
-        global_std=global_std,
-        trainer_type="crossover-nft",
-        num_inference_steps=4,
-        group_size=2,
-    )
-
-    ga = GeneticAlgorithm(
-        crossover_strategy=None,
-        adapter=None,
-        accelerator=None,
-        autocast=None,
-        training_args=training_args,
-        reward_buffer=None,
-        reward_weights={
-            "quality": {"default": 1.0},
-            "safety": {"default": 1.0},
-        },
-    )
-
-    assert ga._advantage_aggregation == aggregation
-    assert ga._survivor_selection_aggregation == "weighted_sum"
+    assert grpo._src_diagnostic_objective == "standardized_grpo"
+    assert nft._src_diagnostic_objective == "locally_linear_nft"
 
 
 def test_ga_rejects_missing_reward_weights_during_initialization():
     training_args = SimpleNamespace(
-        crossover=SimpleNamespace(survivor_score="covariance"),
+        ga=SimpleNamespace(survivor_score="src"),
         advantage_aggregation="sum",
         stddev_reweighting=False,
         global_std=False,
-        trainer_type="crossover-grpo-guard",
+        trainer_type="ga_grpo_guard",
         num_inference_steps=4,
         group_size=2,
     )
@@ -451,8 +221,8 @@ def test_ga_rejects_missing_reward_weights_during_initialization():
         )
 
 
-def test_sample_wise_concordant_pair_has_equal_positive_fitness():
-    scores = sample_wise_covariance_contributions(
+def test_src_concordant_pair_has_equal_positive_fitness():
+    scores = compute_src_contributions(
         np.array([[0.0, 0.0], [1.0, 1.0]]),
         np.array([1.0, 1.0]),
     )
@@ -462,8 +232,8 @@ def test_sample_wise_concordant_pair_has_equal_positive_fitness():
     assert scores.degenerate_scalar_contrast is False
 
 
-def test_sample_wise_equal_scalar_specialists_are_degenerate():
-    scores = sample_wise_covariance_contributions(
+def test_src_equal_scalar_specialists_are_degenerate():
+    scores = compute_src_contributions(
         np.array([[1.0, 0.0], [0.0, 1.0]]),
         np.array([1.0, 1.0]),
     )
@@ -474,8 +244,8 @@ def test_sample_wise_equal_scalar_specialists_are_degenerate():
     assert scores.degenerate_scalar_contrast is True
 
 
-def test_sample_wise_candidate_at_pool_mean_has_zero_contribution():
-    scores = sample_wise_covariance_contributions(
+def test_src_candidate_at_pool_mean_has_zero_contribution():
+    scores = compute_src_contributions(
         np.array([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]),
         np.array([1.0, 1.0]),
     )
@@ -486,10 +256,10 @@ def test_sample_wise_candidate_at_pool_mean_has_zero_contribution():
     assert scores.fitness[1] == pytest.approx(0.0)
 
 
-def test_sample_wise_selected_frozen_score_respects_lower_bound():
+def test_src_selected_frozen_score_respects_lower_bound():
     rng = np.random.default_rng(7)
     rewards = rng.normal(size=(20, 4))
-    result = select_sample_wise_covariance_group(
+    result = select_src_group(
         rewards,
         np.array([0.1, 0.2, 0.3, 0.4]),
         target_size=7,
@@ -499,10 +269,10 @@ def test_sample_wise_selected_frozen_score_respects_lower_bound():
     assert result.frozen_score >= result.lower_bound - 1e-12
 
 
-def test_sample_wise_top_k_maximizes_conditional_lower_bound():
+def test_src_top_k_maximizes_conditional_lower_bound():
     rewards = np.array([[10.0, 0.0], [4.0, 4.0], [0.0, 0.0], [3.0, 3.0], [2.0, 5.0]])
     target_size = 3
-    result = select_sample_wise_covariance_group(
+    result = select_src_group(
         rewards,
         np.ones(2),
         target_size=target_size,
@@ -520,11 +290,11 @@ def test_sample_wise_top_k_maximizes_conditional_lower_bound():
     assert selected_lower_bound == pytest.approx(oracle)
 
 
-def test_sample_wise_selector_is_translation_scaling_and_permutation_invariant():
+def test_src_selector_is_translation_scaling_and_permutation_invariant():
     rewards = np.array([[1.0, 0.0], [0.0, 1.0], [0.8, 0.8], [0.3, 0.3]])
     weights = np.array([0.4, 0.6])
     candidate_ids = np.array([10, 11, 12, 13])
-    original = select_sample_wise_covariance_group(
+    original = select_src_group(
         rewards,
         weights,
         2,
@@ -532,7 +302,7 @@ def test_sample_wise_selector_is_translation_scaling_and_permutation_invariant()
         candidate_ids,
     )
     permutation = np.array([2, 0, 3, 1])
-    transformed = select_sample_wise_covariance_group(
+    transformed = select_src_group(
         (rewards[permutation] + np.array([8.0, -3.0])) * 7.0,
         weights,
         2,
@@ -546,9 +316,9 @@ def test_sample_wise_selector_is_translation_scaling_and_permutation_invariant()
     )
 
 
-def test_sample_wise_selector_always_retains_scalar_elite():
+def test_src_selector_always_retains_scalar_elite():
     rewards = np.array([[10.0, 0.0], [4.0, 4.0], [0.0, 0.0], [3.0, 3.0]])
-    result = select_sample_wise_covariance_group(
+    result = select_src_group(
         rewards,
         np.ones(2),
         2,
@@ -561,13 +331,13 @@ def test_sample_wise_selector_always_retains_scalar_elite():
     assert result.elite_index not in contribution_only
 
 
-def test_ga_cov_per_sample_selection_exposes_frozen_and_true_diagnostics():
+def test_ga_src_selection_exposes_frozen_and_true_diagnostics():
     ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
     ga._group_size = 2
     ga._advantage_aggregation = "sum"
-    ga._survivor_score = "cov_per_sample"
+    ga._survivor_score = "src"
     ga._survivor_selection_aggregation = "weighted_sum"
-    ga._covariance_objective = "standardized_grpo"
+    ga._src_diagnostic_objective = "standardized_grpo"
     ga._reward_weights = {
         "quality": {"default": 1.0},
         "safety": {"default": 1.0},
@@ -593,16 +363,15 @@ def test_ga_cov_per_sample_selection_exposes_frozen_and_true_diagnostics():
         None,
     )
 
-    diagnostics = stats["covariance_selection"]
+    diagnostics = stats["src_selection"]
     assert len(survivors) == 2
-    assert diagnostics["branch"] == "cov_per_sample"
     assert diagnostics["elite_id"] == 0
     assert diagnostics["elite_id"] in diagnostics["selected_ids"]
     assert len(diagnostics["sample_fitness"]) == 4
     assert diagnostics["frozen_score"] >= diagnostics["lower_bound"] - 1e-12
     assert np.asarray(diagnostics["covariance_after"]).shape == (2, 2)
     event = stats["selection_event"]
-    assert event["survivor_score"] == "cov_per_sample"
+    assert event["survivor_score"] == "src"
     assert event["reward_keys"] == ["quality", "safety"]
     assert event["valid_reward_keys"] == ["quality", "safety"]
     assert event["candidate_origin"] == ["population", "population", "child", "child"]
@@ -612,7 +381,7 @@ def test_ga_cov_per_sample_selection_exposes_frozen_and_true_diagnostics():
     np.testing.assert_allclose(event["candidate_rewards"]["quality"], [10.0, 4.0, 0.0, 3.0])
 
 
-def test_crossover_arguments_parse_cov_per_sample_configuration():
-    args = CrossoverArguments.from_dict({"survivor_score": "cov_per_sample"})
+def test_ga_arguments_parse_src_configuration():
+    args = GAArguments.from_dict({"survivor_score": "src"})
 
-    assert args.survivor_score == "cov_per_sample"
+    assert args.survivor_score == "src"

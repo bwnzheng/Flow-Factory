@@ -49,7 +49,7 @@ log:
 # Training Configuration
 train:
   # Trainer settings
-  trainer_type: 'crossover-grpo-guard' # ← CHANGED from 'grpo-guard'
+  trainer_type: 'ga_grpo_guard' # ← CHANGED from 'grpo-guard'
   advantage_aggregation: 'sum' # Options: 'sum', 'gdpo' (GRPO-Guard: matched to upstream, standard GRPO advantage)
   # Clipping
   clip_range: 2.0e-6  # PPO/GRPO clipping range (GRPO-Guard: tighter due to RatioNorm)
@@ -99,7 +99,7 @@ train:
   max_epochs: 101
 
   # ---- Crossover configuration ----
-  crossover:
+  ga:
     enabled: true                 # false → fall back to standard GRPO-Guard
     # Step sampling
     step_sampling: "uniform"      # 'fixed': use `step`; 'uniform': sample from `step_range`
@@ -112,8 +112,8 @@ train:
       mixing_ratio: 0.3           # Fraction of blocks from primary parent
       block_size: 8               # Spatial block size (H, W)
       block_size_c: 4             # Channel block size (C). 1=no ch split, 4=blocks of 4ch
-    # cov_per_sample requires advantage_aggregation: sum.
-    survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'covariance', 'cov_per_sample'
+    # src requires advantage_aggregation: sum.
+    survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'src'
     log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration

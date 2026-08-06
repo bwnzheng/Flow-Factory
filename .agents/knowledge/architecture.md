@@ -109,8 +109,8 @@ All three registries map string keys → lazy import paths. Resolution: registry
 | `awm` | `AWMTrainer` | Decoupled | `BaseTrainer` |
 | `crd` | `CRDTrainer` | Decoupled | `BaseTrainer` |
 | `diffusion-opd` | `DiffusionOPDTrainer` | Distillation (on-policy) | `BaseTrainer` |
-| `crossover-grpo-guard` | `CrossoverGRPOGuardTrainer` | Coupled + intentional off-policy intervention | `GRPOGuardTrainer` |
-| `crossover-nft` | `CrossoverNFTTrainer` | Decoupled + genetic augmentation | `DiffusionNFTTrainer` |
+| `ga_grpo_guard` | `GAGRPOGuardTrainer` | Coupled + intentional off-policy intervention | `GRPOGuardTrainer` |
+| `ga_nft` | `GANFTTrainer` | Decoupled + genetic augmentation | `DiffusionNFTTrainer` |
 
 **Flat hierarchy**: New trainers inherit from `BaseTrainer` directly. The sanctioned exceptions are
 `GRPOGuardTrainer → GRPOTrainer` and `DPPOTrainer → GRPOTrainer` (strict GRPO loss

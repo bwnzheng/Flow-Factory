@@ -17,17 +17,6 @@
 intermediate denoising states during RL training."""
 
 from .abc import BaseCrossover, CrossoverOutput
-from .covariance import (
-    CovarianceGroupScore,
-    CovarianceSelectionResult,
-    SampleWiseContributionScore,
-    SampleWiseCovarianceSelectionResult,
-    covariance_group_score,
-    population_covariance,
-    sample_wise_covariance_contributions,
-    select_covariance_guided_group,
-    select_sample_wise_covariance_group,
-)
 from .genetic_algorithm import GeneticAlgorithm
 from .pareto import (
     compute_pareto_mask,
@@ -38,6 +27,15 @@ from .sampling import (
     resolve_crossover_step,
     run_denoising_phase,
     sample_crossover_step,
+)
+from .src import (
+    CovarianceGroupScore,
+    SRCContributionScore,
+    SRCSelectionResult,
+    compute_src_contributions,
+    covariance_group_score,
+    population_covariance,
+    select_src_group,
 )
 from .strategies import (
     BlockCrossover,
@@ -52,13 +50,13 @@ __all__ = [
     "BlockCrossover",
     "ConvexCrossover",
     "CovarianceGroupScore",
-    "CovarianceSelectionResult",
     "CrossoverOutput",
     "GeneticAlgorithm",
-    "SampleWiseContributionScore",
-    "SampleWiseCovarianceSelectionResult",
+    "SRCContributionScore",
+    "SRCSelectionResult",
     "UniformCrossover",
     "compute_pareto_mask",
+    "compute_src_contributions",
     "covariance_group_score",
     "create_crossover_strategy",
     "filter_by_group",
@@ -67,8 +65,6 @@ __all__ = [
     "resolve_crossover_step",
     "run_denoising_phase",
     "sample_crossover_step",
-    "sample_wise_covariance_contributions",
-    "select_covariance_guided_group",
-    "select_sample_wise_covariance_group",
+    "select_src_group",
     "select_non_dominated_parents",
 ]

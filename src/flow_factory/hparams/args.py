@@ -19,6 +19,7 @@ Main arguments class that encapsulates all configurations.
 Supports loading from YAML files with nested structure.
 """
 from __future__ import annotations
+
 import copy
 import math
 import warnings
@@ -28,9 +29,13 @@ from typing import Any, Literal, Optional
 
 import yaml
 
+from ..utils.dist import get_world_size
+from ..utils.logger_utils import setup_logger
 from .abc import ArgABC
 from .data_args import DataArguments
+from .log_args import LogArguments
 from .model_args import ModelArguments
+from .reward_args import MultiRewardArguments, RewardArguments
 from .scheduler_args import SchedulerArguments
 from .training_args import (
     DiffusionOPDTrainingArguments,
@@ -38,10 +43,6 @@ from .training_args import (
     TrainingArguments,
     get_training_args_class,
 )
-from .reward_args import RewardArguments, MultiRewardArguments
-from .log_args import LogArguments
-from ..utils.logger_utils import setup_logger
-from ..utils.dist import get_world_size
 
 logger = setup_logger(__name__, rank_zero_only=True)
 
@@ -594,12 +595,12 @@ class Arguments(ArgABC):
         user_choice = self.data_args.sampler_type
 
         trainer_type = str(ta.trainer_type).lower()
-        crossover_enabled = bool(
-            trainer_type.startswith("crossover-")
-            and getattr(getattr(ta, "crossover", None), "enabled", False)
+        ga_enabled = bool(
+            trainer_type in {"ga_grpo_guard", "ga_nft"}
+            and getattr(getattr(ta, "ga", None), "enabled", False)
         )
 
-        if crossover_enabled and user_choice not in {"auto", "group_contiguous"}:
+        if ga_enabled and user_choice not in {"auto", "group_contiguous"}:
             raise ValueError(
                 f"trainer_type='{trainer_type}' requires sampler_type='group_contiguous' "
                 "because each genetic-algorithm population must be complete on one rank; "
@@ -621,7 +622,7 @@ class Arguments(ArgABC):
             )
             self.data_args.sampler_type = "group_contiguous"
         
-        if user_choice == "auto" and crossover_enabled:
+        if user_choice == "auto" and ga_enabled:
             self.data_args.sampler_type = "group_contiguous"
         elif user_choice == "auto" and trainer_type != "dgpo":
             # auto: prefer `group_contiguous` (all K copies on same rank → no cross-rank all-gather for rewards/advantages),

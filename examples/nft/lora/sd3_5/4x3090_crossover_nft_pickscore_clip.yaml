@@ -49,7 +49,7 @@ log:
 # Training Configuration
 train:
   # Trainer settings
-  trainer_type: 'crossover-nft'  # ← CHANGED from 'nft'
+  trainer_type: 'ga_nft'  # ← CHANGED from 'nft'
   advantage_aggregation: 'gdpo' # Options: 'sum', 'gdpo'
   nft_beta: 1.0
   # `Old` Policy settings
@@ -107,7 +107,7 @@ train:
   max_epochs: 101
 
   # ---- Crossover / Genetic Algorithm configuration ----
-  crossover:
+  ga:
     enabled: true                 # false → fall back to standard NFT
     # Step sampling
     step_sampling: "uniform"      # 'fixed': use `step`; 'uniform': sample from `step_range`
@@ -124,8 +124,8 @@ train:
     evolution_generations: 3      # Number of GA generations
     parent_ratio: 0.25            # Fraction of group selected as parents (top by advantage)
     mutation_std: 0.05            # Gaussian noise stddev applied to child latents
-    # cov_per_sample requires advantage_aggregation: sum.
-    survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'covariance', 'cov_per_sample'
+    # src requires advantage_aggregation: sum.
+    survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'src'
     # Logging
     log_rewards: true             # Log per-reward parent vs child stats
 

@@ -62,13 +62,12 @@ from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
 from ...utils.logger_utils import setup_logger
 from .abc import BaseCrossover
-from .covariance import (
-    population_covariance,
-    select_covariance_guided_group,
-    select_sample_wise_covariance_group,
-)
 from .pareto import compute_pareto_mask
 from .sampling import run_denoising_phase
+from .src import (
+    population_covariance,
+    select_src_group,
+)
 
 tqdm = tqdm_.tqdm
 logger = setup_logger(__name__)
@@ -102,21 +101,14 @@ def _resolve_cxo_step(sample: BaseSample, num_steps: int) -> int:
     return num_steps // 2
 
 
-def _format_covariance_selection_log(selection: Dict[str, Any], n_pop: int) -> str:
-    """Format strategy-specific covariance selection diagnostics."""
-    if selection["branch"] != "cov_per_sample":
-        return (
-            f"covariance={selection['branch']} "
-            f"J={selection['score']} variance={selection['scalar_variance']:.6g} "
-            f"degenerate_fallback={selection['degenerate_fallback']}"
-        )
-
+def _format_src_selection_log(selection: Dict[str, Any], n_pop: int) -> str:
+    """Format SRC selection diagnostics."""
     elite_id = int(selection["elite_id"])
     elite_origin = "child" if elite_id >= n_pop else "parent"
     true_score = selection["score"]
     true_score_text = "None" if true_score is None else f"{true_score:.6g}"
     return (
-        f"selection=cov_per_sample elite={elite_origin}:{elite_id} "
+        f"selection=src elite={elite_origin}:{elite_id} "
         f"frozen_J={selection['frozen_score']:.6g} "
         f"lower_bound={selection['lower_bound']:.6g} "
         f"gap={selection['approximation_gap']:.6g} "
@@ -143,7 +135,7 @@ class GeneticAlgorithm:
        - ``"mutation"``  — clone a single parent + Gaussian mutation, no crossover
     3. Denoise children → compute rewards
     4. Merge population → keep non-dominated (Pareto front expanders)
-    5. Fill or trim back to K with ``crossover.survivor_score``
+    5. Fill or trim back to K with ``ga.survivor_score``
 
     Args:
         crossover_strategy: Pluggable crossover strategy (used only in
@@ -189,41 +181,37 @@ class GeneticAlgorithm:
         self._advantage_aggregation = training_args.advantage_aggregation
         if self._advantage_aggregation not in {"sum", "gdpo"}:
             raise ValueError(
-                "Crossover genetic evolution requires advantage_aggregation to be "
+                "GA evolution requires advantage_aggregation to be "
                 f"'sum' or 'gdpo'; got {self._advantage_aggregation!r}."
             )
-        self._survivor_score = training_args.crossover.survivor_score
+        self._survivor_score = training_args.ga.survivor_score
         if self._survivor_score not in {
             "advantage",
             "abs_advantage",
-            "covariance",
-            "cov_per_sample",
+            "src",
         }:
             raise ValueError(
-                "crossover.survivor_score must be 'advantage', 'abs_advantage', "
-                "'covariance', or 'cov_per_sample'; "
+                "ga.survivor_score must be 'advantage', 'abs_advantage', "
+                "or 'src'; "
                 f"got {self._survivor_score!r}."
             )
-        if self._survivor_score == "cov_per_sample" and self._advantage_aggregation != "sum":
+        if self._survivor_score == "src" and self._advantage_aggregation != "sum":
             raise ValueError(
-                "crossover.survivor_score='cov_per_sample' requires "
+                "ga.survivor_score='src' requires "
                 "advantage_aggregation='sum' because its frozen contribution score is defined "
                 "against the weighted-sum scalar policy direction; "
                 f"got advantage_aggregation={self._advantage_aggregation!r}."
             )
-        if self._survivor_score in {"covariance", "cov_per_sample"} and not self._reward_weights:
+        if self._survivor_score == "src" and not self._reward_weights:
             raise ValueError(
-                f"crossover.survivor_score={self._survivor_score!r} requires configured "
-                "reward weights."
+                f"ga.survivor_score={self._survivor_score!r} requires configured " "reward weights."
             )
         self._survivor_selection_aggregation = (
-            "weighted_sum"
-            if self._survivor_score in {"covariance", "cov_per_sample"}
-            else self._advantage_aggregation
+            "weighted_sum" if self._survivor_score == "src" else self._advantage_aggregation
         )
         trainer_type = str(getattr(training_args, "trainer_type", "")).lower()
-        self._covariance_objective = (
-            "locally_linear_nft" if trainer_type == "crossover-nft" else "standardized_grpo"
+        self._src_diagnostic_objective = (
+            "locally_linear_nft" if trainer_type == "ga_nft" else "standardized_grpo"
         )
 
         # Environment (constant across epochs)
@@ -331,9 +319,7 @@ class GeneticAlgorithm:
             sample_cls=type(_p0),
             n_stored=_p0.all_latents.shape[0],
             shared_extra=dict(_p0.extra_kwargs) if _p0.extra_kwargs else {},
-            strategy_name=getattr(
-                getattr(self._training_args, "crossover", None), "strategy", "unknown"
-            ),
+            strategy_name=getattr(getattr(self._training_args, "ga", None), "strategy", "unknown"),
         )
 
         all_evolved: List[BaseSample] = []
@@ -357,16 +343,16 @@ class GeneticAlgorithm:
             acc[f"gen{gen}_n_pareto_parents"] = 0
             acc[f"gen{gen}_n_pareto_children"] = 0
             acc[f"gen{gen}_n_filled"] = 0
-            if self._survivor_score == "cov_per_sample":
-                acc[f"gen{gen}_cov_per_sample_count"] = 0
-                acc[f"gen{gen}_cov_per_sample_frozen_score_sum"] = 0.0
-                acc[f"gen{gen}_cov_per_sample_lower_bound_sum"] = 0.0
-                acc[f"gen{gen}_cov_per_sample_approximation_gap_sum"] = 0.0
-                acc[f"gen{gen}_cov_per_sample_true_score_sum"] = 0.0
-                acc[f"gen{gen}_cov_per_sample_true_score_count"] = 0
-                acc[f"gen{gen}_cov_per_sample_scalar_variance_sum"] = 0.0
-                acc[f"gen{gen}_cov_per_sample_elite_child_count"] = 0
-                acc[f"gen{gen}_cov_per_sample_degenerate_count"] = 0
+            if self._survivor_score == "src":
+                acc[f"gen{gen}_src_count"] = 0
+                acc[f"gen{gen}_src_frozen_score_sum"] = 0.0
+                acc[f"gen{gen}_src_lower_bound_sum"] = 0.0
+                acc[f"gen{gen}_src_approximation_gap_sum"] = 0.0
+                acc[f"gen{gen}_src_true_score_sum"] = 0.0
+                acc[f"gen{gen}_src_true_score_count"] = 0
+                acc[f"gen{gen}_src_scalar_variance_sum"] = 0.0
+                acc[f"gen{gen}_src_elite_child_count"] = 0
+                acc[f"gen{gen}_src_degenerate_count"] = 0
         ga_selection_events: List[Dict[str, Any]] = []
 
         gid_items = sorted(gid_to_indices.items())
@@ -435,15 +421,10 @@ class GeneticAlgorithm:
                     for k in _logged_keys
                 )
                 selection_line = ""
-                if "covariance_selection" in stats:
-                    selection = stats["covariance_selection"]
-                    selection_line = " | " + _format_covariance_selection_log(
-                        selection, stats["n_pop"]
-                    )
-                if (
-                    "covariance_selection" in stats
-                    and stats["covariance_selection"]["branch"] == "cov_per_sample"
-                ):
+                if "src_selection" in stats:
+                    selection = stats["src_selection"]
+                    selection_line = " | " + _format_src_selection_log(selection, stats["n_pop"])
+                if "src_selection" in stats:
                     population_line = (
                         f"children_kept={stats['n_children_kept']}/{stats['n_children']}"
                     )
@@ -470,12 +451,9 @@ class GeneticAlgorithm:
                 acc[f"gen{gen_idx}_n_pareto_parents"] += stats["n_pareto_parents"]
                 acc[f"gen{gen_idx}_n_pareto_children"] += stats["n_pareto_children"]
                 acc[f"gen{gen_idx}_n_filled"] += stats["n_filled"]
-                if (
-                    "covariance_selection" in stats
-                    and stats["covariance_selection"]["branch"] == "cov_per_sample"
-                ):
-                    selection = stats["covariance_selection"]
-                    prefix = f"gen{gen_idx}_cov_per_sample"
+                if "src_selection" in stats:
+                    selection = stats["src_selection"]
+                    prefix = f"gen{gen_idx}_src"
                     acc[f"{prefix}_count"] += 1
                     acc[f"{prefix}_frozen_score_sum"] += selection["frozen_score"]
                     acc[f"{prefix}_lower_bound_sum"] += selection["lower_bound"]
@@ -948,9 +926,9 @@ class GeneticAlgorithm:
 
         Advantage is computed *after* merging so all K+M samples share the
         same normalization (combined mean/std). Selection uses
-        ``crossover.survivor_score``. Pareto, covariance, and advantage
-        computation use only *valid_reward_keys*; *reward_keys* is the full
-        global set for dict iteration and stats bookkeeping.
+        ``ga.survivor_score``. SRC and advantage computation use only
+        *valid_reward_keys*; *reward_keys* is the full global set for dict
+        iteration and stats bookkeeping.
         """
         n_pop = len(population)
         n_children = len(children)
@@ -985,64 +963,27 @@ class GeneticAlgorithm:
 
         pareto_indices = np.where(pareto)[0]
         K = self._group_size
-        covariance_stats = None
+        src_stats = None
         selection_scores = None
-        if self._survivor_score in {"covariance", "cov_per_sample"}:
-            reward_matrix, weights = self._prepare_covariance_inputs(
+        if self._survivor_score == "src":
+            reward_matrix, weights = self._prepare_src_inputs(
                 combined_rewards, valid_reward_keys, source
             )
-            if self._survivor_score == "covariance":
-                covariance_fallback = np.abs(
-                    self._compute_weighted_sum_advantage(
-                        combined_rewards, valid_reward_keys, source
-                    )
-                )
-                selection = select_covariance_guided_group(
-                    reward_matrix=reward_matrix,
-                    weights=weights,
-                    target_size=K,
-                    objective=self._covariance_objective,
-                    fallback_scores=covariance_fallback,
-                    candidate_ids=np.arange(len(combined_adv)),
-                )
-                sample_wise_stats = {}
-                branch = selection.branch
-                degenerate_fallback = selection.degenerate_fallback
-            else:
-                selection = select_sample_wise_covariance_group(
-                    reward_matrix=reward_matrix,
-                    weights=weights,
-                    target_size=K,
-                    objective=self._covariance_objective,
-                    candidate_ids=np.arange(len(combined_adv)),
-                )
-                sample_scores = selection.sample_scores
-                sample_wise_stats = {
-                    "elite_id": selection.elite_index,
-                    "pool_mean_rewards": sample_scores.pool_mean.tolist(),
-                    "scalar_rewards": sample_scores.scalar_rewards.tolist(),
-                    "scalar_advantages": sample_scores.scalar_advantages.tolist(),
-                    "sample_contributions": sample_scores.contribution_matrix.tolist(),
-                    "sample_fitness": sample_scores.fitness.tolist(),
-                    "frozen_contribution_vector": selection.frozen_contribution_vector.tolist(),
-                    "frozen_score": selection.frozen_score,
-                    "lower_bound": selection.lower_bound,
-                    "approximation_gap": selection.frozen_score - selection.lower_bound,
-                    "degenerate_scalar_contrast": sample_scores.degenerate_scalar_contrast,
-                }
-                branch = "cov_per_sample"
-                degenerate_fallback = False
-            keep_indices = selection.selected_indices
-            if self._survivor_score == "cov_per_sample":
-                selection_scores = selection.sample_scores.fitness.copy()
-            n_filled = (
-                max(0, K - len(pareto_indices)) if self._survivor_score == "covariance" else 0
+            selection = select_src_group(
+                reward_matrix=reward_matrix,
+                weights=weights,
+                target_size=K,
+                objective=self._src_diagnostic_objective,
+                candidate_ids=np.arange(len(combined_adv)),
             )
+            sample_scores = selection.sample_scores
+            keep_indices = selection.selected_indices
+            selection_scores = sample_scores.fitness.copy()
+            n_filled = 0
             before_covariance = population_covariance(reward_matrix)
             group_score = selection.group_score
             finite_score = np.isfinite(group_score.score)
-            covariance_stats = {
-                "branch": branch,
+            src_stats = {
                 "selected_ids": keep_indices.tolist(),
                 "rejected_ids": selection.rejected_indices.tolist(),
                 "raw_rewards": np.stack(
@@ -1059,12 +1000,21 @@ class GeneticAlgorithm:
                 "normalized_covariance_conflict": (
                     max(0.0, -group_score.score) if finite_score else None
                 ),
-                "degenerate_fallback": degenerate_fallback,
                 "selection_aggregation": getattr(
                     self, "_survivor_selection_aggregation", self._advantage_aggregation
                 ),
                 "policy_advantage_aggregation": self._advantage_aggregation,
-                **sample_wise_stats,
+                "elite_id": selection.elite_index,
+                "pool_mean_rewards": sample_scores.pool_mean.tolist(),
+                "scalar_rewards": sample_scores.scalar_rewards.tolist(),
+                "scalar_advantages": sample_scores.scalar_advantages.tolist(),
+                "sample_contributions": sample_scores.contribution_matrix.tolist(),
+                "sample_fitness": sample_scores.fitness.tolist(),
+                "frozen_contribution_vector": selection.frozen_contribution_vector.tolist(),
+                "frozen_score": selection.frozen_score,
+                "lower_bound": selection.lower_bound,
+                "approximation_gap": selection.frozen_score - selection.lower_bound,
+                "degenerate_scalar_contrast": sample_scores.degenerate_scalar_contrast,
             }
         else:
             score = combined_adv if self._survivor_score == "advantage" else np.abs(combined_adv)
@@ -1127,7 +1077,7 @@ class GeneticAlgorithm:
             "new_rewards": new_rw_stats,
             "selection_event": {
                 "survivor_score": self._survivor_score,
-                "covariance_objective": getattr(self, "_covariance_objective", None),
+                "src_diagnostic_objective": getattr(self, "_src_diagnostic_objective", None),
                 "selection_aggregation": getattr(
                     self, "_survivor_selection_aggregation", self._advantage_aggregation
                 ),
@@ -1167,7 +1117,7 @@ class GeneticAlgorithm:
                 "selection_scores": selection_scores,
                 "selected_ids": np.asarray(keep_indices, dtype=np.int64),
                 "rejected_ids": rejected_indices,
-                "selection_diagnostics": covariance_stats,
+                "selection_diagnostics": src_stats,
                 "offspring": {
                     "mode": getattr(self, "_offspring_mode", "unknown"),
                     "candidate_ids": np.arange(n_pop, n_pop + n_children, dtype=np.int64),
@@ -1196,8 +1146,8 @@ class GeneticAlgorithm:
                 },
             },
         }
-        if covariance_stats is not None:
-            stats["covariance_selection"] = covariance_stats
+        if src_stats is not None:
+            stats["src_selection"] = src_stats
         return new_population, new_rewards, stats
 
     # ------------------------------------------------------------------
@@ -1276,31 +1226,29 @@ class GeneticAlgorithm:
             )
         return self._normalize_group_values(aggregated).astype(np.float32)
 
-    def _prepare_covariance_inputs(
+    def _prepare_src_inputs(
         self,
         rewards_dict: Dict[str, np.ndarray],
         valid_reward_keys: List[str],
         source: Optional[str],
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Stack raw rewards and resolve source-aware covariance weights."""
+        """Stack raw rewards and resolve source-aware SRC weights."""
         if not valid_reward_keys:
-            raise ValueError("Covariance survivor selection requires applicable rewards.")
+            raise ValueError("SRC survivor selection requires applicable rewards.")
 
         reward_columns = []
         weights = []
         for key in valid_reward_keys:
             values = rewards_dict[key].astype(np.float64)
             if not np.all(np.isfinite(values)):
-                raise ValueError(
-                    f"Covariance survivor selection received non-finite reward {key!r}."
-                )
+                raise ValueError(f"SRC survivor selection received non-finite reward {key!r}.")
             reward_columns.append(values)
             weights.append(self._get_reward_weight(key, source))
 
         weight_vector = np.asarray(weights, dtype=np.float64)
         if np.any(weight_vector < 0) or np.count_nonzero(weight_vector > 0) < 2:
             raise ValueError(
-                "Covariance survivor selection requires at least two positive reward weights "
+                "SRC survivor selection requires at least two positive reward weights "
                 "and does not support negative weights."
             )
         return np.stack(reward_columns, axis=1), weight_vector
@@ -1431,8 +1379,8 @@ class GeneticAlgorithm:
                     "new_sum_sq",
                 ]:
                     count_keys.append(f"gen{gen}_{rk}_{suffix}")
-            covariance_prefix = f"gen{gen}_cov_per_sample"
-            if f"{covariance_prefix}_count" in ga_acc:
+            src_prefix = f"gen{gen}_src"
+            if f"{src_prefix}_count" in ga_acc:
                 for suffix in [
                     "count",
                     "frozen_score_sum",
@@ -1444,7 +1392,7 @@ class GeneticAlgorithm:
                     "elite_child_count",
                     "degenerate_count",
                 ]:
-                    count_keys.append(f"{covariance_prefix}_{suffix}")
+                    count_keys.append(f"{src_prefix}_{suffix}")
 
         values = [float(ga_acc.get(k, 0)) for k in count_keys]
         t = torch.tensor(values, device=accelerator.device, dtype=torch.float32)
@@ -1487,10 +1435,10 @@ class GeneticAlgorithm:
                     stats[f"{p}/{rk}/{population_name}_mean"] = round(mean, 6)
                     stats[f"{p}/{rk}/{population_name}_std"] = round(var**0.5, 6)
 
-            covariance_prefix = f"gen{gen}_cov_per_sample"
-            covariance_count = reduced.get(f"{covariance_prefix}_count", 0.0)
-            if covariance_count > 0:
-                metric_prefix = f"{p}/cov_per_sample"
+            src_prefix = f"gen{gen}_src"
+            src_count = reduced.get(f"{src_prefix}_count", 0.0)
+            if src_count > 0:
+                metric_prefix = f"{p}/src"
                 for metric in [
                     "frozen_score",
                     "lower_bound",
@@ -1498,21 +1446,21 @@ class GeneticAlgorithm:
                     "scalar_variance",
                 ]:
                     stats[f"{metric_prefix}/{metric}"] = round(
-                        reduced[f"{covariance_prefix}_{metric}_sum"] / covariance_count,
+                        reduced[f"{src_prefix}_{metric}_sum"] / src_count,
                         6,
                     )
-                true_score_count = reduced[f"{covariance_prefix}_true_score_count"]
+                true_score_count = reduced[f"{src_prefix}_true_score_count"]
                 if true_score_count > 0:
                     stats[f"{metric_prefix}/true_score"] = round(
-                        reduced[f"{covariance_prefix}_true_score_sum"] / true_score_count,
+                        reduced[f"{src_prefix}_true_score_sum"] / true_score_count,
                         6,
                     )
                 stats[f"{metric_prefix}/elite_child_rate"] = round(
-                    reduced[f"{covariance_prefix}_elite_child_count"] / covariance_count,
+                    reduced[f"{src_prefix}_elite_child_count"] / src_count,
                     6,
                 )
                 stats[f"{metric_prefix}/degenerate_scalar_contrast_rate"] = round(
-                    reduced[f"{covariance_prefix}_degenerate_count"] / covariance_count,
+                    reduced[f"{src_prefix}_degenerate_count"] / src_count,
                     6,
                 )
 

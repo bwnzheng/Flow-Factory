@@ -17,7 +17,7 @@
 Shared sampling utilities for crossover trainers.
 
 Provides a reusable denoising-loop helper and crossover-step resolution
-so that both coupled (CrossoverGRPOGuard) and decoupled (CrossoverNFT)
+so that both coupled (GA GRPO-Guard) and decoupled (GA NFT)
 trainers can share the same low-level logic.
 """
 
@@ -31,8 +31,8 @@ from accelerate import Accelerator
 from ...models.abc import BaseAdapter
 from ...utils.base import filter_kwargs
 
-# Avoid circular import; CrossoverArguments is referenced only via Any/type hints
-_CrossoverArguments = Any
+# Avoid circular import; GAArguments is referenced only via Any/type hints.
+_GAArguments = Any
 
 # ============================================================================
 # Step resolution
@@ -70,26 +70,26 @@ def resolve_crossover_step(
 
 
 def sample_crossover_step(
-    crossover_args: _CrossoverArguments,
+    ga_args: _GAArguments,
     num_inference_steps: int,
     generator: Optional[torch.Generator] = None,
 ) -> int:
     """Sample a crossover step index according to the configured strategy.
 
     Args:
-        crossover_args: :class:`CrossoverArguments` instance.
+        ga_args: :class:`GAArguments` instance.
         num_inference_steps: Total number of inference steps (T).
         generator: Optional RNG for reproducibility.
 
     Returns:
         Integer step index in ``[1, num_inference_steps - 1]``.
     """
-    sampling = getattr(crossover_args, "step_sampling", "fixed")
+    sampling = getattr(ga_args, "step_sampling", "fixed")
 
     if sampling == "fixed":
-        step_spec = crossover_args.step
+        step_spec = ga_args.step
     elif sampling == "uniform":
-        lo, hi = crossover_args.step_range
+        lo, hi = ga_args.step_range
         # torch.rand does not accept non-CPU generators; always use CPU.
         cpu_gen = torch.Generator()
         if generator is not None:

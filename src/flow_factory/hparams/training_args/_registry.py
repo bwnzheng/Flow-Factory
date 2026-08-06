@@ -16,19 +16,18 @@
 from __future__ import annotations
 
 import importlib
-from typing import Type, Dict
+from typing import Dict, Type
 
 from ._base import TrainingArguments
-from .grpo import GRPOTrainingArguments
-from .dppo import DPPOTrainingArguments
-from .nft import NFTTrainingArguments
 from .awm import AWMTrainingArguments
-from .dpo import DPOTrainingArguments
-from .dgpo import DGPOTrainingArguments
 from .crd import CRDTrainingArguments
-from .crossover import CrossoverGRPOGuardTrainingArguments, CrossoverNFTTrainingArguments
+from .dgpo import DGPOTrainingArguments
+from .dpo import DPOTrainingArguments
+from .dppo import DPPOTrainingArguments
+from .ga import GAGRPOGuardTrainingArguments, GANFTTrainingArguments
+from .grpo import GRPOTrainingArguments
+from .nft import NFTTrainingArguments
 from .opd import DiffusionOPDTrainingArguments
-
 
 # ============================================================================
 # Training Arguments Registry
@@ -44,8 +43,8 @@ _TRAINING_ARGS_REGISTRY: Dict[str, Type[TrainingArguments]] = {
     'dpo': DPOTrainingArguments,
     'crd': CRDTrainingArguments,
     'diffusion-opd': DiffusionOPDTrainingArguments,
-    'crossover-grpo-guard': CrossoverGRPOGuardTrainingArguments,
-    'crossover-nft': CrossoverNFTTrainingArguments,
+    'ga_grpo_guard': GAGRPOGuardTrainingArguments,
+    'ga_nft': GANFTTrainingArguments,
 }
 
 

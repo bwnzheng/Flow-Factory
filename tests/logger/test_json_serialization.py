@@ -84,7 +84,7 @@ def test_ga_raw_selections_are_saved_to_pkl_and_omitted_from_metrics_jsonl(tmp_p
     logger.log_data(
         {
             "ga/n_groups": 2,
-            "ga/gen0/cov_per_sample/frozen_score": 0.25,
+            "ga/gen0/src/frozen_score": 0.25,
             "ga/raw_selections": [event],
         },
         step=7,
@@ -95,7 +95,7 @@ def test_ga_raw_selections_are_saved_to_pkl_and_omitted_from_metrics_jsonl(tmp_p
     assert metrics == {
         "step": 7,
         "ga/n_groups": 2,
-        "ga/gen0/cov_per_sample/frozen_score": 0.25,
+        "ga/gen0/src/frozen_score": 0.25,
     }
 
     ga_path = tmp_path / "ga-raw" / "logs" / "ga" / "train_step_000007.pkl"
