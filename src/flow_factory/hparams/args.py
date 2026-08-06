@@ -203,14 +203,14 @@ class Arguments(ArgABC):
         if ta.sample_weighting == "none":
             return
 
-        supported_trainers = {"grpo", "grpo-guard", "dppo", "awm"}
+        supported_trainers = {"grpo", "grpo-guard", "dppo", "nft", "awm"}
         trainer_type = str(ta.trainer_type).lower()
         if trainer_type not in supported_trainers:
             raise ValueError(
-                "`sample_weighting: src` is only exact for trainers whose policy loss is linear "
-                "in the stored advantage. Supported trainer types are "
-                f"{sorted(supported_trainers)}; got trainer_type={trainer_type!r}. NFT remaps "
-                "advantages nonlinearly, DPO forms pairs, DGPO performs another group reduction, "
+                "`sample_weighting: src` has no declared objective-specific integration for "
+                "this trainer. Supported trainer types are "
+                f"{sorted(supported_trainers)}; got trainer_type={trainer_type!r}. DPO forms "
+                "pairs, DGPO performs another group reduction, "
                 "CRD recenters implicit rewards, and crossover changes the rollout support."
             )
         if getattr(ta, "advantage_aggregation", None) != "sum":
@@ -225,8 +225,8 @@ class Arguments(ArgABC):
             )
         if trainer_type == "awm" and getattr(ta, "off_policy", False):
             raise ValueError(
-                "`sample_weighting: src` requires on-policy rollout groups, but AWM "
-                "`off_policy` is enabled."
+                "`sample_weighting: src` requires on-policy rollout groups, but "
+                f"trainer_type={trainer_type!r} has `off_policy: true`."
             )
 
         for dataset in self.data_args.training_datasets:

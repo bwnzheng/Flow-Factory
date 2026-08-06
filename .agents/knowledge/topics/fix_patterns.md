@@ -150,6 +150,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: A subset-level selection proxy may be intentionally independent from the policy aggregation, but a per-sample score presented as contribution to the policy direction must use the same scalarization or be given a separate method definition and name.
 - **Related Constraint**: #6
 
+### NFT SRC validation confused an interpretation boundary with objective validity
+- **Date**: 2026-08-06
+- **Symptom**: `sample_weighting: src` rejected `trainer_type: nft` with `off_policy: true`, even though the weighted NFT regression objective is well defined for EMA-generated rollout groups.
+- **Root Cause**: The configuration guard promoted SRC's fresh-reference raw-reward alignment condition into a runtime requirement. That condition limits the strongest gradient interpretation after the current policy drifts from the EMA old policy; it does not invalidate the complete NFT objective.
+- **Fix**: Allow off-policy NFT SRC, keep the undeclared off-policy AWM combination rejected, and log whether NFT uses the current or EMA sampling policy as its reference mode.
+- **Lesson**: Theory claim boundaries must be represented as explicit diagnostics and documentation unless violating them makes the implemented objective undefined or incorrect.
+- **Related Constraint**: #26
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

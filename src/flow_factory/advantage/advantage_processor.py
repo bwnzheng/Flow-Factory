@@ -91,6 +91,7 @@ class AdvantageProcessor:
         src_reweight_temperature: float = 1.0,
         src_reweight_epsilon: float = 1e-8,
         src_reweight_degeneracy_threshold: float = 1e-12,
+        sample_weighting_consumer: Literal["linear_advantage", "nft"] = "linear_advantage",
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -106,7 +107,13 @@ class AdvantageProcessor:
             raise ValueError(
                 "sample_weighting='src' cannot be combined with stddev_reweighting=True."
             )
+        if sample_weighting_consumer not in {"linear_advantage", "nft"}:
+            raise ValueError(
+                "sample_weighting_consumer must be 'linear_advantage' or 'nft', "
+                f"got {sample_weighting_consumer!r}."
+            )
         self.sample_weighting = sample_weighting
+        self.sample_weighting_consumer = sample_weighting_consumer
         self.src_reweight_interpolation = src_reweight_interpolation
         self.src_reweight_temperature = src_reweight_temperature
         self.src_reweight_epsilon = src_reweight_epsilon
@@ -640,6 +647,7 @@ class AdvantageProcessor:
             t = torch.tensor(
                 [float(len(values)), float(np.sum(values)), float(np.sum(values**2))],
                 device=self.accelerator.device,
+                dtype=torch.float32,
             )
             t = self.accelerator.reduce(t, reduction="sum")  # 1 call, 3 scalars
             n, s, ss = t[0].item(), t[1].item(), t[2].item()
@@ -909,7 +917,17 @@ class AdvantageProcessor:
                 epsilon=self.src_reweight_epsilon,
                 degeneracy_threshold=self.src_reweight_degeneracy_threshold,
             )
-            advantages = src_result.effective_advantages
+            if self.sample_weighting_consumer == "nft":
+                if self.global_std:
+                    _, baseline_std = self._global_mean_std(aggregated_rewards)
+                    advantages = (aggregated_rewards - src_result.weighted_means) / baseline_std
+                else:
+                    weighted_prompt_std = np.maximum(np.sqrt(src_result.weighted_variances), 1e-6)
+                    advantages = (
+                        aggregated_rewards - src_result.weighted_means
+                    ) / weighted_prompt_std
+            else:
+                advantages = src_result.effective_advantages
         elif self.global_std:
             # Group-normalise (vectorized via bincount). When *norm_mask* is None
             # all samples participate; otherwise only kept samples define statistics.
@@ -1245,6 +1263,9 @@ class AdvantageProcessor:
         }
         for reward_index, reward_key in enumerate(reward_keys):
             diagnostics[f"contribution::{reward_key}"] = result.contributions[reward_index]
+            diagnostics[f"weighted_contribution::{reward_key}"] = result.weighted_contributions[
+                reward_index
+            ]
         return diagnostics
 
     @staticmethod
@@ -1342,6 +1363,29 @@ class AdvantageProcessor:
                         reward_key: diagnostics[f"contribution::{reward_key}"][indices].tolist()
                         for reward_key in reward_keys
                     },
+                    "weighted_contributions": {
+                        reward_key: diagnostics[f"weighted_contribution::{reward_key}"][
+                            indices
+                        ].tolist()
+                        for reward_key in reward_keys
+                    },
+                    "frozen_aggregate_contribution": {
+                        reward_key: float(
+                            np.nansum(
+                                probability * diagnostics[f"contribution::{reward_key}"][indices]
+                            )
+                        )
+                        for reward_key in reward_keys
+                    },
+                    "weighted_aggregate_contribution": {
+                        reward_key: float(
+                            np.nansum(
+                                probability
+                                * diagnostics[f"weighted_contribution::{reward_key}"][indices]
+                            )
+                        )
+                        for reward_key in reward_keys
+                    },
                     "scalar_variance": float(diagnostics["scalar_variance"][first_index]),
                     "weighted_variance": float(diagnostics["weighted_variance"][first_index]),
                     "ess": float(diagnostics["ess"][first_index]),
@@ -1365,6 +1409,18 @@ class AdvantageProcessor:
             log_data[f"train/src_contribution_{reward_key}_min"] = reward_stats["min"]
             log_data[f"train/src_conflict_ratio_{reward_key}"] = (
                 float((finite < 0.0).mean()) if len(finite) > 0 else 0.0
+            )
+            weighted_contribution = diagnostics[f"weighted_contribution::{reward_key}"]
+            finite_weighted = weighted_contribution[np.isfinite(weighted_contribution)]
+            weighted_reward_stats = stats(finite_weighted)
+            log_data[f"train/src_weighted_contribution_{reward_key}_mean"] = weighted_reward_stats[
+                "mean"
+            ]
+            log_data[f"train/src_weighted_contribution_{reward_key}_min"] = weighted_reward_stats[
+                "min"
+            ]
+            log_data[f"train/src_weighted_conflict_ratio_{reward_key}"] = (
+                float((finite_weighted < 0.0).mean()) if len(finite_weighted) > 0 else 0.0
             )
         log_data["train/src_groups"] = src_groups
         return log_data

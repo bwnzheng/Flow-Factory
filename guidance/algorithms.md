@@ -135,14 +135,16 @@ coordinate `s_i = min_k c_ik`. The dimensionless score
 `p_i = (1 - lambda) / K + lambda * softmax(score_i / temperature)`.
 
 The same probability defines the weighted scalar-reward mean and variance. The
-processor stores `K * p_i` as `sample_weight` and folds it into the final
-advantage, so trainers whose loss is linear in the stored advantage require no
-separate optimize-loop implementation. The independent KL regularizer remains
-unchanged; SRC reweights the reward-driven policy term.
+processor stores `K * p_i` as `sample_weight`. For GRPO-style linear consumers,
+it folds that multiplier into the final advantage. For NFT, it keeps the outer
+multiplier separate and applies it to the complete positive/negative
+per-sample NFT objective while using a weighted-centered signed optimality
+signal for the branch mixture. Independent KL regularizers remain uniformly
+aggregated.
 
 ```yaml
 train:
-  trainer_type: grpo  # Also supported: grpo-guard, dppo, awm (on-policy only)
+  trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm (on-policy only)
   advantage_aggregation: sum
   stddev_reweighting: false
   sample_weighting: src  # Options: none, src
@@ -153,20 +155,24 @@ train:
 ```
 
 SRC requires at least two active rewards with positive, nonnegative fixed
-weights for every training source. It always uses prompt-local weighted
-centering and scaling; `global_std` is therefore not applied on this path. It
-cannot be combined with `stddev_reweighting`, off-policy AWM, crossover, NFT,
-DPO, DGPO, or CRD: those paths change rollout support or transform the stored
-advantage nonlinearly, so silently reusing the option would implement a
-different objective.
+weights for every training source. GRPO-style consumers use prompt-local
+weighted centering and scaling regardless of `global_std`. NFT preserves its
+declared normalizer contract: `global_std: true` keeps the baseline unweighted
+global rollout standard deviation while changing the prompt mean to the SRC-
+weighted mean; `global_std: false` uses the corresponding weighted prompt
+standard deviation. SRC cannot be combined with `stddev_reweighting`,
+off-policy AWM, crossover, DPO, DGPO, or CRD. NFT may use either its current
+policy or EMA sampling policy as the rollout/reference distribution.
 
 Logging includes probability and `sample_weight` distributions, ESS and
 ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower
-bounds, degeneracy rate, per-reward contribution/conflict metrics, weighted
-centering/probability-sum errors, and `train/src_groups` with per-sample scores,
-probabilities, multipliers, advantages, and contribution vectors. SRC adds no
-rank reduction: these diagnostics ride the existing float32 logging gather and
-are summarized from the already-complete payload.
+bounds, degeneracy rate, frozen and weighted-recentered per-reward
+contribution/conflict metrics, weighted centering/probability-sum errors, and
+`train/src_groups` with per-sample scores, probabilities, multipliers,
+advantages, and both contribution vectors. NFT additionally logs its
+optimality clipping ratio and positive-branch probability. SRC adds no rank
+reduction: its diagnostics ride the existing float32 logging gather and are
+summarized from the already-complete payload.
 
 ### Regularization
 
@@ -500,6 +506,22 @@ To use this algorithm, set:
 train:
     trainer_type: 'nft'
 ```
+
+With `sample_weighting: src`, NFT keeps the two SRC probabilities distinct.
+The weighted-centered scalar signal controls the positive/negative branch
+probability, while `sample_weight = K * p_i` multiplies the complete per-sample
+NFT regression objective. The multiplier therefore affects both the reward-
+driven contrast and the old-policy anchor after the trainable predictor moves.
+This mode requires `advantage_aggregation: sum` and fixed nonnegative reward
+weights. It does not reweight the independent KL penalty. With
+`off_policy: true`, SRC reshapes the empirical EMA-rollout distribution and
+the EMA prediction supplies `v_old`; the objective remains well defined, but
+the fresh-reference raw-reward alignment interpretation no longer describes
+the complete gradient. Startup logging reports the reference mode explicitly.
+When `global_std: true`, the normalizer remains the baseline unweighted global
+rollout standard deviation; otherwise NFT uses the SRC-weighted prompt
+standard deviation. Logging reports both the frozen contribution that produced
+the SRC distribution and the contribution after weighted recentering.
 
 Since DiffusionNFT decouples training from sampling dynamics, you can freely choose the sampling solver. Using the `ODE` solver during sampling typically yields higher image quality:
 

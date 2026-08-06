@@ -44,6 +44,39 @@ from ..utils.dist import reduce_loss_info
 logger = setup_logger(__name__)
 
 
+def _compute_nft_policy_objective(
+    positive_loss: torch.Tensor,
+    negative_loss: torch.Tensor,
+    advantage: torch.Tensor,
+    adv_clip_range: tuple[float, float],
+    nft_beta: float,
+    sample_weight: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Combine NFT branches and optionally reshape the empirical sample mass."""
+    raw_advantage = advantage.reshape(-1)
+    clipped_advantage = torch.clamp(raw_advantage, adv_clip_range[0], adv_clip_range[1])
+    advantage_scale = max(adv_clip_range)
+    signed_optimality = torch.clamp(clipped_advantage / advantage_scale, -1.0, 1.0)
+    positive_probability = (signed_optimality + 1.0) / 2.0
+
+    per_sample_loss = (
+        positive_probability * positive_loss + (1.0 - positive_probability) * negative_loss
+    ) / nft_beta
+    if sample_weight is not None:
+        outer_weight = sample_weight.detach().reshape(-1).to(per_sample_loss)
+        if outer_weight.shape != per_sample_loss.shape:
+            raise ValueError(
+                "NFT sample_weight must match the per-sample loss shape; "
+                f"got sample_weight={outer_weight.shape}, loss={per_sample_loss.shape}."
+            )
+        per_sample_weighted_loss = outer_weight * per_sample_loss
+    else:
+        per_sample_weighted_loss = per_sample_loss
+
+    policy_loss = (per_sample_weighted_loss * advantage_scale).mean()
+    clipping_ratio = (raw_advantage.abs() >= advantage_scale).float().mean()
+    return policy_loss, per_sample_loss, positive_probability, clipping_ratio
+
 
 class DiffusionNFTTrainer(BaseTrainer):
     """
@@ -66,6 +99,19 @@ class DiffusionNFTTrainer(BaseTrainer):
         self.timestep_range = self.training_args.timestep_range
 
         self.kl_type = self.training_args.kl_type
+
+        if self.training_args.sample_weighting == "src":
+            normalizer = (
+                "unweighted_global_rollout_std"
+                if self.training_args.global_std
+                else "weighted_prompt_std"
+            )
+            reference_mode = "ema_sampling_policy" if self.off_policy else "current_policy"
+            logger.info(
+                "SRC-Reweight NFT objective enabled: outer_loss_multiplier(K * probability), "
+                f"nft_normalizer({normalizer}), off_policy({self.off_policy}), "
+                f"nft_reference_mode({reference_mode}), independent_kl_weighting(uniform)."
+            )
 
     @property
     def enable_kl_loss(self) -> bool:
@@ -314,6 +360,14 @@ class DiffusionNFTTrainer(BaseTrainer):
                 batch = BaseSample.stack(batch_samples)
                 batch_size = batch['all_latents'].shape[0]
                 clean_latents = batch['all_latents'][:, -1]
+                if self.training_args.sample_weighting == "src":
+                    if "sample_weight" not in batch:
+                        raise RuntimeError(
+                            "SRC-Reweight NFT requires sample_weight from AdvantageProcessor."
+                        )
+                    sample_weight = batch["sample_weight"]
+                else:
+                    sample_weight = None
 
                 # ---------- Per-batch precompute: old v predictions under sampling policy ----------
                 self.adapter.rollout()
@@ -359,11 +413,6 @@ class DiffusionNFTTrainer(BaseTrainer):
                         # 3. Compute NFT loss
                         adv = batch['advantage']
                         adv_clip_range = self.training_args.adv_clip_range
-                        adv = torch.clamp(adv, adv_clip_range[0], adv_clip_range[1])
-
-                        # Normalize advantage to [0, 1]
-                        normalized_adv = (adv / max(adv_clip_range)) / 2.0 + 0.5
-                        r = torch.clamp(normalized_adv, 0, 1).view(-1, *([1] * (new_v_pred.dim() - 1)))
 
                         # Positive/negative predictions
                         positive_pred = self.nft_beta * new_v_pred + (1 - self.nft_beta) * old_v_pred
@@ -385,9 +434,21 @@ class DiffusionNFTTrainer(BaseTrainer):
                             ).clip(min=1e-5)
                         negative_loss = ((neg_x0_pred - clean_latents) ** 2 / neg_weight).mean(dim=tuple(range(1, clean_latents.ndim)))
 
-                        # Combined loss
-                        ori_policy_loss = (r.squeeze() * positive_loss + (1.0 - r.squeeze()) * negative_loss) / self.nft_beta
-                        policy_loss = (ori_policy_loss * adv_clip_range[1]).mean()
+                        # Combined loss. SRC applies K * probability to the complete
+                        # per-sample NFT objective, not only its reward-driven branch.
+                        (
+                            policy_loss,
+                            ori_policy_loss,
+                            positive_probability,
+                            optimality_clipping_ratio,
+                        ) = _compute_nft_policy_objective(
+                            positive_loss=positive_loss,
+                            negative_loss=negative_loss,
+                            advantage=adv,
+                            adv_clip_range=adv_clip_range,
+                            nft_beta=self.nft_beta,
+                            sample_weight=sample_weight,
+                        )
                         loss = policy_loss
 
                         # 4. KL penalty
@@ -406,11 +467,23 @@ class DiffusionNFTTrainer(BaseTrainer):
                                 loss_info['kl_loss'].append(kl_loss.detach())
 
                         # 5. Log per-timestep info
-                        loss_info['policy_loss'].append(policy_loss.detach())
-                        loss_info['unweighted_policy_loss'].append(ori_policy_loss.mean().detach())
-                        loss_info['loss'].append(loss.detach())
-                        loss_info['policy_pos_loss_mean'].append((r.squeeze() * positive_loss).mean().detach())
-                        loss_info['policy_neg_loss_mean'].append(((1.0 - r.squeeze()) * negative_loss).mean().detach())
+                        loss_info["policy_loss"].append(policy_loss.detach())
+                        loss_info["unweighted_policy_loss"].append(
+                            ori_policy_loss.mean().detach()
+                        )
+                        loss_info["loss"].append(loss.detach())
+                        loss_info["policy_pos_loss_mean"].append(
+                            (positive_probability * positive_loss).mean().detach()
+                        )
+                        loss_info["policy_neg_loss_mean"].append(
+                            ((1.0 - positive_probability) * negative_loss).mean().detach()
+                        )
+                        loss_info["nft_optimality_clipping_ratio"].append(
+                            optimality_clipping_ratio.detach()
+                        )
+                        loss_info["nft_positive_probability_mean"].append(
+                            positive_probability.mean().detach()
+                        )
 
                         # 6. Backward and optimizer step
                         self.accelerator.backward(loss)

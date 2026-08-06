@@ -26,6 +26,7 @@ class SRCReweightResult:
     """SRC-Reweight outputs aligned with the input sample axis."""
 
     contributions: np.ndarray
+    weighted_contributions: np.ndarray
     scores: np.ndarray
     normalized_scores: np.ndarray
     probabilities: np.ndarray
@@ -100,6 +101,7 @@ def compute_src_reweight(
 
     num_rewards, num_samples = rewards.shape
     contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
+    weighted_contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
     scores = np.zeros(num_samples, dtype=np.float64)
     normalized_scores = np.zeros(num_samples, dtype=np.float64)
     probabilities = np.zeros(num_samples, dtype=np.float64)
@@ -174,11 +176,19 @@ def compute_src_reweight(
 
         weighted_mean = float(group_probabilities @ scalar_rewards)
         centered_weighted = scalar_rewards - weighted_mean
+        weighted_reward_means = active_rewards @ group_probabilities
+        weighted_centered_rewards = active_rewards - weighted_reward_means[:, None]
+        group_weighted_contributions = (
+            active_weights[:, None] * weighted_centered_rewards * centered_weighted[None, :]
+        )
         weighted_variance = float(group_probabilities @ np.square(centered_weighted))
         group_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
         group_multipliers = group_size * group_probabilities
 
         normalized_scores[sample_indices] = group_normalized_scores
+        weighted_contributions[np.flatnonzero(active)[:, None], sample_indices] = (
+            group_weighted_contributions
+        )
         probabilities[sample_indices] = group_probabilities
         loss_multipliers[sample_indices] = group_multipliers
         weighted_advantages[sample_indices] = group_advantages
@@ -194,6 +204,7 @@ def compute_src_reweight(
 
     return SRCReweightResult(
         contributions=contributions,
+        weighted_contributions=weighted_contributions,
         scores=scores,
         normalized_scores=normalized_scores,
         probabilities=probabilities,

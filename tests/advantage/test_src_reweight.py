@@ -151,9 +151,29 @@ def test_src_config_accepts_shared_linear_advantage_trainer():
     assert args.training_args.sample_weighting == "src"
 
 
-def test_src_config_rejects_nonlinear_advantage_consumer():
-    with pytest.raises(ValueError, match="only exact for trainers"):
-        Arguments.from_dict(_src_config(trainer_type="nft"))
+def test_src_config_accepts_on_policy_nft_consumer():
+    args = Arguments.from_dict(_src_config(trainer_type="nft"))
+
+    assert args.training_args.sample_weighting == "src"
+    assert args.training_args.off_policy is False
+
+
+def test_src_config_accepts_off_policy_nft_consumer():
+    config = _src_config(trainer_type="nft")
+    config["train"]["off_policy"] = True
+
+    args = Arguments.from_dict(config)
+
+    assert args.training_args.sample_weighting == "src"
+    assert args.training_args.off_policy is True
+
+
+def test_src_config_still_rejects_off_policy_awm_consumer():
+    config = _src_config(trainer_type="awm")
+    config["train"]["off_policy"] = True
+
+    with pytest.raises(ValueError, match="requires on-policy rollout groups"):
+        Arguments.from_dict(config)
 
 
 def test_src_config_requires_two_rewards_per_training_source():
@@ -171,6 +191,12 @@ class NoReduceAccelerator:
 
     def reduce(self, tensor: torch.Tensor, reduction: str) -> torch.Tensor:
         raise AssertionError(f"SRC path unexpectedly called rank reduce({reduction})")
+
+
+class Float32ReduceAccelerator(NoReduceAccelerator):
+    def reduce(self, tensor: torch.Tensor, reduction: str) -> torch.Tensor:
+        assert tensor.dtype != torch.float64
+        return tensor
 
 
 @pytest.mark.parametrize("sampler_type", ["distributed_k_repeat", "group_contiguous"])
@@ -227,3 +253,128 @@ def test_globally_gathered_baseline_metrics_are_not_rank_reduced_again():
 
     assert metrics["train/reward_quality_mean"] == pytest.approx(0.5)
     assert metrics["train/reward_zero_std_ratio"] == pytest.approx(0.0)
+
+
+def test_nft_consumer_keeps_outer_weight_separate_and_uses_baseline_global_std():
+    samples = [BaseSample(prompt="prompt", _unique_id=13) for _ in range(3)]
+    rewards = np.array(
+        [
+            [0.0, 0.4, 1.0],
+            [0.0, 0.8, 0.9],
+        ]
+    )
+    processor = AdvantageProcessor(
+        accelerator=Float32ReduceAccelerator(),
+        reward_weights={"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        group_size=3,
+        global_std=True,
+        sampler_type="group_contiguous",
+        verbose=False,
+        sample_weighting="src",
+        sample_weighting_consumer="nft",
+        src_reweight_interpolation=0.6,
+        src_reweight_temperature=0.7,
+    )
+
+    advantages = processor.compute_advantages(
+        samples,
+        rewards={
+            "quality": torch.tensor(rewards[0]),
+            "safety": torch.tensor(rewards[1]),
+        },
+        aggregation_func="sum",
+    )
+    src_result = _compute(rewards)
+    scalar_rewards = rewards.sum(axis=0)
+    expected = (scalar_rewards - src_result.weighted_means) / scalar_rewards.std()
+    metrics = processor.pop_advantage_metrics()
+
+    np.testing.assert_allclose(advantages.cpu().numpy(), expected, rtol=1e-6)
+    np.testing.assert_allclose(
+        [sample.extra_kwargs["sample_weight"].item() for sample in samples],
+        src_result.loss_multipliers,
+        rtol=1e-6,
+    )
+    assert "train/src_weighted_contribution_quality_mean" in metrics
+    assert "weighted_contributions" in metrics["train/src_groups"][0]
+
+
+def test_nft_src_interpolation_zero_recovers_baseline_advantage_and_unit_mass():
+    samples = [BaseSample(prompt="prompt", _unique_id=17) for _ in range(3)]
+    rewards = {
+        "quality": torch.tensor([0.0, 0.4, 1.0]),
+        "safety": torch.tensor([0.0, 0.8, 0.9]),
+    }
+    common_kwargs = {
+        "accelerator": Float32ReduceAccelerator(),
+        "reward_weights": {"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        "group_size": 3,
+        "global_std": True,
+        "sampler_type": "group_contiguous",
+        "verbose": False,
+    }
+    baseline_processor = AdvantageProcessor(**common_kwargs)
+    src_processor = AdvantageProcessor(
+        **common_kwargs,
+        sample_weighting="src",
+        sample_weighting_consumer="nft",
+        src_reweight_interpolation=0.0,
+    )
+
+    baseline = baseline_processor.compute_advantages(
+        samples,
+        rewards,
+        aggregation_func="sum",
+        store_to_samples=False,
+    )
+    src = src_processor.compute_advantages(
+        samples,
+        rewards,
+        aggregation_func="sum",
+        store_to_samples=True,
+    )
+
+    torch.testing.assert_close(src, baseline, check_dtype=False)
+    assert src.dtype == torch.float32
+    torch.testing.assert_close(
+        torch.stack([sample.extra_kwargs["sample_weight"] for sample in samples]),
+        torch.ones(3),
+    )
+
+
+def test_nft_src_prompt_normalizer_preserves_baseline_contract_at_zero_interpolation():
+    samples = [BaseSample(prompt="prompt", _unique_id=19) for _ in range(3)]
+    rewards = {
+        "quality": torch.tensor([0.0, 0.4, 1.0]),
+        "safety": torch.tensor([0.0, 0.8, 0.9]),
+    }
+    common_kwargs = {
+        "accelerator": NoReduceAccelerator(),
+        "reward_weights": {"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        "group_size": 3,
+        "global_std": False,
+        "sampler_type": "group_contiguous",
+        "verbose": False,
+    }
+    baseline_processor = AdvantageProcessor(**common_kwargs)
+    src_processor = AdvantageProcessor(
+        **common_kwargs,
+        sample_weighting="src",
+        sample_weighting_consumer="nft",
+        src_reweight_interpolation=0.0,
+    )
+
+    baseline = baseline_processor.compute_advantages(
+        samples,
+        rewards,
+        aggregation_func="sum",
+        store_to_samples=False,
+    )
+    src = src_processor.compute_advantages(
+        samples,
+        rewards,
+        aggregation_func="sum",
+        store_to_samples=False,
+    )
+
+    torch.testing.assert_close(src, baseline, check_dtype=False)
