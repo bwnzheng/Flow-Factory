@@ -30,6 +30,25 @@ from transformers import CLIPModel, CLIPProcessor
 from transformers.utils.generic import ModelOutput
 
 
+def _resolve_device(device: Optional[str]) -> str:
+    """Resolve NPU, CUDA, or CPU for offline reward inference."""
+    if device is None:
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return "npu"
+        if torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
+    device_type = device.split(":")[0]
+    if device_type not in ("npu", "cuda", "cpu"):
+        raise ValueError(f"Unsupported reward-inference device: {device}")
+    if device_type == "npu" and (not hasattr(torch, "npu") or not torch.npu.is_available()):
+        raise RuntimeError("NPU reward inference requested, but torch.npu is unavailable")
+    if device_type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA reward inference requested, but torch.cuda is unavailable")
+    return device
+
+
 def _extract_feature_tensor(output: Any) -> torch.Tensor:
     """Extract tensor from get_*_features() output (compatible with transformers >=5)."""
     if isinstance(output, torch.Tensor):
@@ -44,7 +63,7 @@ class StandaloneRewardComputer:
 
     Models are NOT loaded at construction time — they are built on the first
     call to :meth:`compute`.  This makes it cheap to create many instances
-    (one per GPU) and lets each load its models in parallel on its own device.
+    and lets each accelerator worker load models on its own device.
 
     Set the ``HF_HOME`` environment variable before instantiation to control
     where cached models are loaded from.
@@ -57,11 +76,11 @@ class StandaloneRewardComputer:
         reward_configs: List[Dict[str, Any]],
         device: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-    ):
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+    ) -> None:
+        device = _resolve_device(device)
         if dtype is None:
-            dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            device_type = device.split(":")[0]
+            dtype = torch.bfloat16 if device_type in ("cuda", "npu") else torch.float32
         elif isinstance(dtype, str):
             # Resolve config-style string (e.g. "bfloat16") to torch.dtype
             dtype = getattr(torch, dtype)
@@ -144,7 +163,7 @@ class StandaloneRewardComputer:
         return results
 
 
-class MultiGPUComputer:
+class ParallelRewardComputer:
     """Scores images in parallel across multiple accelerators (CUDA / NPU).
 
     Creates one :class:`StandaloneRewardComputer` per device — models are
@@ -153,27 +172,44 @@ class MultiGPUComputer:
 
     Usage::
 
-        computer = MultiGPUComputer(reward_configs, num_gpus=4, device="cuda")
-        computer = MultiGPUComputer(reward_configs, num_gpus=8, device="npu")
+        computer = ParallelRewardComputer(reward_configs, num_processes=4, device="cuda")
+        computer = ParallelRewardComputer(reward_configs, num_processes=8, device="npu")
         scores = computer.compute(images, prompts)
     """
 
     def __init__(
         self,
         reward_configs: List[Dict[str, Any]],
-        num_gpus: int,
-        device: str = "cuda",
+        num_processes: int,
+        device: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-    ):
-        if num_gpus < 2:
-            raise ValueError(f"MultiGPUComputer requires num_gpus >= 2, got {num_gpus}")
+    ) -> None:
+        if num_processes < 2:
+            raise ValueError(
+                "ParallelRewardComputer requires num_processes >= 2, " f"got {num_processes}"
+            )
 
-        self._num_gpus = num_gpus
-        self._device_type = device.split(":")[0]  # "cuda", "npu", "cpu"
+        resolved_device = _resolve_device(device)
+        self._device_type = resolved_device.split(":")[0]
+        if self._device_type == "npu":
+            device_count = torch.npu.device_count()
+        elif self._device_type == "cuda":
+            device_count = torch.cuda.device_count()
+        else:
+            raise ValueError(
+                "Parallel reward inference requires device 'cuda' or 'npu', " f"got '{device}'"
+            )
+        if num_processes > device_count:
+            raise ValueError(
+                f"num_processes({num_processes}) exceeds available {self._device_type} "
+                f"devices({device_count})"
+            )
+
+        self._num_processes = num_processes
 
         # Create instances cheaply — models are NOT loaded yet (lazy)
         self._computers: List[StandaloneRewardComputer] = []
-        for i in range(num_gpus):
+        for i in range(num_processes):
             self._computers.append(
                 StandaloneRewardComputer(
                     reward_configs, device=f"{self._device_type}:{i}", dtype=dtype
@@ -191,9 +227,9 @@ class MultiGPUComputer:
         prompts: List[str],
         batch_size: int = 16,
     ) -> Dict[str, List[float]]:
-        """Score (image, prompt) pairs, distributing work across GPUs."""
-        # Split images evenly across GPUs
-        n = self._num_gpus
+        """Score pairs by distributing them across accelerator workers."""
+        # Split images evenly across workers
+        n = self._num_processes
         chunk_size = (len(images) + n - 1) // n
 
         chunks = []
@@ -212,31 +248,31 @@ class MultiGPUComputer:
             futures = {
                 executor.submit(
                     self._score_chunk,
-                    gpu_idx,
-                    self._computers[gpu_idx],
+                    process_index,
+                    self._computers[process_index],
                     chunk_images,
                     chunk_prompts,
                     batch_size,
-                ): gpu_idx
-                for gpu_idx, chunk_images, chunk_prompts in chunks
+                ): process_index
+                for process_index, chunk_images, chunk_prompts in chunks
             }
-            results_by_gpu: Dict[int, Dict[str, List[float]]] = {}
+            results_by_process: Dict[int, Dict[str, List[float]]] = {}
             for future in futures:
-                gpu_idx = futures[future]
-                results_by_gpu[gpu_idx] = future.result()
+                process_index = futures[future]
+                results_by_process[process_index] = future.result()
 
-        # Merge — concat per-reward-name lists in GPU order
+        # Merge per-reward-name lists in worker order.
         merged: Dict[str, List[float]] = {}
-        first = results_by_gpu[0]
+        first = results_by_process[0]
         for rname in first:
             merged[rname] = []
             for i, chunk_images, _ in chunks:
-                merged[rname].extend(results_by_gpu[i][rname])
+                merged[rname].extend(results_by_process[i][rname])
         return merged
 
     @staticmethod
     def _score_chunk(
-        gpu_idx: int,
+        process_index: int,
         computer: StandaloneRewardComputer,
         images: List[Image.Image],
         prompts: List[str],
@@ -244,9 +280,9 @@ class MultiGPUComputer:
     ) -> Dict[str, List[float]]:
         dev = computer.device
         if dev.startswith("npu"):
-            torch.npu.set_device(gpu_idx)
+            torch.npu.set_device(process_index)
         elif dev.startswith("cuda"):
-            torch.cuda.set_device(gpu_idx)
+            torch.cuda.set_device(process_index)
         # cpu — no-op
         return computer.compute(images, prompts, batch_size)
 

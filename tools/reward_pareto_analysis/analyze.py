@@ -46,9 +46,9 @@ import yaml
 from PIL import Image
 from tqdm import tqdm
 
-from tools.reward_pareto_analysis.checkpoint_evaluation import (
+from tools.model_inference import (
     EvaluationRunner,
-    MultiGPUEvaluationRunner,
+    ParallelEvaluationRunner,
     discover_checkpoints,
 )
 from tools.reward_pareto_analysis.media_logs import load_media_samples
@@ -59,7 +59,7 @@ from tools.reward_pareto_analysis.plots import (
 )
 from tools.reward_pareto_analysis.reward_logs import load_eval_rewards, load_train_rewards
 from tools.reward_pareto_analysis.reward_scoring import (
-    MultiGPUComputer,
+    ParallelRewardComputer,
     StandaloneRewardComputer,
 )
 
@@ -97,7 +97,7 @@ class AnalysisConfig:
     base_model: str = "stabilityai/stable-diffusion-3.5-medium"
     dtype: str = "bfloat16"
     device: str = "cuda"
-    num_gpus: int = 1
+    num_processes: int = 1
 
     rewards: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -113,6 +113,8 @@ def _parse_config(path: str) -> AnalysisConfig:
     ev = raw.get("evaluation", {})
     ra = raw.get("rewards_analysis", {})
     model = raw.get("model", {})
+    if "num_gpus" in model:
+        raise ValueError("model.num_gpus is unsupported; rename it to model.num_processes")
     output = raw.get("output", {})
     compute = raw.get("compute", {})
     max_workers = int(compute.get("max_workers", 0))
@@ -136,7 +138,7 @@ def _parse_config(path: str) -> AnalysisConfig:
         base_model=model.get("base_model", "stabilityai/stable-diffusion-3.5-medium"),
         dtype=model.get("dtype", "bfloat16"),
         device=model.get("device", "cuda"),
-        num_gpus=model.get("num_gpus", 1),
+        num_processes=model.get("num_processes", 1),
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
         max_workers=max_workers,
@@ -151,6 +153,8 @@ def _validate_config(config: AnalysisConfig) -> None:
             "rewards must be configured when images_analysis.enabled or "
             "evaluation.enabled is true"
         )
+    if config.num_processes <= 0:
+        raise ValueError(f"model.num_processes must be positive, got {config.num_processes}")
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +208,7 @@ def _load_prompts(config: AnalysisConfig) -> List[str]:
 
 
 def _score_images(
-    computer: Union[StandaloneRewardComputer, MultiGPUComputer],
+    computer: Union[StandaloneRewardComputer, ParallelRewardComputer],
     images: List,
     prompts: List[str],
     batch_size: int = 16,
@@ -324,7 +328,7 @@ def _dispatch_plots(
 def _run_images_analysis(
     config: AnalysisConfig,
     run_name: str,
-    computer: Optional[Union[StandaloneRewardComputer, MultiGPUComputer]],
+    computer: Optional[Union[StandaloneRewardComputer, ParallelRewardComputer]],
     output_dir: str,
     reward_names: List[str],
     dataset_filter: List[str],
@@ -475,7 +479,7 @@ def _run_images_analysis(
 def _run_evaluation(
     config: AnalysisConfig,
     run_name: str,
-    computer: Optional[Union[StandaloneRewardComputer, MultiGPUComputer]],
+    computer: Optional[Union[StandaloneRewardComputer, ParallelRewardComputer]],
     prompts: List[str],
     output_dir: str,
     reward_names: List[str],
@@ -547,36 +551,39 @@ def _run_evaluation(
         all_epoch_data = existing_cache
     else:
         # --- 2. Generate images for uncached checkpoints ---
-        if config.num_gpus > 1:
-            gen_runner = MultiGPUEvaluationRunner(
+        if config.num_processes > 1:
+            gen_runner = ParallelEvaluationRunner(
                 config.base_model,
                 config.dtype,
-                num_gpus=config.num_gpus,
+                num_processes=config.num_processes,
                 device=config.device,
             )
             print(
-                f"  Using {config.num_gpus}-GPU generation" f" (batch size={config.gen_batch_size})"
+                f"  Using {config.num_processes}-process generation"
+                f" (batch size={config.gen_batch_size})"
             )
         else:
             gen_runner = EvaluationRunner(config.base_model, config.dtype, device=config.device)
 
-        for epoch, ckpt_path in checkpoints:
-            if epoch in cached_epochs:
-                continue
-            print(f"  [Gen] Epoch={epoch}: generating images ...")
-            gen_runner.generate_for_checkpoint(
-                ckpt_path,
-                prompts,
-                gen_dir,
-                epoch,
-                num_samples=config.num_samples,
-                gen_kwargs=config.gen_kwargs,
-                gen_batch_size=config.gen_batch_size,
-                base_seed=config.gen_kwargs.get("seed", 42),
-            )
-
-        # --- 3. Free generation pipelines ---
-        del gen_runner
+        try:
+            for epoch, ckpt_path in checkpoints:
+                if epoch in cached_epochs:
+                    continue
+                print(f"  [Gen] Epoch={epoch}: generating images ...")
+                gen_runner.generate_for_checkpoint(
+                    checkpoint_path=ckpt_path,
+                    prompts=prompts,
+                    output_dir=gen_dir,
+                    step=epoch,
+                    num_samples=config.num_samples,
+                    generation_kwargs=config.gen_kwargs,
+                    batch_size=config.gen_batch_size,
+                    base_seed=config.gen_kwargs.get("seed", 42),
+                )
+        finally:
+            # --- 3. Free generation pipelines ---
+            gen_runner.close()
+            del gen_runner
 
         # --- 4. Score uncached checkpoints ---
         assert computer is not None, "Reward model needed but not loaded"
@@ -944,11 +951,15 @@ def main(config_path: str) -> None:
             if free_mem < 4.0:
                 print(f'  [WARN] Low GPU memory — consider device: "cpu"')
         t0 = time.time()
-        num_gpus = config.num_gpus
-        if num_gpus > 1:
-            print(f"  Creating {num_gpus}-GPU scorer ...")
-            computer: Union[StandaloneRewardComputer, MultiGPUComputer] = MultiGPUComputer(
-                config.rewards, num_gpus=num_gpus, device=config.device
+        num_processes = config.num_processes
+        if num_processes > 1:
+            print(f"  Creating {num_processes}-process scorer ...")
+            computer: Union[StandaloneRewardComputer, ParallelRewardComputer] = (
+                ParallelRewardComputer(
+                    config.rewards,
+                    num_processes=num_processes,
+                    device=config.device,
+                )
             )
         else:
             computer = StandaloneRewardComputer(config.rewards, device=config.device)

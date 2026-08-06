@@ -1,0 +1,30 @@
+# Standalone SD3.5 checkpoint inference configuration
+
+model:
+  base_model: "stabilityai/stable-diffusion-3.5-medium"
+  dtype: "bfloat16"               # Options: bfloat16, float16, float32
+  device: null                     # Options: null (auto), cuda, npu, cpu
+  num_processes: 1                 # One accelerator device per parallel worker
+
+checkpoint:
+  dir: "saves/<run>/checkpoints"   # Directory containing checkpoint-N subdirectories
+  path: null                       # Set one checkpoint path instead of dir
+  step: null                       # Required only if path is not named checkpoint-N
+
+evaluation:
+  dataset: "dataset/pickscore/test.txt"  # TXT or JSONL evaluation set
+  prompt_key: "prompt"             # Prompt field for JSONL input
+  max_prompts: 0                   # 0 keeps the full evaluation set
+  num_samples: 4                   # Images per prompt and checkpoint
+  batch_size: 16                   # Per-process pipeline batch size
+  seed: 42
+
+# All fields in this section are forwarded directly to the diffusers pipeline.
+generation:
+  num_inference_steps: 50
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+
+output:
+  dir: "analysis_output/model_inference/<run>"

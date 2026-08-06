@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compatibility exports for the standalone model-inference module.
+"""Reusable checkpoint inference utilities for offline analysis tools."""
 
-New analysis code should import these utilities from :mod:`tools.model_inference`.
-"""
-
-from tools.model_inference import (
+from .config import ModelInferenceConfig, load_inference_config
+from .runner import (
     EvaluationRunner,
     ParallelEvaluationRunner,
     apply_lora,
@@ -32,11 +30,13 @@ from tools.model_inference import (
 
 __all__ = [
     "EvaluationRunner",
+    "ModelInferenceConfig",
     "ParallelEvaluationRunner",
     "apply_lora",
     "discover_checkpoints",
     "load_base_pipeline",
     "load_evaluation_prompts",
+    "load_inference_config",
     "resolve_checkpoints",
     "resolve_device",
     "run_evaluation_set",

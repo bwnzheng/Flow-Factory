@@ -20,10 +20,12 @@ import itertools
 import json
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import scipy.optimize
+import torch
 
 from tools.reward_pareto_analysis.analyze import (
     AnalysisConfig,
@@ -44,6 +46,7 @@ from tools.reward_pareto_analysis.plots import (
     plot_reward_percentiles,
 )
 from tools.reward_pareto_analysis.reward_logs import load_train_rewards
+from tools.reward_pareto_analysis.reward_scoring import ParallelRewardComputer
 
 
 def _write_train_pickle(path: Path, step: int, partial_ocr: bool = False) -> None:
@@ -81,6 +84,30 @@ def test_train_reader_rejects_partial_group_reward_missingness(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="Partially missing reward"):
         load_train_rewards(str(tmp_path))
+
+
+def test_analysis_config_rejects_cuda_specific_process_count_name(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        "model:\n  num_gpus: 2\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="rename it to model.num_processes"):
+        _parse_config(str(config_path))
+
+
+def test_parallel_reward_inference_binds_npu_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_npu = SimpleNamespace(is_available=lambda: True, device_count=lambda: 2)
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+
+    computer = ParallelRewardComputer([], num_processes=2, device="npu")
+
+    assert [worker.device for worker in computer._computers] == ["npu:0", "npu:1"]
+    with pytest.raises(ValueError, match=r"num_processes\(3\).*npu devices\(2\)"):
+        ParallelRewardComputer([], num_processes=3, device="npu")
 
 
 def test_exact_convexified_hypervolume_uses_all_box_vertices() -> None:

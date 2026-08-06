@@ -36,8 +36,8 @@ evaluation:
 model:
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
-  device: "cuda"                   # "cuda" or "cpu"
-  num_gpus: 1                      # >1 → parallel scoring across multiple GPUs
+  device: "cuda"                   # "cuda", "npu", or "cpu"
+  num_processes: 1                 # >1 -> parallel inference on CUDA or NPU devices
 
 # ---- Reward models (required only for images_analysis or evaluation) ----
 rewards:

@@ -22,6 +22,8 @@ The default configuration enables only saved reward-pickle analysis. That path d
 reward names and applicable reward combinations from the pickle data and does not require
 the `model` or `rewards` sections. Enable `images_analysis` to rescore saved rollout images,
 or `evaluation` to generate and score checkpoint images; either source requires `rewards`.
+Set `model.device` to `cuda`, `npu`, or `cpu`; `model.num_processes` controls parallel
+generation and reward-scoring workers without assuming a CUDA-only environment.
 
 A minimal reward-pickle configuration is:
 
@@ -63,7 +65,8 @@ combination in the raised error.
   group-aware Pareto-convexity metrics and figures.
 - `media_logs.py`: rollout image discovery from `media.jsonl`.
 - `reward_scoring.py`: offline CLIP and PickScore inference.
-- `checkpoint_evaluation.py`: checkpoint discovery and batched evaluation generation.
+- `checkpoint_evaluation.py`: compatibility exports for existing imports.
+- `../model_inference/`: reusable and standalone checkpoint inference implementation.
 
 ## Output Structure
 
