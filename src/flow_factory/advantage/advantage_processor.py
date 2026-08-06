@@ -23,10 +23,10 @@ on the resolved sampler type:
 - ``distributed_k_repeat``: gather rewards + unique_ids across ranks →
   global grouping → scatter back to local rank.
 - ``group_contiguous``: all K copies already reside on the same rank →
-  skip all cross-rank communication for advantage computation.  Training log
-  metrics are computed via mode-aware ``_metric_*`` helpers that transparently
-  select between plain NumPy (post-gather global arrays) and ``utils.dist``
-  reductions (local shards) so logging always reflects global statistics.
+  skip all cross-rank communication for advantage computation. Training
+  diagnostics use the single existing float32 logging gather, then compute
+  statistics locally from the globally complete arrays without a second rank
+  reduction.
 """
 
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
@@ -37,8 +37,8 @@ from accelerate import Accelerator
 
 from ..rewards import RewardProcessor
 from ..samples import BaseSample
-from ..utils.dist import global_tensor_stats_batch, global_zero_std_ratio
 from ..utils.logger_utils import setup_logger
+from .sample_weighting import SRCReweightResult, compute_src_reweight
 
 logger = setup_logger(__name__)
 
@@ -86,6 +86,11 @@ class AdvantageProcessor:
         pareto_config: Optional[Dict[str, Any]] = None,
         stddev_reweighting: bool = False,
         stddev_ema_decay: float = 0.99,
+        sample_weighting: Literal["none", "src"] = "none",
+        src_reweight_interpolation: float = 0.5,
+        src_reweight_temperature: float = 1.0,
+        src_reweight_epsilon: float = 1e-8,
+        src_reweight_degeneracy_threshold: float = 1e-12,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -95,6 +100,17 @@ class AdvantageProcessor:
         self.verbose = verbose
         self.stddev_reweighting = stddev_reweighting
         self.stddev_ema_decay = stddev_ema_decay
+        if sample_weighting not in {"none", "src"}:
+            raise ValueError(f"sample_weighting must be 'none' or 'src', got {sample_weighting!r}.")
+        if sample_weighting == "src" and stddev_reweighting:
+            raise ValueError(
+                "sample_weighting='src' cannot be combined with stddev_reweighting=True."
+            )
+        self.sample_weighting = sample_weighting
+        self.src_reweight_interpolation = src_reweight_interpolation
+        self.src_reweight_temperature = src_reweight_temperature
+        self.src_reweight_epsilon = src_reweight_epsilon
+        self.src_reweight_degeneracy_threshold = src_reweight_degeneracy_threshold
         self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
 
@@ -160,6 +176,11 @@ class AdvantageProcessor:
         """
         self._pending_advantage_metrics = None
         aggregation_func = aggregation_func or "gdpo"
+        if self.sample_weighting == "src" and aggregation_func != "sum":
+            raise ValueError(
+                "sample_weighting='src' requires aggregation_func='sum'; "
+                f"got {aggregation_func!r}."
+            )
         if aggregation_func == "sum":
             return self.compute_weighted_sum(samples, rewards, store_to_samples)
         elif aggregation_func == "gdpo":
@@ -279,12 +300,20 @@ class AdvantageProcessor:
         group_indices: np.ndarray,
         advantages: Optional[np.ndarray] = None,
         applicable: Optional[np.ndarray] = None,
+        diagnostic_arrays: Optional[Dict[str, np.ndarray]] = None,
     ) -> Tuple[
-        List[str], Dict[str, np.ndarray], np.ndarray, Optional[np.ndarray], Optional[np.ndarray]
+        List[str],
+        Dict[str, np.ndarray],
+        np.ndarray,
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Dict[str, np.ndarray],
     ]:
-        """Gather prompts, rewards, group_indices, advantages, and applicable for logging."""
+        """Gather samples and optional diagnostics for logging in one float32 payload."""
         device = self.accelerator.device
         reward_keys = list(gathered_rewards.keys())
+        diagnostic_arrays = diagnostic_arrays or {}
+        diagnostic_keys = sorted(diagnostic_arrays)
         R = len(reward_keys)
 
         # Gather prompts (pad both str-length and batch-count dims)
@@ -315,21 +344,33 @@ class AdvantageProcessor:
             all_prompts = [""] * len(samples)
 
         if self.group_on_same_rank:
-            # Use unique_id (globally unique) for grouping, not group_indices (local)
-            unique_ids = torch.tensor(
-                [s.unique_id for s in samples], dtype=torch.float32, device=device
-            )
+            if diagnostic_arrays:
+                # SRC needs exact group identity after the float32 logging gather. Sample
+                # unique_id values are hash-sized, so use a globally unique dense encoding.
+                logging_group_ids = torch.tensor(
+                    group_indices * self.accelerator.num_processes + self.accelerator.process_index,
+                    dtype=torch.float32,
+                    device=device,
+                )
+            else:
+                logging_group_ids = torch.tensor(
+                    [s.unique_id for s in samples], dtype=torch.float32, device=device
+                )
 
             columns = [
                 torch.tensor(gathered_rewards[k], dtype=torch.float32, device=device)
                 for k in reward_keys
             ]
-            columns.append(unique_ids)
+            columns.append(logging_group_ids)
             if advantages is not None:
                 columns.append(torch.tensor(advantages, dtype=torch.float32, device=device))
             if applicable is not None:
                 for r in range(R):
                     columns.append(torch.tensor(applicable[r], dtype=torch.float32, device=device))
+            for key in diagnostic_keys:
+                columns.append(
+                    torch.tensor(diagnostic_arrays[key], dtype=torch.float32, device=device)
+                )
             packed = torch.stack(columns, dim=1)
 
             gathered = self._gather_uneven(packed).cpu().numpy()
@@ -338,18 +379,32 @@ class AdvantageProcessor:
             all_unique_ids = gathered[:, len(reward_keys)].astype(np.int64)
             col = len(reward_keys) + 1
             all_advantages = gathered[:, col].astype(np.float64) if advantages is not None else None
-            if applicable is not None:
+            if advantages is not None:
                 col += 1
+            if applicable is not None:
                 all_applicable = gathered[:, col : col + R].astype(bool).T
+                col += R
             else:
                 all_applicable = None
+            all_diagnostics = {
+                key: gathered[:, col + i].astype(np.float64)
+                for i, key in enumerate(diagnostic_keys)
+            }
         else:
             all_rewards = gathered_rewards
             all_unique_ids = group_indices
             all_advantages = advantages
             all_applicable = applicable
+            all_diagnostics = diagnostic_arrays
 
-        return all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable
+        return (
+            all_prompts,
+            all_rewards,
+            all_unique_ids,
+            all_advantages,
+            all_applicable,
+            all_diagnostics,
+        )
 
     def build_source_aware_matrices(
         self,
@@ -600,21 +655,13 @@ class AdvantageProcessor:
     # ------------------------------------------------------------------
 
     def _batch_reduce_stats(self, arrays: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
-        """Compute global ``{min, max, mean, std}`` for each named array.
+        """Compute stats from arrays already made globally complete for logging.
 
-        When ``group_on_same_rank`` the arrays are local shards and require
-        cross-rank reduction via :func:`dm.global_tensor_stats_batch` (3
-        all-reduce calls total, regardless of the number of arrays).
-
-        Otherwise the arrays already span all ranks (post-gather) and stats
-        are computed locally with plain NumPy.
+        Both sampler paths call :meth:`_gather_for_logging` before reaching the
+        log-data builders. Reducing these arrays again would duplicate every
+        rank's identical payload and would introduce unnecessary float64 rank
+        collectives.
         """
-        if self.group_on_same_rank:
-            tensors = {
-                k: torch.from_numpy(np.asarray(v, dtype=np.float64)) for k, v in arrays.items()
-            }
-            return global_tensor_stats_batch(self.accelerator, tensors)
-
         out: Dict[str, Dict[str, float]] = {}
         for k, v in arrays.items():
             v = np.asarray(v, dtype=np.float64)
@@ -630,9 +677,7 @@ class AdvantageProcessor:
         return out
 
     def _metric_zero_std_ratio(self, rewards: np.ndarray, group_indices: np.ndarray) -> float:
-        """Fraction of groups with near-zero std — global-reduced when ``group_on_same_rank``."""
-        if self.group_on_same_rank:
-            return global_zero_std_ratio(self.accelerator, rewards, group_indices)
+        """Compute zero-std ratio from the globally complete logging arrays."""
         return RewardProcessor.compute_group_zero_std_ratio(rewards, group_indices)
 
     @staticmethod
@@ -847,10 +892,27 @@ class AdvantageProcessor:
                 "at least one reward must apply to every source."
             )
 
-        # Group-normalise (vectorized via bincount).  When *norm_mask* is None
-        # (non-crossover training), all samples participate in mean/std.
-        # When set, children and/or dominated samples are excluded.
-        if self.global_std:
+        src_result: Optional[SRCReweightResult] = None
+        if self.sample_weighting == "src":
+            if crossover_active:
+                raise ValueError(
+                    "sample_weighting='src' cannot be combined with crossover samples because "
+                    "SRC-Reweight is defined on the original on-policy rollout support."
+                )
+            src_result = compute_src_reweight(
+                reward_matrix=stack,
+                weight_matrix=weight_matrix,
+                applicable=applicable,
+                group_indices=group_indices,
+                interpolation=self.src_reweight_interpolation,
+                temperature=self.src_reweight_temperature,
+                epsilon=self.src_reweight_epsilon,
+                degeneracy_threshold=self.src_reweight_degeneracy_threshold,
+            )
+            advantages = src_result.effective_advantages
+        elif self.global_std:
+            # Group-normalise (vectorized via bincount). When *norm_mask* is None
+            # all samples participate; otherwise only kept samples define statistics.
             values_for_std = (
                 aggregated_rewards if norm_mask is None else aggregated_rewards[norm_mask]
             )
@@ -874,14 +936,24 @@ class AdvantageProcessor:
                 aggregated_rewards, group_indices, keep_mask=norm_mask
             )
 
-        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
-            self._gather_for_logging(
-                samples,
-                gathered_rewards,
-                group_indices,
-                advantages=advantages,
-                applicable=applicable,
-            )
+        src_diagnostics: Dict[str, np.ndarray] = {}
+        if src_result is not None:
+            src_diagnostics = self._src_diagnostic_arrays(src_result, reward_keys)
+
+        (
+            all_prompts,
+            all_rewards,
+            all_unique_ids,
+            all_advantages,
+            all_applicable,
+            all_src_diagnostics,
+        ) = self._gather_for_logging(
+            samples,
+            gathered_rewards,
+            group_indices,
+            advantages=advantages,
+            applicable=applicable,
+            diagnostic_arrays=src_diagnostics,
         )
 
         # When group_on_same_rank, aggregated_rewards is local but all_unique_ids is
@@ -911,6 +983,14 @@ class AdvantageProcessor:
             reward_keys=reward_keys,
             stat_mask=log_stat_mask,
         )
+        if src_result is not None:
+            self._pending_advantage_metrics.update(
+                self._build_src_log_data(
+                    all_src_diagnostics,
+                    all_unique_ids,
+                    reward_keys,
+                )
+            )
 
         # ---- Log stddev effective weights (optional) ----
         if self.stddev_reweighting:
@@ -934,9 +1014,22 @@ class AdvantageProcessor:
 
         # Scatter & store
         advantages = self._to_local(advantages)
+        if src_result is not None:
+            advantages = advantages.float()
+        local_src_diagnostics = {
+            key: self._to_local(value).float() for key, value in src_diagnostics.items()
+        }
         if store_to_samples:
-            for sample, adv in zip(samples, advantages):
+            for sample_index, (sample, adv) in enumerate(zip(samples, advantages)):
                 sample.extra_kwargs["advantage"] = adv
+                if src_result is not None:
+                    sample.extra_kwargs["sample_weight"] = local_src_diagnostics["loss_multiplier"][
+                        sample_index
+                    ]
+                    sample.extra_kwargs["src_probability"] = local_src_diagnostics["probability"][
+                        sample_index
+                    ]
+                    sample.extra_kwargs["src_score"] = local_src_diagnostics["score"][sample_index]
 
         # Mark dominated local samples
         if pareto_mask is not None:
@@ -1065,7 +1158,7 @@ class AdvantageProcessor:
         bn_mean, bn_std = self._global_mean_std(values_for_bn)
         advantages = (combined_advantages - bn_mean) / bn_std
 
-        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable = (
+        all_prompts, all_rewards, all_unique_ids, all_advantages, all_applicable, _ = (
             self._gather_for_logging(
                 samples,
                 gathered_rewards,
@@ -1128,6 +1221,153 @@ class AdvantageProcessor:
             self._mark_dominated_samples(samples, pareto_mask)
 
         return advantages
+
+    @staticmethod
+    def _src_diagnostic_arrays(
+        result: SRCReweightResult,
+        reward_keys: List[str],
+    ) -> Dict[str, np.ndarray]:
+        """Flatten SRC diagnostics for the existing float32 logging gather."""
+        diagnostics = {
+            "score": result.scores,
+            "normalized_score": result.normalized_scores,
+            "probability": result.probabilities,
+            "loss_multiplier": result.loss_multipliers,
+            "weighted_advantage": result.weighted_advantages,
+            "effective_advantage": result.effective_advantages,
+            "scalar_variance": result.scalar_variances,
+            "weighted_mean": result.weighted_means,
+            "weighted_variance": result.weighted_variances,
+            "ess": result.effective_sample_sizes,
+            "lower_bound_uniform": result.lower_bound_uniform,
+            "lower_bound_reweighted": result.lower_bound_reweighted,
+            "degenerate": result.degenerate_scalar_contrast.astype(np.float64),
+        }
+        for reward_index, reward_key in enumerate(reward_keys):
+            diagnostics[f"contribution::{reward_key}"] = result.contributions[reward_index]
+        return diagnostics
+
+    @staticmethod
+    def _build_src_log_data(
+        diagnostics: Dict[str, np.ndarray],
+        group_indices: np.ndarray,
+        reward_keys: List[str],
+    ) -> Dict[str, Any]:
+        """Build globally complete SRC metrics without another rank reduction."""
+
+        def stats(values: np.ndarray) -> Dict[str, float]:
+            finite = np.asarray(values, dtype=np.float64)
+            finite = finite[np.isfinite(finite)]
+            if len(finite) == 0:
+                return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
+            return {
+                "min": float(finite.min()),
+                "max": float(finite.max()),
+                "mean": float(finite.mean()),
+                "std": float(finite.std()),
+            }
+
+        log_data: Dict[str, Any] = {}
+        for diagnostic_key, metric_name in (
+            ("score", "src_score"),
+            ("normalized_score", "src_normalized_score"),
+            ("probability", "src_probability"),
+            ("loss_multiplier", "sample_weight"),
+            ("weighted_advantage", "src_weighted_advantage"),
+        ):
+            for stat_name, value in stats(diagnostics[diagnostic_key]).items():
+                log_data[f"train/{metric_name}_{stat_name}"] = value
+
+        unique_groups = np.unique(group_indices)
+        first_indices = np.array(
+            [np.flatnonzero(group_indices == group_id)[0] for group_id in unique_groups],
+            dtype=np.int64,
+        )
+        ess = diagnostics["ess"][first_indices]
+        group_sizes = np.array(
+            [np.count_nonzero(group_indices == group_id) for group_id in unique_groups],
+            dtype=np.float64,
+        )
+        ess_ratio = ess / group_sizes
+        log_data.update(
+            {
+                "train/src_ess_mean": float(ess.mean()),
+                "train/src_ess_min": float(ess.min()),
+                "train/src_ess_max": float(ess.max()),
+                "train/src_ess_ratio_mean": float(ess_ratio.mean()),
+                "train/src_ess_ratio_min": float(ess_ratio.min()),
+                "train/src_degenerate_scalar_contrast_ratio": float(
+                    diagnostics["degenerate"][first_indices].mean()
+                ),
+                "train/src_scalar_variance_mean": float(
+                    diagnostics["scalar_variance"][first_indices].mean()
+                ),
+                "train/src_weighted_variance_mean": float(
+                    diagnostics["weighted_variance"][first_indices].mean()
+                ),
+                "train/src_lower_bound_uniform_mean": float(
+                    diagnostics["lower_bound_uniform"][first_indices].mean()
+                ),
+                "train/src_lower_bound_reweighted_mean": float(
+                    diagnostics["lower_bound_reweighted"][first_indices].mean()
+                ),
+                "train/src_lower_bound_gain_mean": float(
+                    (
+                        diagnostics["lower_bound_reweighted"][first_indices]
+                        - diagnostics["lower_bound_uniform"][first_indices]
+                    ).mean()
+                ),
+            }
+        )
+
+        probability_sum_errors = []
+        weighted_centering_errors = []
+        src_groups = []
+        for group_id in unique_groups:
+            indices = np.flatnonzero(group_indices == group_id)
+            probability = diagnostics["probability"][indices]
+            weighted_advantage = diagnostics["weighted_advantage"][indices]
+            probability_sum_errors.append(abs(float(probability.sum()) - 1.0))
+            weighted_centering_errors.append(abs(float(probability @ weighted_advantage)))
+            first_index = indices[0]
+            src_groups.append(
+                {
+                    "group_id": int(group_id),
+                    "scores": diagnostics["score"][indices].tolist(),
+                    "normalized_scores": diagnostics["normalized_score"][indices].tolist(),
+                    "probabilities": probability.tolist(),
+                    "loss_multipliers": diagnostics["loss_multiplier"][indices].tolist(),
+                    "weighted_advantages": weighted_advantage.tolist(),
+                    "contributions": {
+                        reward_key: diagnostics[f"contribution::{reward_key}"][indices].tolist()
+                        for reward_key in reward_keys
+                    },
+                    "scalar_variance": float(diagnostics["scalar_variance"][first_index]),
+                    "weighted_variance": float(diagnostics["weighted_variance"][first_index]),
+                    "ess": float(diagnostics["ess"][first_index]),
+                    "lower_bound_uniform": float(diagnostics["lower_bound_uniform"][first_index]),
+                    "lower_bound_reweighted": float(
+                        diagnostics["lower_bound_reweighted"][first_index]
+                    ),
+                    "degenerate_scalar_contrast": bool(diagnostics["degenerate"][first_index]),
+                }
+            )
+
+        log_data["train/src_probability_sum_error_max"] = max(probability_sum_errors, default=0.0)
+        log_data["train/src_weighted_centering_error_max"] = max(
+            weighted_centering_errors, default=0.0
+        )
+        for reward_key in reward_keys:
+            contribution = diagnostics[f"contribution::{reward_key}"]
+            finite = contribution[np.isfinite(contribution)]
+            reward_stats = stats(finite)
+            log_data[f"train/src_contribution_{reward_key}_mean"] = reward_stats["mean"]
+            log_data[f"train/src_contribution_{reward_key}_min"] = reward_stats["min"]
+            log_data[f"train/src_conflict_ratio_{reward_key}"] = (
+                float((finite < 0.0).mean()) if len(finite) > 0 else 0.0
+            )
+        log_data["train/src_groups"] = src_groups
+        return log_data
 
     # ------------------------------------------------------------------
     # Crossover stats + Pareto filtering

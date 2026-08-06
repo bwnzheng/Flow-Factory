@@ -86,6 +86,11 @@ train:
 
   per_device_batch_size: 8  # Batch size per GPU device
   group_size: 16  # Number of samples generated per prompt (K in GRPO)
+  sample_weighting: none  # Options: none, src
+  src_reweight_interpolation: 0.5  # SRC lambda in [0, 1)
+  src_reweight_temperature: 1.0  # Positive SRC softmax temperature
+  src_reweight_epsilon: 1.0e-8  # Positive numerical safeguard
+  src_reweight_degeneracy_threshold: 1.0e-12  # Uniform fallback threshold
   global_std: true  # Use global std for advantage normalization (vs per-group)
   unique_sample_num_per_epoch: 144  # Total unique prompts per epoch (48 per source * 3 sources)
   gradient_step_per_epoch: 2  # Number of gradient updates per epoch

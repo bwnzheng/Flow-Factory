@@ -18,7 +18,11 @@ import numpy as np
 import pytest
 import torch
 
-from flow_factory.hparams import CrossoverArguments
+from flow_factory.hparams import (
+    CrossoverArguments,
+    CrossoverGRPOGuardTrainingArguments,
+    CrossoverNFTTrainingArguments,
+)
 from flow_factory.hparams.args import Arguments
 from flow_factory.samples import BaseSample
 from flow_factory.trainers.crossover.genetic_algorithm import (
@@ -189,6 +193,42 @@ def test_ga_rejects_unknown_advantage_aggregation():
             autocast=None,
             training_args=training_args,
             reward_buffer=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "training_args_cls",
+    [CrossoverGRPOGuardTrainingArguments, CrossoverNFTTrainingArguments],
+)
+def test_cov_per_sample_config_requires_sum_aggregation(training_args_cls):
+    with pytest.raises(ValueError, match="cov_per_sample.*requires.*advantage_aggregation: sum"):
+        training_args_cls(
+            advantage_aggregation="gdpo",
+            crossover=CrossoverArguments(survivor_score="cov_per_sample"),
+        )
+
+
+def test_ga_cov_per_sample_requires_sum_aggregation_for_direct_callers():
+    training_args = SimpleNamespace(
+        crossover=SimpleNamespace(survivor_score="cov_per_sample"),
+        advantage_aggregation="gdpo",
+        trainer_type="crossover-nft",
+        num_inference_steps=4,
+        group_size=2,
+    )
+
+    with pytest.raises(ValueError, match="cov_per_sample.*requires.*advantage_aggregation='sum'"):
+        GeneticAlgorithm(
+            crossover_strategy=None,
+            adapter=None,
+            accelerator=None,
+            autocast=None,
+            training_args=training_args,
+            reward_buffer=None,
+            reward_weights={
+                "quality": {"default": 1.0},
+                "safety": {"default": 1.0},
+            },
         )
 
 

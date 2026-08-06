@@ -203,6 +203,13 @@ class GeneticAlgorithm:
                 "'covariance', or 'cov_per_sample'; "
                 f"got {self._survivor_score!r}."
             )
+        if self._survivor_score == "cov_per_sample" and self._advantage_aggregation != "sum":
+            raise ValueError(
+                "crossover.survivor_score='cov_per_sample' requires "
+                "advantage_aggregation='sum' because its frozen contribution score is defined "
+                "against the weighted-sum scalar policy direction; "
+                f"got advantage_aggregation={self._advantage_aggregation!r}."
+            )
         if self._survivor_score in {"covariance", "cov_per_sample"} and not self._reward_weights:
             raise ValueError(
                 f"crossover.survivor_score={self._survivor_score!r} requires configured "

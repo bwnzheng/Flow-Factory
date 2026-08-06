@@ -122,6 +122,52 @@ eval:
     resolution: 1024 # Full resolution for validation and inference
 ```
 
+### SRC-Reweight sample weighting
+
+`sample_weighting: src` enables prompt-local Sample-wise Reward Concordance
+weighting without adding a new trainer or changing rollout support. For each
+original on-policy group, the shared `AdvantageProcessor` freezes the unweighted
+reward means, computes
+`c_ik = w_k (r_ik - mean_k) (R_i - mean_R)`, and uses the weakest active
+coordinate `s_i = min_k c_ik`. The dimensionless score
+`s_i / (Var(R) + epsilon)` is mapped to a bounded probability
+
+`p_i = (1 - lambda) / K + lambda * softmax(score_i / temperature)`.
+
+The same probability defines the weighted scalar-reward mean and variance. The
+processor stores `K * p_i` as `sample_weight` and folds it into the final
+advantage, so trainers whose loss is linear in the stored advantage require no
+separate optimize-loop implementation. The independent KL regularizer remains
+unchanged; SRC reweights the reward-driven policy term.
+
+```yaml
+train:
+  trainer_type: grpo  # Also supported: grpo-guard, dppo, awm (on-policy only)
+  advantage_aggregation: sum
+  stddev_reweighting: false
+  sample_weighting: src  # Options: none, src
+  src_reweight_interpolation: 0.5  # lambda in [0, 1)
+  src_reweight_temperature: 1.0  # > 0
+  src_reweight_epsilon: 1.0e-8
+  src_reweight_degeneracy_threshold: 1.0e-12
+```
+
+SRC requires at least two active rewards with positive, nonnegative fixed
+weights for every training source. It always uses prompt-local weighted
+centering and scaling; `global_std` is therefore not applied on this path. It
+cannot be combined with `stddev_reweighting`, off-policy AWM, crossover, NFT,
+DPO, DGPO, or CRD: those paths change rollout support or transform the stored
+advantage nonlinearly, so silently reusing the option would implement a
+different objective.
+
+Logging includes probability and `sample_weight` distributions, ESS and
+ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower
+bounds, degeneracy rate, per-reward contribution/conflict metrics, weighted
+centering/probability-sum errors, and `train/src_groups` with per-sample scores,
+probabilities, multipliers, advantages, and contribution vectors. SRC adds no
+rank reduction: these diagnostics ride the existing float32 logging gather and
+are summarized from the already-complete payload.
+
 ### Regularization
 
 #### KL-Loss
@@ -181,7 +227,7 @@ explicit samplers fail at configuration time.
 ```yaml
 train:
   trainer_type: crossover-grpo-guard
-  advantage_aggregation: gdpo
+  advantage_aggregation: sum  # Required when survivor_score is cov_per_sample
   global_std: true
   stddev_reweighting: false
   crossover:
@@ -238,18 +284,24 @@ fixed run-wide reward calibration or source-aware weights that compensate for
 known scale differences; never estimate normalization statistics separately
 for each prompt pool.
 
-The selectors require at least two rewards with positive weights. Covariance
-selection always uses a fixed weighted sum of raw rewards, independently of the
-policy-side `advantage_aggregation`, `stddev_reweighting`, and `global_std`
-settings. A zero-variance comparison falls back deterministically to absolute
-group-normalized weighted-sum reward rather than the configured policy
-advantage. The startup log reports both `advantage_aggregation` and
-`survivor_selection_aggregation` so this decoupling is explicit.
+The selectors require at least two rewards with positive weights. Group-level
+`survivor_score: covariance` continues to use a fixed weighted sum of raw
+rewards independently of the policy-side `advantage_aggregation`,
+`stddev_reweighting`, and `global_std` settings. In contrast,
+`survivor_score: cov_per_sample` requires `advantage_aggregation: sum`, because
+its frozen per-sample contribution is defined against that scalar policy
+direction; pairing it with GDPO would make selection and policy advantages
+optimize different directions. A zero-variance comparison falls back
+deterministically to absolute group-normalized weighted-sum reward rather than
+the configured policy advantage. The startup log reports both
+`advantage_aggregation` and `survivor_selection_aggregation` so this relation is
+explicit.
 
-With `advantage_aggregation: sum` and fixed policy weights, the covariance
-score directly matches the policy scalarization. With `gdpo` or dynamic policy
-reweighting, it is an independent survivor-selection proxy and must not be
-interpreted as the exact weakest contribution to the final policy gradient.
+With `advantage_aggregation: sum` and fixed policy weights, either covariance
+score directly matches the policy scalarization. For group-level `covariance`
+with `gdpo` or dynamic policy reweighting, it remains an independent survivor-
+selection proxy and must not be interpreted as the exact weakest contribution
+to the final policy gradient.
 The genetic algorithm always considers the merged parent-plus-offspring
 candidate population and returns exactly `group_size` survivors. Advantage-
 based parent/survivor ranking continues to follow the configured

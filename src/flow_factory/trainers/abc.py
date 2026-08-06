@@ -224,7 +224,25 @@ class BaseTrainer(ABC):
             source_id_to_name=self.config.data_args.source_id_to_name,
             stddev_reweighting=getattr(self.training_args, 'stddev_reweighting', False),
             stddev_ema_decay=getattr(self.training_args, 'stddev_ema_decay', 0.99),
+            sample_weighting=self.training_args.sample_weighting,
+            src_reweight_interpolation=self.training_args.src_reweight_interpolation,
+            src_reweight_temperature=self.training_args.src_reweight_temperature,
+            src_reweight_epsilon=self.training_args.src_reweight_epsilon,
+            src_reweight_degeneracy_threshold=(
+                self.training_args.src_reweight_degeneracy_threshold
+            ),
         )
+
+        if self.training_args.sample_weighting == "src":
+            logger.info(
+                "SRC-Reweight enabled: sample_weighting(src), "
+                f"src_reweight_interpolation({self.training_args.src_reweight_interpolation}), "
+                f"src_reweight_temperature({self.training_args.src_reweight_temperature}), "
+                f"src_reweight_epsilon({self.training_args.src_reweight_epsilon}), "
+                "normalization(prompt-local weighted), loss_multiplier(K * probability). "
+                "The configured global_std is not used by SRC-Reweight; independent KL "
+                "regularization remains uniformly aggregated."
+            )
 
         return self.reward_models, self.eval_reward_models
 

@@ -15,5 +15,6 @@
 """Communication-aware Advantage Processor module."""
 
 from .advantage_processor import AdvantageProcessor
+from .sample_weighting import SRCReweightResult, compute_src_reweight
 
-__all__ = ["AdvantageProcessor"]
+__all__ = ["AdvantageProcessor", "SRCReweightResult", "compute_src_reweight"]

@@ -80,6 +80,11 @@ train:
   # Batch and sampling
   per_device_batch_size: 1  # Batch size per device. For image-to-image task, this will always fallback to 1.
   group_size: 16  # Group size for GRPO sampling
+  sample_weighting: none  # Options: none, src
+  src_reweight_interpolation: 0.5  # SRC lambda in [0, 1)
+  src_reweight_temperature: 1.0  # Positive SRC softmax temperature
+  src_reweight_epsilon: 1.0e-8  # Positive numerical safeguard
+  src_reweight_degeneracy_threshold: 1.0e-12  # Uniform fallback threshold
   global_std: false  # Use global std for advantage normalization
   unique_sample_num_per_epoch: 48  # Unique samples per group
   gradient_step_per_epoch: 1  # Gradient steps per epoch
@@ -119,7 +124,8 @@ train:
     evolution_generations: 3      # Number of GA generations
     parent_ratio: 0.25            # Fraction of group selected as parents (top by advantage)
     mutation_std: 0.05            # Gaussian noise stddev applied to child latents
-    survivor_score: "advantage"   # Options: 'advantage', 'abs_advantage', 'covariance', 'cov_per_sample'
+    # cov_per_sample requires advantage_aggregation: sum.
+    survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'covariance', 'cov_per_sample'
     # Logging
     log_rewards: true             # Log per-reward parent vs child stats
 

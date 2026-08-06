@@ -134,6 +134,22 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Algorithm diagnostics should emit Python-native values when practical, but the persistence boundary must still normalize nested scientific-computing types because ordinary diagnostics dictionaries bypass top-level metric formatting.
 - **Related Constraint**: N/A
 
+### Globally gathered advantage metrics were rank-reduced again
+- **Date**: 2026-08-06
+- **Symptom**: The `group_contiguous` advantage logging path performed float64 rank reductions after all ranks already held the same globally gathered reward and advantage arrays, adding redundant collectives to every feedback step.
+- **Root Cause**: The log-data builders treated the output of `_gather_for_logging()` as rank-local shards even though both sampler paths make those arrays globally complete before metric construction.
+- **Fix**: `advantage/advantage_processor.py` now computes summary and zero-variance metrics locally from the globally complete arrays; SRC diagnostics are appended to the existing float32 gather payload and introduce no additional rank reduction.
+- **Lesson**: Mark the communication state of metric arrays at every boundary. Once a gather has replicated a complete payload on every rank, downstream statistics must be local; reducing the replicated payload again only duplicates communication and may introduce unsupported high-precision collectives.
+- **Related Constraint**: N/A
+
+### Sample-wise covariance selection accepted a mismatched GDPO policy direction
+- **Date**: 2026-08-06
+- **Symptom**: `crossover.survivor_score: cov_per_sample` could be configured with `advantage_aggregation: gdpo`, although its frozen per-sample contribution was computed from a weighted-sum scalar reward direction.
+- **Root Cause**: The original covariance-selector decoupling rule was applied equally to group-level covariance and sample-wise contribution selection, even though only the latter claims per-sample alignment with the policy scalarization.
+- **Fix**: Both crossover training-argument classes and `GeneticAlgorithm` now fail fast unless `cov_per_sample` is paired with `advantage_aggregation: sum`; documentation and SD3.5 LoRA crossover examples expose the restriction. Group-level `survivor_score: covariance` retains its existing independent-proxy behavior under GDPO.
+- **Lesson**: A subset-level selection proxy may be intentionally independent from the policy aggregation, but a per-sample score presented as contribution to the policy direction must use the same scalarization or be given a separate method definition and name.
+- **Related Constraint**: #6
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

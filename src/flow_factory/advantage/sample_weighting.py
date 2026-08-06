@@ -1,0 +1,210 @@
+# Copyright 2026 Jayce-Ping
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Prompt-local sample weighting for group-relative policy updates."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class SRCReweightResult:
+    """SRC-Reweight outputs aligned with the input sample axis."""
+
+    contributions: np.ndarray
+    scores: np.ndarray
+    normalized_scores: np.ndarray
+    probabilities: np.ndarray
+    loss_multipliers: np.ndarray
+    weighted_advantages: np.ndarray
+    effective_advantages: np.ndarray
+    scalar_variances: np.ndarray
+    weighted_means: np.ndarray
+    weighted_variances: np.ndarray
+    effective_sample_sizes: np.ndarray
+    lower_bound_uniform: np.ndarray
+    lower_bound_reweighted: np.ndarray
+    degenerate_scalar_contrast: np.ndarray
+
+
+def compute_src_reweight(
+    reward_matrix: np.ndarray,
+    weight_matrix: np.ndarray,
+    applicable: np.ndarray,
+    group_indices: np.ndarray,
+    interpolation: float,
+    temperature: float,
+    epsilon: float,
+    degeneracy_threshold: float,
+) -> SRCReweightResult:
+    """Compute frozen-group SRC probabilities and effective advantages.
+
+    All arithmetic is local NumPy work. This function performs no rank gather,
+    aggregation, or reduction. ``reward_matrix`` is shaped ``(R, S)`` to match
+    :class:`AdvantageProcessor`'s reward-major representation.
+
+    Args:
+        reward_matrix: Reward values with shape ``(num_rewards, num_samples)``.
+        weight_matrix: Fixed source-aware weights aligned with ``reward_matrix``.
+        applicable: Boolean reward-applicability mask aligned with ``reward_matrix``.
+        group_indices: Prompt-group identifier for every sample.
+        interpolation: Mixture coefficient between uniform and concordance weights.
+        temperature: Positive softmax temperature for normalized SRC scores.
+        epsilon: Positive numerical safeguard used by variance normalization.
+        degeneracy_threshold: Scalar-variance threshold for uniform fallback.
+
+    Returns:
+        SRC diagnostics, probabilities, and effective advantages aligned with samples.
+    """
+    rewards = np.asarray(reward_matrix, dtype=np.float64)
+    weights = np.asarray(weight_matrix, dtype=np.float64)
+    applicable_mask = np.asarray(applicable, dtype=bool)
+    groups = np.asarray(group_indices, dtype=np.int64)
+
+    if rewards.ndim != 2:
+        raise ValueError(f"reward_matrix must have shape (R, S), got {rewards.shape}.")
+    if weights.shape != rewards.shape or applicable_mask.shape != rewards.shape:
+        raise ValueError(
+            "weight_matrix and applicable must match reward_matrix shape; "
+            f"got rewards={rewards.shape}, weights={weights.shape}, "
+            f"applicable={applicable_mask.shape}."
+        )
+    if groups.shape != (rewards.shape[1],):
+        raise ValueError(
+            f"group_indices must have shape ({rewards.shape[1]},), got {groups.shape}."
+        )
+    if not 0.0 <= interpolation < 1.0:
+        raise ValueError(f"interpolation must be in [0, 1), got {interpolation}.")
+    if temperature <= 0.0:
+        raise ValueError(f"temperature must be > 0, got {temperature}.")
+    if epsilon <= 0.0:
+        raise ValueError(f"epsilon must be > 0, got {epsilon}.")
+    if degeneracy_threshold < 0.0:
+        raise ValueError(f"degeneracy_threshold must be >= 0, got {degeneracy_threshold}.")
+    if np.any(weights[applicable_mask] < 0.0):
+        raise ValueError("SRC-Reweight requires nonnegative active reward weights.")
+
+    num_rewards, num_samples = rewards.shape
+    contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
+    scores = np.zeros(num_samples, dtype=np.float64)
+    normalized_scores = np.zeros(num_samples, dtype=np.float64)
+    probabilities = np.zeros(num_samples, dtype=np.float64)
+    loss_multipliers = np.ones(num_samples, dtype=np.float64)
+    weighted_advantages = np.zeros(num_samples, dtype=np.float64)
+    effective_advantages = np.zeros(num_samples, dtype=np.float64)
+    scalar_variances = np.zeros(num_samples, dtype=np.float64)
+    weighted_means = np.zeros(num_samples, dtype=np.float64)
+    weighted_variances = np.zeros(num_samples, dtype=np.float64)
+    effective_sample_sizes = np.zeros(num_samples, dtype=np.float64)
+    lower_bound_uniform = np.zeros(num_samples, dtype=np.float64)
+    lower_bound_reweighted = np.zeros(num_samples, dtype=np.float64)
+    degenerate = np.zeros(num_samples, dtype=bool)
+
+    for group_id in np.unique(groups):
+        sample_indices = np.flatnonzero(groups == group_id)
+        group_size = len(sample_indices)
+        if group_size < 2:
+            raise ValueError(
+                "SRC-Reweight requires at least two samples per prompt group; "
+                f"group {int(group_id)} has {group_size}."
+            )
+
+        group_applicable = applicable_mask[:, sample_indices]
+        group_weights = weights[:, sample_indices]
+        if not np.all(group_applicable == group_applicable[:, :1]):
+            raise ValueError(
+                "SRC-Reweight requires homogeneous reward applicability within each prompt group; "
+                f"group {int(group_id)} is mixed."
+            )
+        if not np.allclose(group_weights, group_weights[:, :1], rtol=0.0, atol=0.0):
+            raise ValueError(
+                "SRC-Reweight requires fixed reward weights within each prompt group; "
+                f"group {int(group_id)} is mixed."
+            )
+
+        reward_weights = group_weights[:, 0]
+        active = group_applicable[:, 0] & (reward_weights > 0.0)
+        if int(active.sum()) < 2:
+            raise ValueError(
+                "SRC-Reweight requires at least two active rewards with positive weights in every "
+                f"prompt group; group {int(group_id)} has {int(active.sum())}."
+            )
+
+        group_rewards = rewards[:, sample_indices]
+        active_rewards = group_rewards[active]
+        active_weights = reward_weights[active]
+        centered_rewards = active_rewards - active_rewards.mean(axis=1, keepdims=True)
+        scalar_rewards = active_weights @ active_rewards
+        scalar_centered = scalar_rewards - scalar_rewards.mean()
+        group_contributions = active_weights[:, None] * centered_rewards * scalar_centered[None, :]
+        group_scores = group_contributions.min(axis=0)
+        scalar_variance = float(np.mean(np.square(scalar_centered)))
+
+        contributions[np.flatnonzero(active)[:, None], sample_indices] = group_contributions
+        scores[sample_indices] = group_scores
+        scalar_variances[sample_indices] = scalar_variance
+
+        is_degenerate = scalar_variance <= degeneracy_threshold
+        if is_degenerate:
+            group_probabilities = np.full(group_size, 1.0 / group_size, dtype=np.float64)
+            group_normalized_scores = np.zeros(group_size, dtype=np.float64)
+        else:
+            group_normalized_scores = group_scores / (scalar_variance + epsilon)
+            logits = group_normalized_scores / temperature
+            logits = logits - logits.max()
+            concordant_probabilities = np.exp(logits)
+            concordant_probabilities /= concordant_probabilities.sum()
+            group_probabilities = (
+                1.0 - interpolation
+            ) / group_size + interpolation * concordant_probabilities
+
+        weighted_mean = float(group_probabilities @ scalar_rewards)
+        centered_weighted = scalar_rewards - weighted_mean
+        weighted_variance = float(group_probabilities @ np.square(centered_weighted))
+        group_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
+        group_multipliers = group_size * group_probabilities
+
+        normalized_scores[sample_indices] = group_normalized_scores
+        probabilities[sample_indices] = group_probabilities
+        loss_multipliers[sample_indices] = group_multipliers
+        weighted_advantages[sample_indices] = group_advantages
+        effective_advantages[sample_indices] = group_multipliers * group_advantages
+        weighted_means[sample_indices] = weighted_mean
+        weighted_variances[sample_indices] = weighted_variance
+        effective_sample_sizes[sample_indices] = 1.0 / float(
+            group_probabilities @ group_probabilities
+        )
+        lower_bound_uniform[sample_indices] = float(group_scores.mean())
+        lower_bound_reweighted[sample_indices] = float(group_probabilities @ group_scores)
+        degenerate[sample_indices] = is_degenerate
+
+    return SRCReweightResult(
+        contributions=contributions,
+        scores=scores,
+        normalized_scores=normalized_scores,
+        probabilities=probabilities,
+        loss_multipliers=loss_multipliers,
+        weighted_advantages=weighted_advantages,
+        effective_advantages=effective_advantages,
+        scalar_variances=scalar_variances,
+        weighted_means=weighted_means,
+        weighted_variances=weighted_variances,
+        effective_sample_sizes=effective_sample_sizes,
+        lower_bound_uniform=lower_bound_uniform,
+        lower_bound_reweighted=lower_bound_reweighted,
+        degenerate_scalar_contrast=degenerate,
+    )

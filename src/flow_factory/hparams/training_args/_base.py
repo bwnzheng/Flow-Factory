@@ -178,6 +178,35 @@ class TrainingArguments(ArgABC):
         default=0.99,
         metadata={"help": "EMA decay factor for the per-reward mean std in stddev reweighting."},
     )
+    sample_weighting: Literal["none", "src"] = field(
+        default="none",
+        metadata={
+            "help": (
+                "Prompt-local sample weighting method. 'none' preserves the baseline; 'src' "
+                "uses SRC-Reweight and requires advantage_aggregation='sum'."
+            )
+        },
+    )
+    src_reweight_interpolation: float = field(
+        default=0.5,
+        metadata={"help": "SRC interpolation lambda in [0, 1)."},
+    )
+    src_reweight_temperature: float = field(
+        default=1.0,
+        metadata={"help": "Positive softmax temperature for dimensionless SRC scores."},
+    )
+    src_reweight_epsilon: float = field(
+        default=1e-8,
+        metadata={"help": "Positive numerical safeguard for SRC normalization."},
+    )
+    src_reweight_degeneracy_threshold: float = field(
+        default=1e-12,
+        metadata={
+            "help": (
+                "Nonnegative scalar-reward variance threshold below which SRC uses uniform weights."
+            )
+        },
+    )
     unique_sample_num_per_epoch: int = field(
         default=8,
         metadata={"help": "Number of unique samples per group."},
@@ -277,6 +306,29 @@ class TrainingArguments(ArgABC):
     )
 
     def __post_init__(self):
+        if self.sample_weighting not in {"none", "src"}:
+            raise ValueError(
+                f"`sample_weighting` must be 'none' or 'src', got {self.sample_weighting!r}."
+            )
+        if not 0.0 <= self.src_reweight_interpolation < 1.0:
+            raise ValueError(
+                "`src_reweight_interpolation` must be in [0, 1), "
+                f"got {self.src_reweight_interpolation}."
+            )
+        if self.src_reweight_temperature <= 0.0:
+            raise ValueError(
+                f"`src_reweight_temperature` must be > 0, got {self.src_reweight_temperature}."
+            )
+        if self.src_reweight_epsilon <= 0.0:
+            raise ValueError(
+                f"`src_reweight_epsilon` must be > 0, got {self.src_reweight_epsilon}."
+            )
+        if self.src_reweight_degeneracy_threshold < 0.0:
+            raise ValueError(
+                "`src_reweight_degeneracy_threshold` must be >= 0, "
+                f"got {self.src_reweight_degeneracy_threshold}."
+            )
+
         # --- Resolution standardization ---
         if not self.resolution:
             logger.warning("`resolution` is not set, using default (512, 512).")

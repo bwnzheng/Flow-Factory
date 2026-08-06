@@ -112,7 +112,8 @@ class CrossoverArguments(ArgABC):
                 "'advantage' prefers high-fitness samples; 'abs_advantage' also preserves "
                 "strong negative samples; 'covariance' greedily scores complete "
                 "Pareto-guided groups; 'cov_per_sample' preserves one scalar elite and "
-                "fills remaining slots by frozen-pool per-sample covariance contribution."
+                "fills remaining slots by frozen-pool per-sample covariance contribution "
+                "and requires advantage_aggregation='sum'."
             )
         },
     )
@@ -156,6 +157,19 @@ class CrossoverArguments(ArgABC):
 # ============================================================================
 
 
+def _validate_cov_per_sample_aggregation(
+    crossover: CrossoverArguments,
+    advantage_aggregation: str,
+) -> None:
+    if crossover.survivor_score == "cov_per_sample" and advantage_aggregation != "sum":
+        raise ValueError(
+            "`crossover.survivor_score: cov_per_sample` requires "
+            "`advantage_aggregation: sum` because its frozen contribution score is "
+            "defined against the weighted-sum scalar policy direction; "
+            f"got advantage_aggregation={advantage_aggregation!r}."
+        )
+
+
 @dataclass
 class CrossoverGRPOGuardTrainingArguments(GRPOTrainingArguments):
     """GRPO-Guard training arguments with crossover augmentation.
@@ -165,6 +179,10 @@ class CrossoverGRPOGuardTrainingArguments(GRPOTrainingArguments):
     """
 
     crossover: CrossoverArguments = field(default_factory=CrossoverArguments)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_cov_per_sample_aggregation(self.crossover, self.advantage_aggregation)
 
     @classmethod
     def from_dict(cls, args_dict: Dict[str, Any]) -> "CrossoverGRPOGuardTrainingArguments":
@@ -183,6 +201,10 @@ class CrossoverNFTTrainingArguments(NFTTrainingArguments):
     """
 
     crossover: CrossoverArguments = field(default_factory=CrossoverArguments)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_cov_per_sample_aggregation(self.crossover, self.advantage_aggregation)
 
     @classmethod
     def from_dict(cls, args_dict: Dict[str, Any]) -> "CrossoverNFTTrainingArguments":

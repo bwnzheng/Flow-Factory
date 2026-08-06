@@ -172,6 +172,7 @@ class Arguments(ArgABC):
         # by applicable dataset names. Must run AFTER routing resolution
         # (so `applicable_datasets` is concrete).
         self._resolve_reward_weights()
+        self._validate_sample_weighting()
         # With routing concrete, fail-fast when a training source has NO
         # applicable training reward — the user almost certainly meant
         # to add the source name to some reward's `applicable_datasets` list.
@@ -195,6 +196,59 @@ class Arguments(ArgABC):
         self._resolve_sampler_type()
         self._align_batch_geometry()
         self._adjust_gradient_accumulation()
+
+    def _validate_sample_weighting(self) -> None:
+        """Validate shared sample-weighting semantics before trainer construction."""
+        ta = self.training_args
+        if ta.sample_weighting == "none":
+            return
+
+        supported_trainers = {"grpo", "grpo-guard", "dppo", "awm"}
+        trainer_type = str(ta.trainer_type).lower()
+        if trainer_type not in supported_trainers:
+            raise ValueError(
+                "`sample_weighting: src` is only exact for trainers whose policy loss is linear "
+                "in the stored advantage. Supported trainer types are "
+                f"{sorted(supported_trainers)}; got trainer_type={trainer_type!r}. NFT remaps "
+                "advantages nonlinearly, DPO forms pairs, DGPO performs another group reduction, "
+                "CRD recenters implicit rewards, and crossover changes the rollout support."
+            )
+        if getattr(ta, "advantage_aggregation", None) != "sum":
+            raise ValueError(
+                "`sample_weighting: src` requires `advantage_aggregation: sum` because SRC defines "
+                "its scalar training direction from the fixed weighted sum of active rewards."
+            )
+        if ta.stddev_reweighting:
+            raise ValueError(
+                "`sample_weighting: src` cannot be combined with `stddev_reweighting: true`; "
+                "SRC requires fixed reward weights while scoring a frozen prompt group."
+            )
+        if trainer_type == "awm" and getattr(ta, "off_policy", False):
+            raise ValueError(
+                "`sample_weighting: src` requires on-policy rollout groups, but AWM "
+                "`off_policy` is enabled."
+            )
+
+        for dataset in self.data_args.training_datasets:
+            active_rewards = []
+            for reward in self.reward_args:
+                reward_weights = reward.weight
+                if not isinstance(reward_weights, dict):
+                    continue
+                weight = float(reward_weights.get(dataset.name, 0.0))
+                if weight < 0.0:
+                    raise ValueError(
+                        "`sample_weighting: src` requires nonnegative reward weights; "
+                        f"reward={reward.name!r}, dataset={dataset.name!r}, weight={weight}."
+                    )
+                if weight > 0.0:
+                    active_rewards.append(reward.name)
+            if len(active_rewards) < 2:
+                raise ValueError(
+                    "`sample_weighting: src` requires at least two active rewards with positive "
+                    f"weights for every training source; dataset={dataset.name!r} has "
+                    f"active_rewards={active_rewards}."
+                )
 
     def _assign_source_ids(self) -> None:
         """Stamp each ``data.datasets[*]`` entry with a stable monotonic id.
