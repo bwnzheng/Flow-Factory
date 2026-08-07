@@ -166,6 +166,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Distributed moment accumulators must reduce explicit counts in the same unit as their sums. Avoid inferring denominators from fixed group sizes or deriving output metric names through conditions that cannot reach every statistic.
 - **Related Constraint**: N/A
 
+### Media sidecars rejected non-finite tensor rewards
+- **Date**: 2026-08-07
+- **Symptom**: NFT and other reward-based trainers crashed on non-main ranks while saving media sidecar JSON with `ValueError: Out of range float values are not JSON compliant: nan`.
+- **Root Cause**: The JSON-safe converter unpacked tensors and NumPy arrays with `.item()` or `.tolist()` but did not recursively normalize resulting `nan` and infinite Python floats before `json.dump(..., allow_nan=False)`.
+- **Fix**: `logger/formatting.py` recursively normalizes unpacked scientific containers, and `logger/abc.py` applies the same conversion to the complete media entry at the sidecar persistence boundary. Media regression tests cover non-finite tensor rewards and direct `LogImage` metadata.
+- **Lesson**: Converting a scientific container to Python-native values does not make its floating-point contents JSON-compliant. Re-run recursive validation after unpacking and enforce it again at strict persistence boundaries.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

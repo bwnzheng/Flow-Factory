@@ -159,7 +159,8 @@ def _to_json_safe(value: Any, max_array_elements: int = 4096) -> Any:
     if isinstance(value, torch.Tensor):
         tensor = value.detach().cpu()
         if tensor.numel() <= max_array_elements:
-            return tensor.item() if tensor.numel() == 1 else tensor.tolist()
+            unpacked = tensor.item() if tensor.numel() == 1 else tensor.tolist()
+            return _to_json_safe(unpacked, max_array_elements)
         return {
             "omitted": True,
             "type": "torch.Tensor",
@@ -168,7 +169,8 @@ def _to_json_safe(value: Any, max_array_elements: int = 4096) -> Any:
         }
     if isinstance(value, np.ndarray):
         if value.size <= max_array_elements:
-            return value.item() if value.size == 1 else value.tolist()
+            unpacked = value.item() if value.size == 1 else value.tolist()
+            return _to_json_safe(unpacked, max_array_elements)
         return {
             "omitted": True,
             "type": "numpy.ndarray",

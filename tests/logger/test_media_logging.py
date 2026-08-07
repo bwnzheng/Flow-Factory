@@ -143,6 +143,65 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
     assert metadata["reward"] == {"quality": 0.8, "alignment": 0.6}
 
 
+def test_local_media_sidecar_serializes_nonfinite_tensor_rewards(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    key = "media/training/final/rank_0000/group_42/sample_000000"
+    sample = _media_sample()
+    sample.extra_kwargs["rewards"] = {
+        "quality": torch.tensor(float("nan")),
+        "alignment": torch.tensor(float("inf")),
+    }
+
+    logger.log_data({key: sample}, step=20)
+
+    sidecar_path = (
+        tmp_path
+        / "media-run"
+        / "logs"
+        / "images"
+        / "training"
+        / "final"
+        / "step_000020"
+        / "rank_0000"
+        / "group_42"
+        / "sample_000000.json"
+    )
+    metadata = json.loads(sidecar_path.read_text())
+    assert metadata["reward"] == {
+        "quality": {"type": "nonfinite_float", "value": "nan"},
+        "alignment": {"type": "nonfinite_float", "value": "inf"},
+    }
+
+
+def test_local_media_sidecar_normalizes_direct_logimage_metadata(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    key = "media/training/final/rank_0000/group_42/direct"
+    image = LogImage(
+        torch.zeros(3, 8, 8),
+        metadata={"diagnostic": float("-inf")},
+    )
+
+    logger.log_data({key: image}, step=20)
+
+    sidecar_path = (
+        tmp_path
+        / "media-run"
+        / "logs"
+        / "images"
+        / "training"
+        / "final"
+        / "step_000020"
+        / "rank_0000"
+        / "group_42"
+        / "direct.json"
+    )
+    metadata = json.loads(sidecar_path.read_text())
+    assert metadata["diagnostic"] == {
+        "type": "nonfinite_float",
+        "value": "-inf",
+    }
+
+
 def test_backend_media_uses_the_same_interval(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
     key = "media/evaluation/benchmark/rank_0000/group_42/sample_000000"
@@ -157,3 +216,21 @@ def test_backend_media_uses_the_same_interval(tmp_path):
     assert step == 20
     assert list(payload) == [key]
     assert isinstance(payload[key], LogImage)
+
+
+def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
+    logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
+    key = "media/training/final/rank_0000/group_42/sample_000000"
+    sample = _media_sample()
+    sample.extra_kwargs["rewards"] = {
+        "quality": torch.tensor(float("nan")),
+        "alignment": torch.tensor(float("-inf")),
+    }
+
+    logger.log_data({key: sample}, step=20)
+
+    media = logger.records[0][1][key]
+    assert media.metadata["reward"] == {
+        "quality": {"type": "nonfinite_float", "value": "nan"},
+        "alignment": {"type": "nonfinite_float", "value": "-inf"},
+    }

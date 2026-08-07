@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image as PILImage
 
 from ..hparams import *
-from .formatting import LogFormatter, LogImage, LogTable, LogVideo
+from .formatting import LogFormatter, LogImage, LogTable, LogVideo, _to_json_safe
 
 
 class Logger(ABC):
@@ -128,6 +128,7 @@ class Logger(ABC):
                 entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
                 if value.metadata:
                     entry.update(value.metadata)
+                entry = _to_json_safe(entry)
                 sidecar_path = os.path.splitext(os.path.join(self._logs_dir, path))[0] + '.json'
                 with open(sidecar_path, 'w') as sidecar_file:
                     json.dump(
