@@ -183,17 +183,21 @@ class BaseTrainer(ABC):
             )
             media_samples.append(prepare_sample_for_media(sample, context))
 
-        if not self.log_args.save_media_locally and self.accelerator.num_processes > 1:
+        if self.accelerator.num_processes > 1:
             media_samples = gather_object(media_samples)
             if not self.accelerator.is_main_process:
                 return
 
         payload: Dict[str, Any] = {}
-        for media_sample in media_samples:
+        group_counts = {}
+        for global_index, media_sample in enumerate(media_samples):
             metadata = media_sample.extra_kwargs["_media_metadata"]
             media_context = metadata["context"]["media"]
-            run_context = metadata["context"]["run"]
             group_id = metadata["sample"]["unique_id"]
+            group_index = group_counts.get(group_id, 0)
+            group_counts[group_id] = group_index + 1
+            media_context["global_index"] = global_index
+            media_context["group_index"] = group_index
             candidate_id = metadata["context"].get("ga", {}).get("candidate_id")
             if candidate_id is None:
                 candidate_id = metadata["sample"]["extra_kwargs"].get("ga_candidate_id")
@@ -203,8 +207,7 @@ class BaseTrainer(ABC):
                 else f"sample_{int(media_context['group_index']):06d}"
             )
             key = (
-                f"media/{category}/{context_name}/rank_{int(run_context['rank']):04d}/"
-                f"group_{group_id}/{item_name}"
+                f"media/{category}/{context_name}/group_{group_id}/{item_name}"
             )
             payload[key] = media_sample
 

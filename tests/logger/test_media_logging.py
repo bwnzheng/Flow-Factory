@@ -22,6 +22,7 @@ from flow_factory.hparams import LogArguments
 from flow_factory.logger import LogImage, prepare_sample_for_media
 from flow_factory.logger.abc import LocalFileLogger, Logger
 from flow_factory.samples import T2ISample
+from flow_factory.trainers.abc import BaseTrainer
 
 
 class _RecordingBackendLogger(Logger):
@@ -79,6 +80,83 @@ def _media_sample():
     )
 
 
+class _MediaTrainerHarness:
+    should_log_media = BaseTrainer.should_log_media
+    _build_media_context = BaseTrainer._build_media_context
+    log_media_samples = BaseTrainer.log_media_samples
+
+    def __init__(self):
+        self.step = 20
+        self.epoch = 2
+        self.log_args = SimpleNamespace(
+            run_name="media-run",
+            media_save_freq=20,
+            max_log_samples=None,
+            save_media_locally=True,
+            logging_backend=None,
+        )
+        self.accelerator = SimpleNamespace(
+            process_index=0,
+            num_processes=2,
+            is_main_process=True,
+        )
+        self.config = SimpleNamespace(to_dict=lambda: {"log": {"run_name": "media-run"}})
+        self.records = []
+
+    def log_data(self, data, step):
+        self.records.append((step, data))
+
+
+def test_media_samples_are_gathered_and_reindexed_without_rank_keys(monkeypatch):
+    trainer = _MediaTrainerHarness()
+    local_sample = T2ISample(
+        image=torch.zeros(3, 8, 8),
+        prompt="local sample",
+        _unique_id=42,
+    )
+    remote_sample = T2ISample(
+        image=torch.zeros(3, 8, 8),
+        prompt="remote sample",
+        _unique_id=42,
+    )
+    remote_media_sample = prepare_sample_for_media(
+        remote_sample,
+        {
+            "run": {"rank": 1, "step": 20, "epoch": 2},
+            "media": {
+                "category": "training",
+                "context": "final",
+                "local_index": 0,
+                "group_index": 0,
+            },
+            "configuration": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "flow_factory.trainers.abc.gather_object",
+        lambda local_media: local_media + [remote_media_sample],
+    )
+
+    trainer.log_media_samples(
+        [local_sample],
+        category="training",
+        context_name="final",
+    )
+
+    assert len(trainer.records) == 1
+    step, payload = trainer.records[0]
+    assert step == 20
+    assert list(payload) == [
+        "media/training/final/group_42/sample_000000",
+        "media/training/final/group_42/sample_000001",
+    ]
+    contexts = [sample.extra_kwargs["_media_metadata"]["context"] for sample in payload.values()]
+    assert [context["run"]["rank"] for context in contexts] == [0, 1]
+    assert [context["media"]["group_index"] for context in contexts] == [0, 1]
+    assert [context["media"]["global_index"] for context in contexts] == [0, 1]
+
+
 def test_log_arguments_validate_media_settings(tmp_path):
     args = LogArguments(save_dir=str(tmp_path))
     assert args.media_save_freq == 20
@@ -101,7 +179,7 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
             num_processes=2,
         )
     )
-    key = "media/training/final/rank_0001/group_42/sample_000000"
+    key = "media/training/final/group_42/sample_000000"
     sample = _media_sample()
 
     logger.log_data({key: sample}, step=19)
@@ -111,10 +189,9 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
         / "logs"
         / "images"
         / "training"
-        / "final"
         / "step_000020"
-        / "rank_0001"
         / "group_42"
+        / "final"
         / "sample_000000.jpg"
     )
     assert not image_path.exists()
@@ -123,7 +200,7 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
     sidecar_path = image_path.with_suffix(".json")
     assert image_path.exists()
     assert sidecar_path.exists()
-    assert (image_path.parents[6] / "media_rank_0001.jsonl").exists()
+    assert (image_path.parents[5] / "media.jsonl").exists()
 
     metadata = json.loads(sidecar_path.read_text())
     assert metadata["schema_version"] == 1
@@ -141,6 +218,35 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
         "guidance_scale": 4.5,
     }
     assert metadata["reward"] == {"quality": 0.8, "alignment": 0.6}
+    manifest = json.loads((image_path.parents[5] / "media.jsonl").read_text())
+    assert manifest == {
+        "step": 20,
+        "key": key,
+        "path": "images/training/step_000020/group_42/final/sample_000000.jpg",
+        "prompt": "a red cube",
+        "reward": {"quality": 0.8, "alignment": 0.6},
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "relative_path"),
+    [
+        (
+            "media/evaluation/benchmark/group_42/sample_000000",
+            "images/evaluation/step_000020/group_42/benchmark/sample_000000.jpg",
+        ),
+        (
+            "media/ga/gen2/group_42/candidate_000004",
+            "images/training/step_000020/group_42/gen2/candidate_000004.jpg",
+        ),
+    ],
+)
+def test_local_media_uses_step_group_context_layout(tmp_path, key, relative_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+
+    logger.log_data({key: _media_sample()}, step=20)
+
+    assert (tmp_path / "media-run" / "logs" / relative_path).exists()
 
 
 def test_media_sample_filters_inapplicable_rewards_without_mutating_training_sample(tmp_path):
@@ -160,7 +266,7 @@ def test_media_sample_filters_inapplicable_rewards_without_mutating_training_sam
     )
 
     media_sample = prepare_sample_for_media(sample)
-    key = "media/training/final/rank_0000/group_42/sample_000000"
+    key = "media/training/final/group_42/sample_000000"
     logger.log_data({key: media_sample}, step=20)
 
     assert set(sample.extra_kwargs["rewards"]) == {"quality", "alignment"}
@@ -171,10 +277,9 @@ def test_media_sample_filters_inapplicable_rewards_without_mutating_training_sam
         / "logs"
         / "images"
         / "training"
-        / "final"
         / "step_000020"
-        / "rank_0000"
         / "group_42"
+        / "final"
         / "sample_000000.json"
     )
     metadata = json.loads(sidecar_path.read_text())
@@ -200,7 +305,7 @@ def test_media_sample_keeps_all_rewards_without_applicability_bookkeeping():
 
 def test_local_media_sidecar_serializes_nonfinite_tensor_rewards(tmp_path):
     logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
-    key = "media/training/final/rank_0000/group_42/sample_000000"
+    key = "media/training/final/group_42/sample_000000"
     sample = _media_sample()
     sample.extra_kwargs["rewards"] = {
         "quality": torch.tensor(float("nan")),
@@ -215,10 +320,9 @@ def test_local_media_sidecar_serializes_nonfinite_tensor_rewards(tmp_path):
         / "logs"
         / "images"
         / "training"
-        / "final"
         / "step_000020"
-        / "rank_0000"
         / "group_42"
+        / "final"
         / "sample_000000.json"
     )
     metadata = json.loads(sidecar_path.read_text())
@@ -230,7 +334,7 @@ def test_local_media_sidecar_serializes_nonfinite_tensor_rewards(tmp_path):
 
 def test_local_media_sidecar_normalizes_direct_logimage_metadata(tmp_path):
     logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
-    key = "media/training/final/rank_0000/group_42/direct"
+    key = "media/training/final/group_42/direct"
     image = LogImage(
         torch.zeros(3, 8, 8),
         metadata={"diagnostic": float("-inf")},
@@ -244,10 +348,9 @@ def test_local_media_sidecar_normalizes_direct_logimage_metadata(tmp_path):
         / "logs"
         / "images"
         / "training"
-        / "final"
         / "step_000020"
-        / "rank_0000"
         / "group_42"
+        / "final"
         / "direct.json"
     )
     metadata = json.loads(sidecar_path.read_text())
@@ -259,7 +362,7 @@ def test_local_media_sidecar_normalizes_direct_logimage_metadata(tmp_path):
 
 def test_backend_media_uses_the_same_interval(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
-    key = "media/evaluation/benchmark/rank_0000/group_42/sample_000000"
+    key = "media/evaluation/benchmark/group_42/sample_000000"
     sample = _media_sample()
 
     logger.log_data({key: sample}, step=19)
@@ -275,7 +378,7 @@ def test_backend_media_uses_the_same_interval(tmp_path):
 
 def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
-    key = "media/training/final/rank_0000/group_42/sample_000000"
+    key = "media/training/final/group_42/sample_000000"
     sample = _media_sample()
     sample.extra_kwargs["rewards"] = {
         "quality": torch.tensor(float("nan")),

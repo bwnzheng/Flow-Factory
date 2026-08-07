@@ -78,15 +78,28 @@ class Logger(ABC):
             category = parts[1] if len(parts) > 1 else 'uncategorized'
             context = parts[2] if len(parts) > 2 else 'default'
             remainder = parts[3:] if len(parts) > 3 else ['sample']
-            filename = remainder[-1]
-            directory = os.path.join(
-                self._logs_dir,
-                root,
-                category,
-                context,
-                f'step_{step:06d}',
-                *remainder[:-1],
-            )
+            storage_category = 'training' if category == 'ga' else category
+            if len(remainder) >= 2:
+                group = remainder[0]
+                filename = remainder[-1]
+                directory = os.path.join(
+                    self._logs_dir,
+                    root,
+                    storage_category,
+                    f'step_{step:06d}',
+                    group,
+                    context,
+                    *remainder[1:-1],
+                )
+            else:
+                filename = remainder[-1]
+                directory = os.path.join(
+                    self._logs_dir,
+                    root,
+                    storage_category,
+                    f'step_{step:06d}',
+                    context,
+                )
         else:
             directory = os.path.join(self._logs_dir, root, f'step_{step:06d}')
             filename = self._sanitize_key(key)
@@ -162,17 +175,15 @@ class Logger(ABC):
                 del data[k]
 
         if entries:
-            process_index = int(getattr(self.config, 'process_index', 0))
-            num_processes = int(getattr(self.config, 'num_processes', 1))
-            index_name = (
-                f'media_rank_{process_index:04d}.jsonl'
-                if num_processes > 1
-                else 'media.jsonl'
-            )
-            filepath = os.path.join(self._logs_dir, index_name)
+            filepath = os.path.join(self._logs_dir, 'media.jsonl')
             with open(filepath, 'a') as f:
                 for entry in entries:
-                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+                    manifest_entry = {
+                        name: entry[name]
+                        for name in ('step', 'key', 'path', 'prompt', 'reward')
+                        if name in entry
+                    }
+                    f.write(json.dumps(manifest_entry, ensure_ascii=False) + '\n')
 
     def _save_raw_data_pkl(self, data: Dict, step: int):
         """Save raw analysis arrays to pickle files and remove them from metrics."""

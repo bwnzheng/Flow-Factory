@@ -17,7 +17,7 @@
 Reads ``logs/media.jsonl`` from a training run directory.  Each line is a JSON
 object with keys: ``step``, ``key``, ``path``, ``prompt``, ``reward``.
 
-The ``path`` field is relative to ``{log_dir}`` (e.g. ``images/step_0.png``).
+The ``path`` field is relative to ``{log_dir}``.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ def load_media_samples(
 ) -> Dict[int, List[Dict[str, Any]]]:
     """Read rollout images from ``media.jsonl``, grouped by step.
 
-    Filters entries whose ``key`` starts with ``train_samples/`` (dataset "train")
-    or ``eval/`` (dataset "eval").
+    Reads current ``media/training/final/`` and ``media/evaluation/`` entries,
+    while retaining support for the legacy ``train_samples/`` and ``eval/`` keys.
 
     Args:
         log_dir: Path to the ``logs/`` directory inside a run folder.
@@ -72,7 +72,11 @@ def load_media_samples(
                 continue
 
             # Determine dataset
-            if key.startswith("train_samples/"):
+            if key.startswith("media/training/final/"):
+                dataset = "train"
+            elif key.startswith("media/evaluation/"):
+                dataset = "eval"
+            elif key.startswith("train_samples/"):
                 dataset = "train"
             elif key.startswith("eval/"):
                 dataset = "eval"
@@ -82,9 +86,10 @@ def load_media_samples(
             if dataset_set is not None and dataset not in dataset_set:
                 continue
 
-            # Parse tag index from key (e.g. "train_samples/15" → 15)
+            # Parse tag index from legacy numeric names or current sample_N names.
             try:
-                tag_idx = int(key.rsplit("/", 1)[-1])
+                item_name = key.rsplit("/", 1)[-1]
+                tag_idx = int(item_name.rsplit("_", 1)[-1])
             except (ValueError, IndexError):
                 tag_idx = 0
 

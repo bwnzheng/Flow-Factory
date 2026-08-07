@@ -149,12 +149,17 @@ These trackers allow you to visualize both **training samples** and **metric cur
 
 The same `media_save_freq` gate applies to the online backend and local files.
 Local images are organized under
-`<save_dir>/<run_name>/logs/images/{training,evaluation,ga}/`; GA children use
-`ga/genN/`. Every image or video has a same-stem JSON sidecar containing the
-run configuration, prompt/source identity, rewards and advantages, sampling or
-evaluation settings, and GA lineage/selection evidence where applicable. The
-per-sample reward map includes only rewards declared applicable to that sample;
-complete source-aligned reward matrices remain in the raw reward and GA logs.
+`<save_dir>/<run_name>/logs/images/<category>/step_N/group_N/<context>/`.
+Training contexts include `initial`, `final`, and one `genN` directory per GA
+generation. Media from all ranks is gathered before the main process writes it;
+the originating rank remains in metadata but is not part of the path. Every
+image or video has a same-stem JSON sidecar containing the run configuration,
+prompt/source identity, rewards and advantages, sampling or evaluation settings,
+and GA lineage/selection evidence where applicable. `logs/media.jsonl` is a
+lightweight cross-step manifest containing only media paths and lookup fields.
+The per-sample reward map includes only rewards declared applicable to that
+sample; complete source-aligned reward matrices remain in the raw reward and GA
+logs.
 
 ![Online Image Samples](assets/wandb_images.png)
 

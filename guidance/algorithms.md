@@ -293,10 +293,10 @@ diagnostics and per-group non-dominated-set sizes. Those raw fields are removed
 from `metrics.jsonl`; only their aggregate metrics remain there and in the
 platform backend.
 
-When sampled-media logging is due, the original GA population is recorded under
-`logs/images/training/initial/`, the final population consumed by optimization
-under `logs/images/training/final/`, and every generated child under
-`logs/images/ga/genN/`. The generation folders include rejected as well as
+When sampled-media logging is due, each step and group stores the original GA
+population under `logs/images/training/step_N/group_N/initial/`, the final
+population consumed by optimization under `.../final/`, and every generated
+child under `.../genN/`. The generation folders include rejected as well as
 selected children. Each media file has a same-stem JSON sidecar with candidate
 rewards, selection advantage and score, Pareto membership, selected order,
 parent IDs, and the complete group selection event. These files provide a

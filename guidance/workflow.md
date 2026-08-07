@@ -461,14 +461,19 @@ For step 40, local image paths follow this layout (videos use the parallel
 ```text
 logs/images/
 ├── training/
-│   ├── initial/step_000040/rank_0000/group_42/sample_000000.jpg
-│   └── final/step_000040/rank_0000/group_42/sample_000000.jpg
-├── evaluation/<dataset>/step_000040/rank_0000/group_7/sample_000000.jpg
-└── ga/gen0/step_000040/rank_0000/group_42/candidate_000004.jpg
+│   └── step_000040/
+│       └── group_42/
+│           ├── initial/sample_000000.jpg
+│           ├── final/sample_000000.jpg
+│           └── gen0/candidate_000004.jpg
+└── evaluation/
+    └── step_000040/group_7/<dataset>/sample_000000.jpg
 ```
 
-Every media file has a JSON file with the same stem in the same directory. The
-sidecar schema includes the complete run configuration; rank, step, and epoch;
+Media from every rank is gathered to the main process before local saving, so
+paths contain no rank directory. The source rank remains in each sidecar. Every
+media file has a JSON file with the same stem in the same directory. The sidecar
+schema includes the complete run configuration; rank, step, and epoch;
 prompt/source/sample identity; original per-sample fields such as rewards,
 advantages, and reweighting values; and stage-specific sampling/evaluation
 settings. GA child sidecars additionally contain lineage, all candidate reward
@@ -479,3 +484,6 @@ in their canonical training artifacts. The per-sample `reward` map contains only
 entries named by `sample.applicable_rewards`; an empty applicability set retains
 all rewards for legacy single-source records. This display-only filtering does
 not alter training tensors, reward pickles, or complete GA group diagnostics.
+The single `logs/media.jsonl` file is a lightweight manifest with only `step`,
+logical key, relative path, prompt, and reward fields; detailed replay metadata
+is stored only in the per-media sidecars.

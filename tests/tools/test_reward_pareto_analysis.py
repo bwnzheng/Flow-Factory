@@ -32,6 +32,7 @@ from tools.reward_pareto_analysis.analyze import (
     _parse_config,
     _validate_config,
 )
+from tools.reward_pareto_analysis.media_logs import load_media_samples
 from tools.reward_pareto_analysis.plots import (
     _adaptive_metric_ylim,
     _compute_convexity_metrics,
@@ -84,6 +85,41 @@ def test_train_reader_rejects_partial_group_reward_missingness(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="Partially missing reward"):
         load_train_rewards(str(tmp_path))
+
+
+def test_media_reader_supports_current_manifest_keys(tmp_path: Path) -> None:
+    image_path = (
+        tmp_path
+        / "images"
+        / "training"
+        / "step_000020"
+        / "group_42"
+        / "final"
+        / "sample_000003.jpg"
+    )
+    image_path.parent.mkdir(parents=True)
+    image_path.touch()
+    manifest = {
+        "step": 20,
+        "key": "media/training/final/group_42/sample_000003",
+        "path": str(image_path.relative_to(tmp_path)),
+        "prompt": "a red cube",
+        "reward": {"quality": 0.8},
+    }
+    (tmp_path / "media.jsonl").write_text(json.dumps(manifest) + "\n")
+
+    samples = load_media_samples(str(tmp_path), datasets=["train"])
+
+    assert samples == {
+        20: [
+            {
+                "image_path": str(image_path),
+                "prompt": "a red cube",
+                "tag_idx": 3,
+                "dataset": "train",
+            }
+        ]
+    }
 
 
 def test_analysis_config_rejects_cuda_specific_process_count_name(tmp_path: Path) -> None:
