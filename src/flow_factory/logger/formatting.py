@@ -283,8 +283,13 @@ def prepare_sample_for_media(
             },
             "context": _to_json_safe(context or {}),
         }
+    rewards = sample.extra_kwargs.get("rewards")
+    if isinstance(rewards, dict) and sample.applicable_rewards:
+        rewards = {
+            name: value for name, value in rewards.items() if name in sample.applicable_rewards
+        }
     media_sample.extra_kwargs = {
-        "rewards": sample.extra_kwargs.get("rewards"),
+        "rewards": rewards,
         "_media_metadata": sample_metadata,
     }
     return media_sample

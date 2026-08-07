@@ -143,6 +143,61 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
     assert metadata["reward"] == {"quality": 0.8, "alignment": 0.6}
 
 
+def test_media_sample_filters_inapplicable_rewards_without_mutating_training_sample(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    sample = T2ISample(
+        image=torch.zeros(3, 8, 8),
+        prompt="a red cube",
+        source="quality-dataset",
+        applicable_rewards={"quality"},
+        _unique_id=42,
+        extra_kwargs={
+            "rewards": {
+                "quality": torch.tensor(0.8),
+                "alignment": torch.tensor(float("nan")),
+            }
+        },
+    )
+
+    media_sample = prepare_sample_for_media(sample)
+    key = "media/training/final/rank_0000/group_42/sample_000000"
+    logger.log_data({key: media_sample}, step=20)
+
+    assert set(sample.extra_kwargs["rewards"]) == {"quality", "alignment"}
+    assert set(media_sample.extra_kwargs["rewards"]) == {"quality"}
+    sidecar_path = (
+        tmp_path
+        / "media-run"
+        / "logs"
+        / "images"
+        / "training"
+        / "final"
+        / "step_000020"
+        / "rank_0000"
+        / "group_42"
+        / "sample_000000.json"
+    )
+    metadata = json.loads(sidecar_path.read_text())
+    assert metadata["sample"]["applicable_rewards"] == ["quality"]
+    assert metadata["reward"] == {"quality": pytest.approx(0.8)}
+
+
+def test_media_sample_keeps_all_rewards_without_applicability_bookkeeping():
+    sample = T2ISample(
+        image=torch.zeros(3, 8, 8),
+        prompt="legacy sample",
+        _unique_id=42,
+        extra_kwargs={"rewards": {"quality": 0.8, "alignment": 0.6}},
+    )
+
+    media_sample = prepare_sample_for_media(sample)
+
+    assert media_sample.extra_kwargs["rewards"] == {
+        "quality": 0.8,
+        "alignment": 0.6,
+    }
+
+
 def test_local_media_sidecar_serializes_nonfinite_tensor_rewards(tmp_path):
     logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
     key = "media/training/final/rank_0000/group_42/sample_000000"

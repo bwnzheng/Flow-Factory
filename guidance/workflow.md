@@ -475,4 +475,7 @@ settings. GA child sidecars additionally contain lineage, all candidate reward
 vectors, parent and survivor selection evidence, Pareto membership, and ordered
 selected/rejected IDs. Arrays larger than 4096 elements are represented by
 shape and dtype rather than duplicated, so trajectories and model states remain
-in their canonical training artifacts.
+in their canonical training artifacts. The per-sample `reward` map contains only
+entries named by `sample.applicable_rewards`; an empty applicability set retains
+all rewards for legacy single-source records. This display-only filtering does
+not alter training tensors, reward pickles, or complete GA group diagnostics.

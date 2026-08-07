@@ -152,7 +152,9 @@ Local images are organized under
 `<save_dir>/<run_name>/logs/images/{training,evaluation,ga}/`; GA children use
 `ga/genN/`. Every image or video has a same-stem JSON sidecar containing the
 run configuration, prompt/source identity, rewards and advantages, sampling or
-evaluation settings, and GA lineage/selection evidence where applicable.
+evaluation settings, and GA lineage/selection evidence where applicable. The
+per-sample reward map includes only rewards declared applicable to that sample;
+complete source-aligned reward matrices remain in the raw reward and GA logs.
 
 ![Online Image Samples](assets/wandb_images.png)
 
