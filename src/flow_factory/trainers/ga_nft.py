@@ -77,8 +77,7 @@ class GANFTTrainer(DiffusionNFTTrainer):
                 reward_weights=self.advantage_processor.reward_weights,
                 seed=self.training_args.seed,
             )
-            if getattr(cxo_args, "log_rewards", True):
-                self.advantage_processor._log_crossover_rewards = True
+            self.advantage_processor._ga_enabled = True
             self.advantage_processor._child_in_norm = True
             logger.info(
                 f"GA NFT: offspring_mode={offspring_mode} "

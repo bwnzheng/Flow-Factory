@@ -278,8 +278,8 @@ and ordered selected/rejected IDs. Following the selected order from one
 generation into the next reconstructs the complete survivor-selection and
 child-lineage process.
 
-When `ga.log_rewards` is enabled, the final post-GA population is also
-summarized by original-parent versus crossover-child origin under
+The final post-GA population is always summarized by original-parent versus
+crossover-child origin under
 `ga/final_population/{parent,child}/<reward>/{mean,std}`. The child branch also
 reports `better_than_parent_mean_rate`. These are final-survivor composition
 statistics and are distinct from the pre-selection `child_*` and post-selection

@@ -1,4 +1,4 @@
-# Multi-reward NFT training on SD3.5 Medium with 4x3090 GPUs.
+# Multi-reward GA-NFT training on SD3.5 Medium with 4x3090 GPUs.
 #
 # Training rewards (5): PickScore, HPSv2, CLIPScore, GenEval, OCR
 # Eval rewards (7):    all 5 training + AestheticScore + HPSv2.1
@@ -24,7 +24,7 @@
 #   uv pip install hpsv2 --no-deps                                 # HPSv2 (see hpsv2_reward.py notes)
 #
 # Usage:
-#   ff-train examples/nft/lora/sd3_5/4x3090_5reward.yaml
+#   ff-train examples/nft/lora/sd3_5/4x3090_5reward_ga_crossover.yaml
 
 # Environment Configuration
 launcher: "accelerate"
@@ -88,7 +88,7 @@ log:
 # Training Configuration
 train:
   # Trainer settings
-  trainer_type: 'nft'
+  trainer_type: 'ga_nft'
   advantage_aggregation: 'sum'
   nft_beta: 1.0
   # Old-policy settings
@@ -144,6 +144,27 @@ train:
 
   # Stopping
   max_epochs: 101
+
+  # Crossover / Genetic Algorithm
+  ga:
+    enabled: true
+    # Step sampling
+    step_sampling: "uniform"      # 'fixed': use `step`; 'uniform': sample from `step_range`
+    step: 0.5                     # Used when step_sampling='fixed'
+    step_range: [0.05, 0.3]        # Fractional crossover-step range
+    # Crossover strategy
+    offspring_mode: "crossover"   # Options: 'crossover', 'resample', 'mutation'
+    strategy: "block"             # Options: 'uniform', 'convex', 'block'
+    augmentation_factor: 4        # Child count relative to the selected parent pool
+    strategy_kwargs:
+      mixing_ratio: 0.3           # Fraction of blocks from the primary parent
+      block_size: 8               # Spatial block size (H, W)
+      block_size_c: 4             # Channel block size; 1 disables channel splitting
+    # Genetic algorithm
+    evolution_generations: 3
+    parent_ratio: 0.25            # Select the top quarter as crossover parents
+    mutation_std: 0.05            # Gaussian mutation applied to child latents
+    survivor_score: "src"   # Options: 'advantage', 'abs_advantage', 'src'
 
 # Scheduler Configuration
 scheduler:

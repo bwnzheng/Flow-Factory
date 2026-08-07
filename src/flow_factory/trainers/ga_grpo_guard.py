@@ -89,8 +89,7 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
                 },
                 child_factory=self._grpo_child_factory,
             )
-            if getattr(cxo_args, "log_rewards", True):
-                self.advantage_processor._log_crossover_rewards = True
+            self.advantage_processor._ga_enabled = True
             self.advantage_processor._child_in_norm = True
             logger.info(
                 f"GA GRPO-Guard: offspring_mode={offspring_mode} "

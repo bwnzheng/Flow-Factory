@@ -725,6 +725,49 @@ def test_final_population_crossover_metrics_share_ga_namespace():
     assert not any(key.startswith("crossover/") for key in processor._pending_crossover_stats)
 
 
+def test_ga_final_population_reward_metrics_are_always_collected():
+    class SingleProcessAccelerator:
+        device = torch.device("cpu")
+        num_processes = 1
+        process_index = 0
+
+        @staticmethod
+        def gather(tensor):
+            return tensor
+
+        @staticmethod
+        def reduce(tensor, reduction):
+            assert reduction == "sum"
+            return tensor
+
+    processor = AdvantageProcessor(
+        accelerator=SingleProcessAccelerator(),
+        reward_weights={"quality": {"default": 1.0}},
+        group_size=4,
+        sampler_type="group_contiguous",
+        verbose=False,
+    )
+    processor._ga_enabled = True
+    processor._child_in_norm = True
+    samples = [
+        BaseSample(prompt="prompt", _unique_id=1, extra_kwargs={"is_crossover_child": False}),
+        BaseSample(prompt="prompt", _unique_id=1, extra_kwargs={"is_crossover_child": False}),
+        BaseSample(prompt="prompt", _unique_id=1, extra_kwargs={"is_crossover_child": True}),
+        BaseSample(prompt="prompt", _unique_id=1, extra_kwargs={"is_crossover_child": True}),
+    ]
+
+    processor.compute_advantages(
+        samples,
+        rewards={"quality": torch.tensor([1.0, 3.0, 2.0, 4.0])},
+        aggregation_func="sum",
+    )
+    metrics = processor.pop_all_stats()
+
+    assert metrics["ga/final_population/parent/quality/mean"] == 2.0
+    assert metrics["ga/final_population/child/quality/mean"] == 3.0
+    assert metrics["ga/final_population/child/quality/better_than_parent_mean_rate"] == 0.5
+
+
 def test_final_population_child_rate_uses_global_parent_mean_and_float32_reduce():
     class TwoProcessAccelerator:
         num_processes = 2

@@ -100,10 +100,6 @@ class GAArguments(ArgABC):
             )
         },
     )
-    log_rewards: bool = field(
-        default=True,
-        metadata={"help": "Log per-reward statistics separately for parent and child samples."},
-    )
     survivor_score: Literal["advantage", "abs_advantage", "src"] = field(
         default="advantage",
         metadata={

@@ -118,9 +118,7 @@ class AdvantageProcessor:
 
         # Crossover / Pareto state
         self._pareto_enabled = pareto_config is not None and pareto_config.get("enabled", False)
-        self._log_crossover_rewards: bool = (
-            False  # set by crossover trainers via log_rewards option
-        )
+        self._ga_enabled: bool = False  # set by GA trainers when augmentation is enabled
         self._pending_crossover_stats: Optional[Dict[str, Any]] = None
         self._pending_pareto_stats: Optional[Dict[str, Any]] = None
         self._pending_nondom_stats: Optional[Dict[str, Any]] = None
@@ -689,7 +687,7 @@ class AdvantageProcessor:
         self._build_nondom_stats(gathered_rewards, group_indices)
 
         # ---- Crossover stats (before any filtering) ----
-        if self._log_crossover_rewards:
+        if self._ga_enabled:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
         # ---- Pareto filtering & child-mask (crossover-only paths) ----
@@ -698,7 +696,7 @@ class AdvantageProcessor:
         pareto_mask: Optional[np.ndarray] = None
         norm_mask: Optional[np.ndarray] = None
         child_mask: Optional[np.ndarray] = None
-        crossover_active = self._pareto_enabled or self._log_crossover_rewards
+        crossover_active = self._pareto_enabled or self._ga_enabled
         if crossover_active:
             child_mask = self._build_child_mask(samples, group_indices)
             if self._pareto_enabled:
@@ -937,7 +935,7 @@ class AdvantageProcessor:
         self._build_nondom_stats(gathered_rewards, group_indices)
 
         # ---- Crossover stats ----
-        if self._log_crossover_rewards:
+        if self._ga_enabled:
             self._build_crossover_stats(gathered_rewards, group_indices, samples)
 
         # ---- Pareto filtering & child-mask (crossover-only paths) ----
@@ -946,7 +944,7 @@ class AdvantageProcessor:
         pareto_mask: Optional[np.ndarray] = None
         norm_mask: Optional[np.ndarray] = None
         child_mask: Optional[np.ndarray] = None
-        crossover_active = self._pareto_enabled or self._log_crossover_rewards
+        crossover_active = self._pareto_enabled or self._ga_enabled
         if crossover_active:
             child_mask = self._build_child_mask(samples, group_indices)
             if self._pareto_enabled:

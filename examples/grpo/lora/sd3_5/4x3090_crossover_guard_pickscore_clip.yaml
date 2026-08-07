@@ -116,7 +116,6 @@ train:
       block_size_c: 4             # Channel block size (C). 1=no ch split, 4=blocks of 4ch
     # src requires advantage_aggregation: sum.
     survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'src'
-    log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration
 scheduler:

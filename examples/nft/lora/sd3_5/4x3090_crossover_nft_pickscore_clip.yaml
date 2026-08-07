@@ -128,8 +128,6 @@ train:
     mutation_std: 0.05            # Gaussian noise stddev applied to child latents
     # src requires advantage_aggregation: sum.
     survivor_score: "advantage"  # Options: 'advantage', 'abs_advantage', 'src'
-    # Logging
-    log_rewards: true             # Log per-reward parent vs child stats
 
 # Scheduler Configuration
 scheduler:
