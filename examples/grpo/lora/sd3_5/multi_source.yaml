@@ -74,6 +74,7 @@ log:
 
 # Training Configuration
 train:
+  debug_train: false  # Options: false (normal), true (minimum valid prompts per epoch)
   trainer_type: 'grpo'  # Options: grpo, grpo-guard, nft, awm, dpo, dgpo
   advantage_aggregation: 'sum'  # Options: sum (weighted-sum), gdpo (per-reward group-norm)
   clip_range: 1.0e-4  # PPO/GRPO policy ratio clipping range

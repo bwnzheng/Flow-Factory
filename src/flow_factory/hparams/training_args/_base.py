@@ -108,6 +108,17 @@ class EvaluationArguments(ArgABC):
 class TrainingArguments(ArgABC):
     r"""Base training arguments shared across all algorithms."""
 
+    debug_train: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, use the minimum geometry-valid number of unique prompts per epoch. "
+                "The final count still preserves sampler, group, distributed, multi-source, "
+                "and gradient-step constraints."
+            )
+        },
+    )
+
     # --- Trainer type ---
     trainer_type: str = field(
         default="grpo",

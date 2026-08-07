@@ -152,6 +152,7 @@ def __iter__(self):
 
 ```yaml
 train:
+  debug_train: false  # true uses the minimum sampler-valid prompt count per epoch
   per_device_batch_size: 2       # Batch size per GPU
   group_size: 4                  # K — repetitions per prompt
   unique_sample_num_per_epoch: 64  # M — unique prompts per epoch

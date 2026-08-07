@@ -45,6 +45,7 @@ log:
   
 # Training Configuration
 train:
+  debug_train: false  # Options: false (normal), true (minimum valid prompts per epoch)
   # Trainer settings
   trainer_type: 'nft'
   advantage_aggregation: 'sum' # Options: 'sum', 'gdpo'

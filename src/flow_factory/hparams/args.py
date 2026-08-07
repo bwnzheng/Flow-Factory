@@ -195,8 +195,47 @@ class Arguments(ArgABC):
         self._validate_teacher_sources()
         self._resolve_scheduler_sde_defaults()
         self._resolve_sampler_type()
+        configured_unique_sample_num = self._apply_debug_train_limit()
         self._align_batch_geometry()
+        self._log_debug_train_geometry(configured_unique_sample_num)
         self._adjust_gradient_accumulation()
+
+    def _apply_debug_train_limit(self) -> Optional[int]:
+        """Request the smallest positive sample geometry in debug mode."""
+        ta = self.training_args
+        if not ta.debug_train:
+            return None
+
+        configured_unique_sample_num = ta.unique_sample_num_per_epoch
+        if configured_unique_sample_num <= 0:
+            raise ValueError(
+                "`unique_sample_num_per_epoch` must be positive when `debug_train=True`; "
+                f"got {configured_unique_sample_num}."
+            )
+        ta.unique_sample_num_per_epoch = 1
+        return configured_unique_sample_num
+
+    def _log_debug_train_geometry(
+        self,
+        configured_unique_sample_num: Optional[int],
+    ) -> None:
+        """Log the final geometry-aligned debug training sample count."""
+        if configured_unique_sample_num is None:
+            return
+
+        ta = self.training_args
+        total_samples_per_epoch = ta.unique_sample_num_per_epoch * ta.group_size
+        logger.warning(
+            "`debug_train=True`: resolved per-epoch sampling to the minimum valid geometry "
+            "(`unique_sample_num_per_epoch`: configured(%d), resolved(%d); "
+            "`group_size`(%d); total rollout samples per epoch(%d); `sampler_type`(%s)). "
+            "This does not limit `max_epochs`, evaluation, or preprocessing.",
+            configured_unique_sample_num,
+            ta.unique_sample_num_per_epoch,
+            ta.group_size,
+            total_samples_per_epoch,
+            self.data_args.sampler_type,
+        )
 
     def _validate_sample_weighting(self) -> None:
         """Validate shared sample-weighting semantics before trainer construction."""

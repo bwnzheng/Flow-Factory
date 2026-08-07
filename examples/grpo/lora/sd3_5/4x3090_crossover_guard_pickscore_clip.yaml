@@ -50,6 +50,7 @@ log:
 
 # Training Configuration
 train:
+  debug_train: false  # Options: false (normal), true (minimum valid prompts per epoch)
   # Trainer settings
   trainer_type: 'ga_grpo_guard' # ← CHANGED from 'grpo-guard'
   advantage_aggregation: 'sum' # Options: 'sum', 'gdpo' (GRPO-Guard: matched to upstream, standard GRPO advantage)
