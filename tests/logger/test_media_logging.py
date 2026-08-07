@@ -21,7 +21,7 @@ import torch
 from flow_factory.hparams import LogArguments
 from flow_factory.logger import LogImage, prepare_sample_for_media
 from flow_factory.logger.abc import LocalFileLogger, Logger
-from flow_factory.samples import T2ISample
+from flow_factory.samples import I2ISample, T2AVSample, T2ISample
 from flow_factory.trainers.abc import BaseTrainer
 
 
@@ -104,15 +104,15 @@ class _MediaTrainerHarness:
     _build_media_context = BaseTrainer._build_media_context
     log_media_samples = BaseTrainer.log_media_samples
 
-    def __init__(self):
+    def __init__(self, save_media_locally=True):
         self.step = 20
         self.epoch = 2
         self.log_args = SimpleNamespace(
             run_name="media-run",
             media_save_freq=20,
             max_log_samples=None,
-            save_media_locally=True,
-            logging_backend=None,
+            save_media_locally=save_media_locally,
+            logging_backend=None if save_media_locally else "wandb",
         )
         self.accelerator = SimpleNamespace(
             process_index=0,
@@ -154,7 +154,14 @@ def test_media_samples_are_gathered_and_reindexed_without_rank_keys(monkeypatch)
 
     monkeypatch.setattr(
         "flow_factory.trainers.abc.gather_object",
-        lambda local_media: local_media + [remote_media_sample],
+        lambda local_media: local_media
+        + [
+            {
+                "sample": remote_media_sample,
+                "group_id": 42,
+                "candidate_id": None,
+            }
+        ],
     )
 
     trainer.log_media_samples(
@@ -174,6 +181,71 @@ def test_media_samples_are_gathered_and_reindexed_without_rank_keys(monkeypatch)
     assert [context["run"]["rank"] for context in contexts] == [0, 1]
     assert [context["media"]["group_index"] for context in contexts] == [0, 1]
     assert [context["media"]["global_index"] for context in contexts] == [0, 1]
+
+
+def test_backend_media_skips_replay_metadata_before_gather(monkeypatch):
+    trainer = _MediaTrainerHarness(save_media_locally=False)
+    sample = T2ISample(
+        image=torch.zeros(3, 8, 8),
+        prompt="backend sample",
+        _unique_id=42,
+        extra_kwargs={"rewards": {"quality": 0.8}},
+    )
+    gathered = []
+
+    def record_gather(media_records):
+        gathered.extend(media_records)
+        return media_records
+
+    monkeypatch.setattr("flow_factory.trainers.abc.gather_object", record_gather)
+
+    trainer.log_media_samples(
+        [sample],
+        category="training",
+        context_name="final",
+    )
+
+    assert len(gathered) == 1
+    gathered_sample = gathered[0]["sample"]
+    assert gathered[0]["group_id"] == 42
+    assert "_media_metadata" not in gathered_sample.extra_kwargs
+    assert gathered_sample.extra_kwargs == {"rewards": {"quality": 0.8}}
+    assert gathered_sample.prompt == "backend sample"
+    assert gathered_sample.source is None
+    assert gathered_sample._unique_id is None
+    payload = trainer.records[0][1]
+    assert list(payload) == ["media/training/final/group_42/sample_000000"]
+
+
+def test_backend_media_keeps_only_fields_required_by_multimodal_formatters():
+    image_sample = I2ISample(
+        image=torch.zeros(3, 8, 8),
+        condition_images=[torch.ones(3, 8, 8)],
+        prompt="edit image",
+        source="edit-dataset",
+        _unique_id=42,
+    )
+    audio_video_sample = T2AVSample(
+        video=torch.zeros(2, 3, 8, 8),
+        audio=torch.zeros(160),
+        audio_sample_rate=16000,
+        prompt="sound and motion",
+        source="video-dataset",
+        _unique_id=43,
+    )
+
+    image_media = prepare_sample_for_media(image_sample, include_metadata=False)
+    audio_video_media = prepare_sample_for_media(
+        audio_video_sample,
+        include_metadata=False,
+    )
+
+    assert image_media.condition_images is not None
+    assert image_media.source is None
+    assert audio_video_media.video is not None
+    assert audio_video_media.audio is not None
+    assert audio_video_media.audio_sample_rate == 16000
+    assert audio_video_media.source is None
 
 
 def test_log_arguments_validate_media_settings(tmp_path):
@@ -439,7 +511,7 @@ def test_backend_media_uses_the_same_interval(tmp_path):
 def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
     key = "media/training/final/group_42/sample_000000"
-    sample = _media_sample()
+    sample = prepare_sample_for_media(_media_sample(), include_metadata=False)
     sample.extra_kwargs["rewards"] = {
         "quality": torch.tensor(float("nan")),
         "alignment": torch.tensor(float("-inf")),
@@ -452,6 +524,4 @@ def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
         "quality": {"type": "nonfinite_float", "value": "nan"},
         "alignment": {"type": "nonfinite_float", "value": "-inf"},
     }
-    assert media.metadata["context"]["run"]["run_name"] == "media-run"
-    assert media.metadata["context"]["run"]["world_size"] == 2
-    assert media.metadata["context"]["configuration"]["log"]["run_name"] == "media-run"
+    assert "context" not in media.metadata

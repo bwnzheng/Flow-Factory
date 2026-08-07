@@ -201,6 +201,7 @@ class GANFTTrainer(DiffusionNFTTrainer):
                     epoch=self.epoch,
                     verbose=self.log_args.verbose,
                     capture_media=self.should_log_media(),
+                    capture_media_metadata=self.log_args.save_media_locally,
                 )
             t_ga = time.time() - t_ga
             logger.info(

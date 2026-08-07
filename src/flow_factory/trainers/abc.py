@@ -129,14 +129,12 @@ class BaseTrainer(ABC):
         group_index: int,
         extra_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Build replay-oriented metadata shared by local and backend media."""
+        """Build per-sample replay metadata for local media sidecars."""
         context = {
             "run": {
-                "run_name": self.log_args.run_name,
                 "step": int(self.step),
                 "epoch": int(self.epoch),
                 "rank": int(self.accelerator.process_index),
-                "world_size": int(self.accelerator.num_processes),
             },
             "media": {
                 "category": category,
@@ -144,7 +142,6 @@ class BaseTrainer(ABC):
                 "local_index": int(local_index),
                 "group_index": int(group_index),
             },
-            "configuration": self.config.to_dict(),
         }
         if extra_context:
             context.update(extra_context)
@@ -168,43 +165,65 @@ class BaseTrainer(ABC):
 
         limit = self.log_args.max_log_samples
         selected_samples = samples if limit is None else samples[:limit]
+        include_metadata = self.log_args.save_media_locally
         group_counts: Dict[int, int] = {}
-        media_samples = []
+        media_records: List[Dict[str, Any]] = []
         for local_index, sample in enumerate(selected_samples):
             group_id = int(sample.unique_id)
             group_index = group_counts.get(group_id, 0)
             group_counts[group_id] = group_index + 1
-            context = self._build_media_context(
-                category=category,
-                context_name=context_name,
-                local_index=local_index,
-                group_index=group_index,
-                extra_context=extra_context,
+            context = (
+                self._build_media_context(
+                    category=category,
+                    context_name=context_name,
+                    local_index=local_index,
+                    group_index=group_index,
+                    extra_context=extra_context,
+                )
+                if include_metadata
+                else None
             )
-            media_samples.append(prepare_sample_for_media(sample, context))
+            existing_metadata = sample.extra_kwargs.get("_media_metadata", {})
+            candidate_id = existing_metadata.get("context", {}).get("ga", {}).get(
+                "candidate_id"
+            )
+            if candidate_id is None:
+                candidate_id = sample.extra_kwargs.get("ga_candidate_id")
+            media_records.append(
+                {
+                    "sample": prepare_sample_for_media(
+                        sample,
+                        context,
+                        include_metadata=include_metadata,
+                    ),
+                    "group_id": group_id,
+                    "candidate_id": candidate_id,
+                }
+            )
 
         if self.accelerator.num_processes > 1:
-            media_samples = gather_object(media_samples)
+            media_records = gather_object(media_records)
             if not self.accelerator.is_main_process:
                 return
 
         payload: Dict[str, Any] = {}
         group_counts = {}
-        for global_index, media_sample in enumerate(media_samples):
-            metadata = media_sample.extra_kwargs["_media_metadata"]
-            media_context = metadata["context"]["media"]
-            group_id = metadata["sample"]["unique_id"]
+        for global_index, media_record in enumerate(media_records):
+            media_sample = media_record["sample"]
+            group_id = media_record["group_id"]
             group_index = group_counts.get(group_id, 0)
             group_counts[group_id] = group_index + 1
-            media_context["global_index"] = global_index
-            media_context["group_index"] = group_index
-            candidate_id = metadata["context"].get("ga", {}).get("candidate_id")
-            if candidate_id is None:
-                candidate_id = metadata["sample"]["extra_kwargs"].get("ga_candidate_id")
+            if include_metadata:
+                media_context = media_sample.extra_kwargs["_media_metadata"]["context"][
+                    "media"
+                ]
+                media_context["global_index"] = global_index
+                media_context["group_index"] = group_index
+            candidate_id = media_record["candidate_id"]
             item_name = (
                 f"candidate_{int(candidate_id):06d}"
                 if candidate_id is not None
-                else f"sample_{int(media_context['group_index']):06d}"
+                else f"sample_{group_index:06d}"
             )
             key = (
                 f"media/{category}/{context_name}/group_{group_id}/{item_name}"

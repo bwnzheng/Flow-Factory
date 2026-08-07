@@ -151,13 +151,17 @@ The same `media_save_freq` gate applies to the online backend and local files.
 Local images are organized under
 `<save_dir>/<run_name>/logs/images/<category>/step_N/group_N/<context>/`.
 Training contexts include `initial`, `final`, and one `genN` directory per GA
-generation. Media from all ranks is gathered before the main process writes it;
-the originating rank remains in metadata but is not part of the path. Every
-image or video has a same-stem JSON sidecar containing prompt/source identity,
+generation. Media from all ranks is gathered before the main process writes it.
+For local storage, the originating rank remains in metadata but is not part of
+the path. Every image or video has a same-stem JSON sidecar containing
+prompt/source identity,
 rewards and advantages, sampling or evaluation settings, and GA
 lineage/selection evidence where applicable. `logs/media.jsonl` is a lightweight
 cross-step manifest: it stores the run configuration once, then one lookup entry
 per media file with both media and sidecar metadata paths.
+Backend-only logging constructs no replay metadata before cross-rank gathering;
+only caption inputs, media tensors, and minimal group/candidate routing IDs are
+transferred to the main process.
 The per-sample reward map includes only rewards declared applicable to that
 sample; complete source-aligned reward matrices remain in the raw reward and GA
 logs.

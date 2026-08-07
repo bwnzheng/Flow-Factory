@@ -123,14 +123,24 @@ def _prepare_ga_child_media(
     children: List[BaseSample],
     selection_event: Dict[str, Any],
     generation: int,
+    include_metadata: bool = True,
 ) -> List[BaseSample]:
-    """Attach complete lineage and selection evidence to every GA child."""
-    selected_ids = selection_event["selected_ids"].tolist()
-    selected_order = {int(candidate_id): order for order, candidate_id in enumerate(selected_ids)}
+    """Prepare GA children with optional lineage and selection metadata."""
     offspring = selection_event["offspring"]
+    selected_order = {}
+    if include_metadata:
+        selected_ids = selection_event["selected_ids"].tolist()
+        selected_order = {
+            int(candidate_id): order for order, candidate_id in enumerate(selected_ids)
+        }
     media_samples = []
     for child_index, child in enumerate(children):
         candidate_id = int(offspring["candidate_ids"][child_index])
+        if not include_metadata:
+            media_sample = prepare_sample_for_media(child, include_metadata=False)
+            media_sample.extra_kwargs["ga_candidate_id"] = candidate_id
+            media_samples.append(media_sample)
+            continue
         child_metadata = {
             "ga": {
                 "candidate_id": candidate_id,
@@ -319,6 +329,7 @@ class GeneticAlgorithm:
         applicable: Optional[np.ndarray] = None,
         verbose: bool = True,
         capture_media: bool = False,
+        capture_media_metadata: bool = True,
     ) -> Tuple[
         List[BaseSample],
         Dict[str, torch.Tensor],
@@ -338,12 +349,17 @@ class GeneticAlgorithm:
                 reward keys are derived from this mask; when ``None``, the
                 GA falls back to treating *all* global reward keys as valid
                 (single-source / homogeneous training).
+            capture_media: Whether to retain generated children for media logging.
+            capture_media_metadata: Whether retained children need complete local
+                sidecar metadata. Backend-only logging should leave this disabled.
 
         Returns:
-            ``(evolved_samples, evolved_rewards, ga_stats, ga_selection_events)``.
-            *ga_stats* is a dict of per-generation accumulators (to be
-            reduced across ranks). *ga_selection_events* contains one raw,
-            replayable selection record per group and generation.
+            ``(evolved_samples, evolved_rewards, ga_stats, ga_selection_events,
+            ga_media_samples)``. *ga_stats* is a dict of per-generation
+            accumulators to be reduced across ranks. *ga_selection_events*
+            contains one raw, replayable selection record per group and
+            generation. *ga_media_samples* contains captured children grouped
+            by generation.
         """
         t_start = time.time()
         reward_keys = sorted(parent_rewards.keys())
@@ -456,7 +472,12 @@ class GeneticAlgorithm:
                 ga_selection_events.append(complete_event)
                 if capture_media:
                     ga_media_samples[gen_idx].extend(
-                        _prepare_ga_child_media(children, complete_event, gen_idx)
+                        _prepare_ga_child_media(
+                            children,
+                            complete_event,
+                            gen_idx,
+                            include_metadata=capture_media_metadata,
+                        )
                     )
 
                 # ---- Log to console ----

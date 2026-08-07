@@ -441,10 +441,11 @@ Epoch N
 
 ## Sampled Media Records
 
-Sampled media is emitted after feedback has been prepared, so its metadata can
-include the rewards, advantages, and sample weights used by optimization.
-Evaluation media is emitted after its dataset-specific reward buffer is
-finalized. Configure the shared local/backend interval in the `log` section:
+Sampled media is emitted after feedback has been prepared. Local sidecars can
+therefore include the rewards, advantages, and sample weights used by
+optimization. Evaluation media is emitted after its dataset-specific reward
+buffer is finalized. Configure the shared local/backend interval in the `log`
+section:
 
 ```yaml
 log:
@@ -473,14 +474,14 @@ logs/images/
 Media from every rank is gathered to the main process before local saving, so
 paths contain no rank directory. The source rank remains in each sidecar. Every
 media file has a JSON file with the same stem in the same directory. The sidecar
-schema includes the complete run configuration; rank, step, and epoch;
-prompt/source/sample identity; original per-sample fields such as rewards,
-advantages, and reweighting values; and stage-specific sampling/evaluation
-settings. GA child sidecars additionally contain lineage, all candidate reward
-vectors, parent and survivor selection evidence, Pareto membership, and ordered
-selected/rejected IDs. Arrays larger than 4096 elements are represented by
-shape and dtype rather than duplicated, so trajectories and model states remain
-in their canonical training artifacts. The per-sample `reward` map contains only
+schema includes rank, step, and epoch; prompt/source/sample identity; original
+per-sample fields such as rewards, advantages, and reweighting values; and
+stage-specific sampling/evaluation settings. GA child sidecars additionally
+contain lineage, all candidate reward vectors, parent and survivor selection
+evidence, Pareto membership, and ordered selected/rejected IDs. Arrays larger
+than 4096 elements are represented by shape and dtype rather than duplicated,
+so trajectories and model states remain in their canonical training artifacts.
+The per-sample `reward` map contains only
 entries named by `sample.applicable_rewards`; an empty applicability set retains
 all rewards for legacy single-source records. This display-only filtering does
 not alter training tensors, reward pickles, or complete GA group diagnostics.
@@ -489,3 +490,7 @@ the run name, world size, and complete configuration. Each subsequent media
 entry contains `step`, logical key, relative media path, `metadata_path`, prompt,
 and reward fields. Run-level fields are omitted from per-media sidecars; detailed
 sample, rank, stage, evaluation, and GA replay metadata remains in those files.
+When `save_media_locally` is false, no replay metadata is constructed for the
+backend path. Each rank transfers only CPU media, prompt/reward caption inputs,
+and minimal group/candidate routing IDs; WandB, SwanLab, and TensorBoard consume
+the resulting media object and caption.

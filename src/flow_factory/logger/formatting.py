@@ -218,12 +218,33 @@ _MEDIA_SAMPLE_FIELDS = {
     "frame_rate",
 }
 
+_BACKEND_MEDIA_SAMPLE_FIELDS = {
+    "image",
+    "video",
+    "audio",
+    "audio_sample_rate",
+    "prompt",
+    "condition_images",
+    "condition_videos",
+    "frame_rate",
+}
+
 
 def prepare_sample_for_media(
     sample: BaseSample,
     context: Optional[Dict[str, Any]] = None,
+    include_metadata: bool = True,
 ) -> BaseSample:
-    """Create a CPU media-only sample with replayable bounded metadata."""
+    """Create a CPU media-only sample.
+
+    Args:
+        sample: Source training or evaluation sample.
+        context: Replay context to attach for local sidecar storage.
+        include_metadata: Whether to build replayable per-sample metadata.
+
+    Returns:
+        A shallow media-only copy with CPU media tensors.
+    """
     media_sample = copy.copy(sample)
     for sample_field in dataclass_fields(sample):
         name = sample_field.name
@@ -243,6 +264,21 @@ def prepare_sample_for_media(
                 name,
                 [item.detach().cpu() if isinstance(item, torch.Tensor) else item for item in value],
             )
+
+    rewards = sample.extra_kwargs.get("rewards")
+    if isinstance(rewards, dict) and sample.applicable_rewards:
+        rewards = {
+            name: value for name, value in rewards.items() if name in sample.applicable_rewards
+        }
+    media_extra_kwargs = {"rewards": rewards}
+    if "ga_candidate_id" in sample.extra_kwargs:
+        media_extra_kwargs["ga_candidate_id"] = sample.extra_kwargs["ga_candidate_id"]
+    if not include_metadata:
+        for name in _MEDIA_SAMPLE_FIELDS - _BACKEND_MEDIA_SAMPLE_FIELDS:
+            if hasattr(media_sample, name):
+                setattr(media_sample, name, None)
+        media_sample.extra_kwargs = media_extra_kwargs
+        return media_sample
 
     existing_metadata = sample.extra_kwargs.get("_media_metadata")
     if existing_metadata is not None:
@@ -283,15 +319,8 @@ def prepare_sample_for_media(
             },
             "context": _to_json_safe(context or {}),
         }
-    rewards = sample.extra_kwargs.get("rewards")
-    if isinstance(rewards, dict) and sample.applicable_rewards:
-        rewards = {
-            name: value for name, value in rewards.items() if name in sample.applicable_rewards
-        }
-    media_sample.extra_kwargs = {
-        "rewards": rewards,
-        "_media_metadata": sample_metadata,
-    }
+    media_extra_kwargs["_media_metadata"] = sample_metadata
+    media_sample.extra_kwargs = media_extra_kwargs
     return media_sample
 
 

@@ -417,6 +417,15 @@ def test_ga_child_media_keeps_selected_and_rejected_candidates_with_full_event()
     assert rejected["selected_order"] is None
     np.testing.assert_array_equal(rejected["group_selection"]["rejected_ids"], [1, 3])
 
+    backend_media = _prepare_ga_child_media(
+        children,
+        event,
+        generation=1,
+        include_metadata=False,
+    )
+    assert "_media_metadata" not in backend_media[0].extra_kwargs
+    assert [sample.extra_kwargs["ga_candidate_id"] for sample in backend_media] == [2, 3]
+
 
 def test_ga_arguments_parse_src_configuration():
     args = GAArguments.from_dict({"survivor_score": "src"})
