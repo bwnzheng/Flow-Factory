@@ -146,7 +146,6 @@ aggregated.
 train:
   trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm (on-policy only)
   advantage_aggregation: sum
-  stddev_reweighting: false
   sample_weighting: src  # Options: none, src
   src_reweight_interpolation: 0.5  # lambda in [0, 1)
   src_reweight_temperature: 1.0  # > 0
@@ -160,9 +159,9 @@ weighted centering and scaling regardless of `global_std`. NFT preserves its
 declared normalizer contract: `global_std: true` keeps the baseline unweighted
 global rollout standard deviation while changing the prompt mean to the SRC-
 weighted mean; `global_std: false` uses the corresponding weighted prompt
-standard deviation. SRC cannot be combined with `stddev_reweighting`,
-off-policy AWM, crossover, DPO, DGPO, or CRD. NFT may use either its current
-policy or EMA sampling policy as the rollout/reference distribution.
+standard deviation. SRC cannot be combined with off-policy AWM, crossover,
+DPO, DGPO, or CRD. NFT may use either its current policy or EMA sampling policy
+as the rollout/reference distribution.
 
 Logging includes probability and `sample_weight` distributions, ESS and
 ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower
@@ -235,7 +234,6 @@ train:
   trainer_type: ga_grpo_guard
   advantage_aggregation: sum  # Required when survivor_score is src
   global_std: true
-  stddev_reweighting: false
   ga:
     enabled: true
     step_sampling: uniform

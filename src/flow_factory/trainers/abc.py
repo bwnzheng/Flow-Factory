@@ -319,8 +319,6 @@ class BaseTrainer(ABC):
             verbose=self.log_args.verbose,
             max_log_samples=self.log_args.max_log_samples,
             source_id_to_name=self.config.data_args.source_id_to_name,
-            stddev_reweighting=getattr(self.training_args, 'stddev_reweighting', False),
-            stddev_ema_decay=getattr(self.training_args, 'stddev_ema_decay', 0.99),
             sample_weighting=self.training_args.sample_weighting,
             src_reweight_interpolation=self.training_args.src_reweight_interpolation,
             src_reweight_temperature=self.training_args.src_reweight_temperature,

@@ -118,8 +118,6 @@ train:
   src_reweight_epsilon: 1.0e-8  # Positive numerical safeguard
   src_reweight_degeneracy_threshold: 1.0e-12  # Uniform fallback threshold
   global_std: false
-  stddev_reweighting: true
-  stddev_ema_decay: 0.99
   unique_sample_num_per_epoch: 144  # 48 per source x 3 sources
   gradient_step_per_epoch: 1
   gradient_accumulation_steps: auto

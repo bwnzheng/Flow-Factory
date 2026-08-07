@@ -207,7 +207,6 @@ def test_ga_rejects_missing_reward_weights_during_initialization():
     training_args = SimpleNamespace(
         ga=SimpleNamespace(survivor_score="src"),
         advantage_aggregation="sum",
-        stddev_reweighting=False,
         global_std=False,
         trainer_type="ga_grpo_guard",
         num_inference_steps=4,

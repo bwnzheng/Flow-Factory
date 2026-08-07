@@ -132,7 +132,6 @@ def _src_config(trainer_type: str = "grpo", reward_count: int = 2):
             "group_size": 2,
             "sample_weighting": "src",
             "advantage_aggregation": "sum",
-            "stddev_reweighting": False,
         },
         "rewards": [
             {

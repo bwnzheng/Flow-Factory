@@ -219,11 +219,6 @@ class Arguments(ArgABC):
                 "`sample_weighting: src` requires `advantage_aggregation: sum` because SRC defines "
                 "its scalar training direction from the fixed weighted sum of active rewards."
             )
-        if ta.stddev_reweighting:
-            raise ValueError(
-                "`sample_weighting: src` cannot be combined with `stddev_reweighting: true`; "
-                "SRC requires fixed reward weights while scoring a frozen prompt group."
-            )
         if trainer_type == "awm" and getattr(ta, "off_policy", False):
             raise ValueError(
                 "`sample_weighting: src` requires on-policy rollout groups, but "
