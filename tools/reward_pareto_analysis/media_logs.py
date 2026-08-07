@@ -14,8 +14,9 @@
 
 """JSONL log reader — replaces EventAccumulator for the new log format.
 
-Reads ``logs/media.jsonl`` from a training run directory.  Each line is a JSON
-object with keys: ``step``, ``key``, ``path``, ``prompt``, ``reward``.
+Reads ``logs/media.jsonl`` from a training run directory. The file may start
+with a ``run_context`` record; media records contain ``step``, ``key``, ``path``,
+``metadata_path``, ``prompt``, and ``reward``.
 
 The ``path`` field is relative to ``{log_dir}``.
 """

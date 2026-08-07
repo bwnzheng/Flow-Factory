@@ -484,6 +484,8 @@ in their canonical training artifacts. The per-sample `reward` map contains only
 entries named by `sample.applicable_rewards`; an empty applicability set retains
 all rewards for legacy single-source records. This display-only filtering does
 not alter training tensors, reward pickles, or complete GA group diagnostics.
-The single `logs/media.jsonl` file is a lightweight manifest with only `step`,
-logical key, relative path, prompt, and reward fields; detailed replay metadata
-is stored only in the per-media sidecars.
+The single `logs/media.jsonl` file starts with one `run_context` record containing
+the run name, world size, and complete configuration. Each subsequent media
+entry contains `step`, logical key, relative media path, `metadata_path`, prompt,
+and reward fields. Run-level fields are omitted from per-media sidecars; detailed
+sample, rank, stage, evaluation, and GA replay metadata remains in those files.

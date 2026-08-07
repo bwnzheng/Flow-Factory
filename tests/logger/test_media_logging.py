@@ -38,7 +38,7 @@ class _RecordingBackendLogger(Logger):
 
 
 def _config(tmp_path, *, save_media_locally, process_index=0, num_processes=1):
-    return SimpleNamespace(
+    config = SimpleNamespace(
         process_index=process_index,
         num_processes=num_processes,
         log_args=SimpleNamespace(
@@ -51,6 +51,13 @@ def _config(tmp_path, *, save_media_locally, process_index=0, num_processes=1):
             log_metrics_jsonl=False,
         ),
     )
+    config.to_dict = lambda: {
+        "log": {
+            "run_name": "media-run",
+            "media_save_freq": 20,
+        }
+    }
+    return config
 
 
 def _media_sample():
@@ -73,9 +80,21 @@ def _media_sample():
     return prepare_sample_for_media(
         sample,
         {
-            "run": {"rank": 1, "step": 20, "epoch": 2},
+            "run": {
+                "run_name": "media-run",
+                "step": 20,
+                "epoch": 2,
+                "rank": 1,
+                "world_size": 2,
+            },
             "media": {"category": "training", "context": "final"},
             "sampling": {"num_inference_steps": 28, "guidance_scale": 4.5},
+            "configuration": {
+                "log": {
+                    "run_name": "media-run",
+                    "media_save_freq": 20,
+                }
+            },
         },
     )
 
@@ -217,15 +236,56 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
         "num_inference_steps": 28,
         "guidance_scale": 4.5,
     }
+    assert metadata["context"]["run"] == {"epoch": 2, "rank": 1}
+    assert "configuration" not in metadata["context"]
     assert metadata["reward"] == {"quality": 0.8, "alignment": 0.6}
-    manifest = json.loads((image_path.parents[5] / "media.jsonl").read_text())
+    manifest_records = [
+        json.loads(line)
+        for line in (image_path.parents[5] / "media.jsonl").read_text().splitlines()
+    ]
+    assert manifest_records[0] == {
+        "record_type": "run_context",
+        "schema_version": 2,
+        "run": {"run_name": "media-run", "world_size": 2},
+        "configuration": {
+            "log": {
+                "run_name": "media-run",
+                "media_save_freq": 20,
+            }
+        },
+    }
+    manifest = manifest_records[1]
     assert manifest == {
         "step": 20,
         "key": key,
         "path": "images/training/step_000020/group_42/final/sample_000000.jpg",
         "prompt": "a red cube",
         "reward": {"quality": 0.8, "alignment": 0.6},
+        "metadata_path": "images/training/step_000020/group_42/final/sample_000000.json",
     }
+
+
+def test_media_manifest_writes_run_context_once(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+
+    logger.log_data(
+        {"media/training/initial/group_42/sample_000000": _media_sample()},
+        step=20,
+    )
+    logger.log_data(
+        {"media/training/final/group_42/sample_000000": _media_sample()},
+        step=40,
+    )
+    resumed_logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    resumed_logger.log_data(
+        {"media/evaluation/benchmark/group_42/sample_000000": _media_sample()},
+        step=60,
+    )
+
+    manifest_path = tmp_path / "media-run" / "logs" / "media.jsonl"
+    records = [json.loads(line) for line in manifest_path.read_text().splitlines()]
+    assert [record.get("record_type") for record in records].count("run_context") == 1
+    assert len(records) == 4
 
 
 @pytest.mark.parametrize(
@@ -392,3 +452,6 @@ def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
         "quality": {"type": "nonfinite_float", "value": "nan"},
         "alignment": {"type": "nonfinite_float", "value": "-inf"},
     }
+    assert media.metadata["context"]["run"]["run_name"] == "media-run"
+    assert media.metadata["context"]["run"]["world_size"] == 2
+    assert media.metadata["context"]["configuration"]["log"]["run_name"] == "media-run"

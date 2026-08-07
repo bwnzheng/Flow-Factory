@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 import os
 import pickle
@@ -143,15 +144,31 @@ class Logger(ABC):
                     entry.update(value.metadata)
                 entry = _to_json_safe(entry)
                 sidecar_path = os.path.splitext(os.path.join(self._logs_dir, path))[0] + '.json'
+                sidecar_entry = copy.deepcopy(entry)
+                sidecar_context = sidecar_entry.get('context', {})
+                sidecar_context.pop('configuration', None)
+                sidecar_run = sidecar_context.get('run', {})
+                sidecar_run.pop('run_name', None)
+                sidecar_run.pop('step', None)
+                sidecar_run.pop('world_size', None)
                 with open(sidecar_path, 'w') as sidecar_file:
                     json.dump(
-                        entry,
+                        sidecar_entry,
                         sidecar_file,
                         ensure_ascii=False,
                         indent=2,
                         allow_nan=False,
                     )
-                entries.append(entry)
+                manifest_entry = {
+                    name: entry[name]
+                    for name in ('step', 'key', 'path', 'prompt', 'reward')
+                    if name in entry
+                }
+                manifest_entry['metadata_path'] = os.path.relpath(
+                    sidecar_path,
+                    self._logs_dir,
+                )
+                entries.append(manifest_entry)
                 return None
             elif isinstance(value, LogTable):
                 for row_idx, row in enumerate(value.rows):
@@ -176,14 +193,36 @@ class Logger(ABC):
 
         if entries:
             filepath = os.path.join(self._logs_dir, 'media.jsonl')
+            write_run_context = not getattr(self, '_media_run_context_written', False)
+            if write_run_context and os.path.isfile(filepath):
+                with open(filepath, 'r') as manifest_file:
+                    write_run_context = not any(
+                        json.loads(line).get('record_type') == 'run_context'
+                        for line in manifest_file
+                        if line.strip()
+                    )
             with open(filepath, 'a') as f:
+                if write_run_context:
+                    configuration = (
+                        self.config.to_dict()
+                        if hasattr(self.config, 'to_dict')
+                        else {}
+                    )
+                    run_context = _to_json_safe(
+                        {
+                            'record_type': 'run_context',
+                            'schema_version': 2,
+                            'run': {
+                                'run_name': self.config.log_args.run_name,
+                                'world_size': int(getattr(self.config, 'num_processes', 1)),
+                            },
+                            'configuration': configuration,
+                        }
+                    )
+                    f.write(json.dumps(run_context, ensure_ascii=False, allow_nan=False) + '\n')
+                self._media_run_context_written = True
                 for entry in entries:
-                    manifest_entry = {
-                        name: entry[name]
-                        for name in ('step', 'key', 'path', 'prompt', 'reward')
-                        if name in entry
-                    }
-                    f.write(json.dumps(manifest_entry, ensure_ascii=False) + '\n')
+                    f.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + '\n')
 
     def _save_raw_data_pkl(self, data: Dict, step: int):
         """Save raw analysis arrays to pickle files and remove them from metrics."""

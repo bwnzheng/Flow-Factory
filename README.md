@@ -153,10 +153,11 @@ Local images are organized under
 Training contexts include `initial`, `final`, and one `genN` directory per GA
 generation. Media from all ranks is gathered before the main process writes it;
 the originating rank remains in metadata but is not part of the path. Every
-image or video has a same-stem JSON sidecar containing the run configuration,
-prompt/source identity, rewards and advantages, sampling or evaluation settings,
-and GA lineage/selection evidence where applicable. `logs/media.jsonl` is a
-lightweight cross-step manifest containing only media paths and lookup fields.
+image or video has a same-stem JSON sidecar containing prompt/source identity,
+rewards and advantages, sampling or evaluation settings, and GA
+lineage/selection evidence where applicable. `logs/media.jsonl` is a lightweight
+cross-step manifest: it stores the run configuration once, then one lookup entry
+per media file with both media and sidecar metadata paths.
 The per-sample reward map includes only rewards declared applicable to that
 sample; complete source-aligned reward matrices remain in the raw reward and GA
 logs.
