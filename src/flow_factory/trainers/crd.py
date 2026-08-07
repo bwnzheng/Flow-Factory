@@ -446,6 +446,7 @@ class CRDTrainer(BaseTrainer):
         adv_metrics = self.advantage_processor.pop_advantage_metrics()
         if adv_metrics:
             self.log_data(adv_metrics, step=self.step)
+        self.log_media_samples(samples, category="training", context_name="final")
 
     # ========================= CRD Centering Loss =========================
 

@@ -134,12 +134,25 @@ To use [Weights & Biases](https://wandb.ai/site/) or [SwanLab](https://github.co
 After installation, set corresponding arguments in the config file:
 
 ```yaml
-run_name: null  # Run name (auto: {model_type}_{finetune_type}_{trainer_type}_{timestamp})
-project: "Flow-Factory"  # Project name for logging
-logging_backend: "wandb"  # Options: wandb, swanlab, tensorboard, none
+log:
+  run_name: null  # Auto: {model_type}_{finetune_type}_{trainer_type}_{timestamp}
+  project: "Flow-Factory"
+  logging_backend: "wandb"  # wandb, swanlab, tensorboard, or none
+  media_save_freq: 20  # Save/upload sampled media every N steps; 0 disables it
+  max_log_samples: null  # null keeps every sampled item when media is due
+  save_media_locally: true
+  image_save_format: "jpg"  # png or jpg
+  image_save_quality: 90  # Used by jpg only
 ```
 
 These trackers allow you to visualize both **training samples** and **metric curves** online:
+
+The same `media_save_freq` gate applies to the online backend and local files.
+Local images are organized under
+`<save_dir>/<run_name>/logs/images/{training,evaluation,ga}/`; GA children use
+`ga/genN/`. Every image or video has a same-stem JSON sidecar containing the
+run configuration, prompt/source identity, rewards and advantages, sampling or
+evaluation settings, and GA lineage/selection evidence where applicable.
 
 ![Online Image Samples](assets/wandb_images.png)
 

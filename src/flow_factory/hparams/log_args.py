@@ -57,14 +57,29 @@ class LogArguments(ArgABC):
         metadata={"help": "Save images/videos to local files instead of uploading to logging backend."},
     )
 
+    media_save_freq: int = field(
+        default=20,
+        metadata={
+            "help": (
+                "Save or upload sampled media every N training steps. "
+                "0 disables media logging while keeping scalar/raw-data logging enabled."
+            )
+        },
+    )
+
     log_metrics_jsonl: bool = field(
         default=True,
         metadata={"help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."},
     )
 
     max_log_samples: Optional[int] = field(
-        default=30,
-        metadata={"help": "Max samples (images) to log per step. None = unlimited."},
+        default=None,
+        metadata={
+            "help": (
+                "Optional per-rank cap for sampled media in each training/evaluation/GA "
+                "collection. None logs every sampled item."
+            )
+        },
     )
 
     image_save_format: str = field(
@@ -83,6 +98,24 @@ class LogArguments(ArgABC):
     )
 
     def __post_init__(self):
+
+        if self.media_save_freq < 0:
+            raise ValueError(f"`media_save_freq` must be >= 0, got {self.media_save_freq}.")
+        if self.max_log_samples is not None and self.max_log_samples <= 0:
+            raise ValueError(
+                "`max_log_samples` must be a positive integer or None, "
+                f"got {self.max_log_samples}."
+            )
+        if self.image_save_format.lower() not in {"png", "jpg"}:
+            raise ValueError(
+                "`image_save_format` must be 'png' or 'jpg', "
+                f"got {self.image_save_format!r}."
+            )
+        if not 1 <= self.image_save_quality <= 100:
+            raise ValueError(
+                "`image_save_quality` must be in [1, 100], "
+                f"got {self.image_save_quality}."
+            )
 
         # Expand path to user's path
         self.save_dir = os.path.expanduser(self.save_dir)

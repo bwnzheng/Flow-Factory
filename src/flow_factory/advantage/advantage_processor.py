@@ -1778,7 +1778,6 @@ class AdvantageProcessor:
         _log_data["train/adv_zero_ratio"] = float(zero.sum() / n)
         _log_data["train/adv_pos_sum"] = float(advantages[pos].sum())
 
-        self._add_train_samples(_log_data, samples)
         return self._finalize_log_data(_log_data, gathered_rewards, group_indices, all_prompts)
 
     def _build_gdpo_log_data(
@@ -1823,7 +1822,6 @@ class AdvantageProcessor:
                 "train/adv_abs_mean": all_stats["adv_abs"]["mean"],
             }
         )
-        self._add_train_samples(_log_data, samples)
         if all_reward_advantages is not None and reward_keys is not None:
             for r_idx, name in enumerate(reward_keys):
                 adv = all_reward_advantages[r_idx]

@@ -15,6 +15,7 @@
 # src/flow_factory/logger/formatting.py
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import math
@@ -24,7 +25,7 @@ import numpy as np
 from PIL import Image
 import imageio
 from typing import Any, Dict, List, Union, Optional, Tuple
-from dataclasses import dataclass, is_dataclass, asdict, field
+from dataclasses import dataclass, is_dataclass, asdict, field, fields as dataclass_fields
 from ..samples import BaseSample, T2ISample, T2VSample, T2AVSample, I2ISample, I2VSample, I2AVSample, V2VSample
 from ..utils.base import (
     # Image utils
@@ -153,17 +154,138 @@ def _to_video_list(
     
     return []
 
-def _to_json_safe(value):
-    """Recursively convert tensors/arrays to Python native types for JSON serialization."""
+def _to_json_safe(value: Any, max_array_elements: int = 4096) -> Any:
+    """Convert metadata to bounded JSON-native values."""
     if isinstance(value, torch.Tensor):
-        return value.item() if value.numel() == 1 else value.tolist()
+        tensor = value.detach().cpu()
+        if tensor.numel() <= max_array_elements:
+            return tensor.item() if tensor.numel() == 1 else tensor.tolist()
+        return {
+            "omitted": True,
+            "type": "torch.Tensor",
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+        }
     if isinstance(value, np.ndarray):
-        return value.item() if value.size == 1 else value.tolist()
+        if value.size <= max_array_elements:
+            return value.item() if value.size == 1 else value.tolist()
+        return {
+            "omitted": True,
+            "type": "numpy.ndarray",
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+        }
     if isinstance(value, (list, tuple)):
-        return [_to_json_safe(v) for v in value]
+        return [_to_json_safe(v, max_array_elements) for v in value]
     if isinstance(value, dict):
-        return {k: _to_json_safe(v) for k, v in value.items()}
-    return value
+        return {str(k): _to_json_safe(v, max_array_elements) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            (_to_json_safe(v, max_array_elements) for v in value),
+            key=repr,
+        )
+    if isinstance(value, Image.Image):
+        return {
+            "type": "PIL.Image",
+            "mode": value.mode,
+            "size": list(value.size),
+        }
+    if isinstance(value, np.generic):
+        return _to_json_safe(value.item(), max_array_elements)
+    if isinstance(value, float) and not math.isfinite(value):
+        label = "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")
+        return {"type": "nonfinite_float", "value": label}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+_MEDIA_SAMPLE_FIELDS = {
+    "image",
+    "video",
+    "audio",
+    "audio_sample_rate",
+    "prompt",
+    "negative_prompt",
+    "source",
+    "source_id",
+    "applicable_rewards",
+    "_unique_id",
+    "condition_images",
+    "condition_videos",
+    "frame_rate",
+}
+
+
+def prepare_sample_for_media(
+    sample: BaseSample,
+    context: Optional[Dict[str, Any]] = None,
+) -> BaseSample:
+    """Create a CPU media-only sample with replayable bounded metadata."""
+    media_sample = copy.copy(sample)
+    for sample_field in dataclass_fields(sample):
+        name = sample_field.name
+        if name in _MEDIA_SAMPLE_FIELDS or name == "extra_kwargs":
+            continue
+        setattr(media_sample, name, None)
+
+    for name in _MEDIA_SAMPLE_FIELDS:
+        if not hasattr(media_sample, name):
+            continue
+        value = getattr(media_sample, name)
+        if isinstance(value, torch.Tensor):
+            setattr(media_sample, name, value.detach().cpu())
+        elif isinstance(value, list):
+            setattr(
+                media_sample,
+                name,
+                [item.detach().cpu() if isinstance(item, torch.Tensor) else item for item in value],
+            )
+
+    existing_metadata = sample.extra_kwargs.get("_media_metadata")
+    if existing_metadata is not None:
+        sample_metadata = copy.deepcopy(existing_metadata)
+        sample_metadata.setdefault("context", {}).update(_to_json_safe(context or {}))
+    else:
+        replay_fields = {
+            sample_field.name: getattr(sample, sample_field.name)
+            for sample_field in dataclass_fields(sample)
+            if sample_field.name
+            not in {
+                "image",
+                "video",
+                "audio",
+                "condition_images",
+                "condition_videos",
+                "extra_kwargs",
+            }
+        }
+        sample_metadata = {
+            "schema_version": 1,
+            "sample": {
+                "class": f"{type(sample).__module__}.{type(sample).__name__}",
+                "unique_id": int(sample.unique_id),
+                "prompt": sample.prompt,
+                "negative_prompt": sample.negative_prompt,
+                "source": sample.source,
+                "source_id": sample.source_id,
+                "applicable_rewards": sorted(sample.applicable_rewards),
+                "fields": _to_json_safe(replay_fields),
+                "extra_kwargs": _to_json_safe(
+                    {
+                        key: value
+                        for key, value in sample.extra_kwargs.items()
+                        if key != "_media_metadata"
+                    }
+                ),
+            },
+            "context": _to_json_safe(context or {}),
+        }
+    media_sample.extra_kwargs = {
+        "rewards": sample.extra_kwargs.get("rewards"),
+        "_media_metadata": sample_metadata,
+    }
+    return media_sample
 
 
 def _build_sample_caption(sample: BaseSample, max_length: Optional[int] = None):
@@ -196,6 +318,9 @@ def _build_sample_caption(sample: BaseSample, max_length: Optional[int] = None):
         metadata['reward'] = _to_json_safe(rewards)
     if sample.prompt:
         metadata['prompt'] = sample.prompt
+    media_metadata = sample.extra_kwargs.get('_media_metadata')
+    if media_metadata is not None:
+        metadata.update(_to_json_safe(media_metadata))
 
     return " | ".join(parts), metadata
 
@@ -911,7 +1036,10 @@ class LogFormatter:
         """Processes a single value according to the formatting rules."""
         # Rule 0: BaseSample or List of BaseSample
         if isinstance(value, BaseSample):
-            value = [value]
+            processed = cls._process_sample_list([value])
+            if isinstance(processed, list) and len(processed) == 1:
+                return processed[0]
+            return processed
         if cls._is_sample_collection(value):
             return cls._process_sample_list(value)
 

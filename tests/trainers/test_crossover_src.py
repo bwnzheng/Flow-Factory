@@ -17,10 +17,14 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from flow_factory.hparams import GAArguments
-from flow_factory.samples import BaseSample
-from flow_factory.trainers.crossover.genetic_algorithm import GeneticAlgorithm
+from flow_factory.samples import BaseSample, T2ISample
+from flow_factory.trainers.crossover.genetic_algorithm import (
+    GeneticAlgorithm,
+    _prepare_ga_child_media,
+)
 from flow_factory.trainers.crossover.pareto import compute_pareto_mask
 from flow_factory.trainers.crossover.src import (
     compute_src_contributions,
@@ -379,6 +383,40 @@ def test_ga_src_selection_exposes_frozen_and_true_diagnostics():
     np.testing.assert_array_equal(event["selected_ids"], diagnostics["selected_ids"])
     np.testing.assert_allclose(event["selection_scores"], diagnostics["sample_fitness"])
     np.testing.assert_allclose(event["candidate_rewards"]["quality"], [10.0, 4.0, 0.0, 3.0])
+
+
+def test_ga_child_media_keeps_selected_and_rejected_candidates_with_full_event():
+    children = [
+        T2ISample(image=torch.zeros(3, 4, 4), prompt="prompt", _unique_id=9),
+        T2ISample(image=torch.ones(3, 4, 4), prompt="prompt", _unique_id=9),
+    ]
+    event = {
+        "selected_ids": np.array([0, 2], dtype=np.int64),
+        "candidate_rewards": {"quality": np.array([0.1, 0.2, 0.9, 0.3], dtype=np.float32)},
+        "selection_advantages": np.array([-1.0, -0.5, 1.0, 0.5], dtype=np.float32),
+        "selection_scores": np.array([-1.0, -0.5, 1.0, 0.5], dtype=np.float32),
+        "pareto_mask": np.array([False, False, True, True]),
+        "offspring": {
+            "candidate_ids": np.array([2, 3], dtype=np.int64),
+            "primary_parent_ids": np.array([0, 1], dtype=np.int64),
+            "secondary_parent_ids": np.array([1, 0], dtype=np.int64),
+        },
+        "rejected_ids": np.array([1, 3], dtype=np.int64),
+    }
+
+    media = _prepare_ga_child_media(children, event, generation=1)
+
+    assert len(media) == 2
+    selected = media[0].extra_kwargs["_media_metadata"]["context"]["ga"]
+    rejected = media[1].extra_kwargs["_media_metadata"]["context"]["ga"]
+    assert selected["candidate_id"] == 2
+    assert selected["selected"] is True
+    assert selected["selected_order"] == 1
+    assert selected["rewards"]["quality"] == pytest.approx(0.9)
+    assert rejected["candidate_id"] == 3
+    assert rejected["selected"] is False
+    assert rejected["selected_order"] is None
+    np.testing.assert_array_equal(rejected["group_selection"]["rejected_ids"], [1, 3])
 
 
 def test_ga_arguments_parse_src_configuration():

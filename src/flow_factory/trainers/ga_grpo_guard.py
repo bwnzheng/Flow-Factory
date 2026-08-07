@@ -202,18 +202,36 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
         rank = self.accelerator.process_index
         rewards = self.reward_buffer.finalize(store_to_samples=True, split="all")
         if self._crossover_enabled:
+            self.log_media_samples(
+                samples,
+                category="training",
+                context_name="initial",
+                extra_context={
+                    "training": {
+                        "stage": "initial_rollout",
+                        "reward_names": sorted(rewards.keys()),
+                    }
+                },
+            )
             logger.info(
                 f"[rank {rank}] prepare_feedback: calling GA evolve "
                 f"({len(set(s.unique_id for s in samples))} groups)"
             )
             applicable = GeneticAlgorithm.build_applicable_mask(samples, sorted(rewards.keys()))
             t_ga = time.time()
-            evolved_samples, evolved_rewards, ga_acc, ga_selection_events = self._ga.evolve(
+            (
+                evolved_samples,
+                evolved_rewards,
+                ga_acc,
+                ga_selection_events,
+                ga_media_samples,
+            ) = self._ga.evolve(
                 parent_samples=samples,
                 parent_rewards=rewards,
                 applicable=applicable,
                 epoch=self.epoch,
                 verbose=self.show_progress_bar,
+                capture_media=self.should_log_media(),
             )
             t_ga = time.time() - t_ga
             logger.info(
@@ -229,6 +247,13 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
             # Increase to e.g. 1800 s via: export HCCL_EXEC_TIMEOUT=1800
             self.accelerator.wait_for_everyone()
 
+            for generation in range(self._ga._n_generations):
+                self.log_media_samples(
+                    ga_media_samples[generation],
+                    category="ga",
+                    context_name=f"gen{generation}",
+                )
+
             ga_stats = GeneticAlgorithm.reduce_stats(ga_acc, ga_selection_events, self.accelerator)
             if ga_stats and self.accelerator.is_main_process:
                 self.log_data(ga_stats, step=self.step)
@@ -241,6 +266,7 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
         stats = self.advantage_processor.pop_all_stats()
         if stats:
             self.log_data(stats, step=self.step)
+        self.log_media_samples(samples, category="training", context_name="final")
 
     # ======================================================================
     # GRPO-Guard child factory (with trajectory merging)

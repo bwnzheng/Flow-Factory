@@ -50,6 +50,11 @@ class Logger(ABC):
     def _should_log_jsonl(self) -> bool:
         return getattr(self.config.log_args, 'log_metrics_jsonl', True)
 
+    def _should_log_media(self, step: int) -> bool:
+        """Return whether sampled media is due at this training step."""
+        frequency = getattr(self.config.log_args, 'media_save_freq', 1)
+        return frequency > 0 and step % frequency == 0
+
     @property
     def _logs_dir(self) -> str:
         if not hasattr(self, '_logs_dir_cache'):
@@ -66,15 +71,34 @@ class Logger(ABC):
     def _sanitize_key(key: str) -> str:
         return key.replace('/', '_')
 
+    def _media_filepath(self, key: str, step: int, root: str, extension: str) -> str:
+        """Resolve a collision-safe structured media path from a log key."""
+        if key.startswith('media/'):
+            parts = [self._sanitize_key(part) for part in key.split('/')]
+            category = parts[1] if len(parts) > 1 else 'uncategorized'
+            context = parts[2] if len(parts) > 2 else 'default'
+            remainder = parts[3:] if len(parts) > 3 else ['sample']
+            filename = remainder[-1]
+            directory = os.path.join(
+                self._logs_dir,
+                root,
+                category,
+                context,
+                f'step_{step:06d}',
+                *remainder[:-1],
+            )
+        else:
+            directory = os.path.join(self._logs_dir, root, f'step_{step:06d}')
+            filename = self._sanitize_key(key)
+        os.makedirs(directory, exist_ok=True)
+        return os.path.join(directory, f'{filename}.{extension}')
+
     def _save_image_file(self, key: str, img_obj: LogImage, step: int) -> str:
         """Save a LogImage locally, return relative path."""
         fmt = getattr(self.config.log_args, 'image_save_format', 'png').lower()
         quality = getattr(self.config.log_args, 'image_save_quality', 90)
         ext = 'jpg' if fmt == 'jpg' else 'png'
-        sanitized = self._sanitize_key(key)
-        step_dir = os.path.join(self._logs_dir, 'images', f'step_{step:06d}')
-        os.makedirs(step_dir, exist_ok=True)
-        filepath = os.path.join(step_dir, f'{sanitized}.{ext}')
+        filepath = self._media_filepath(key, step, 'images', ext)
 
         img = img_obj.get_pil().convert('RGB')
         if fmt == 'jpg':
@@ -85,10 +109,7 @@ class Logger(ABC):
 
     def _save_video_file(self, key: str, vid_obj: LogVideo, step: int) -> str:
         """Save a LogVideo as MP4, return relative path."""
-        sanitized = self._sanitize_key(key)
-        step_dir = os.path.join(self._logs_dir, 'videos', f'step_{step:06d}')
-        os.makedirs(step_dir, exist_ok=True)
-        filepath = os.path.join(step_dir, f'{sanitized}.mp4')
+        filepath = self._media_filepath(key, step, 'videos', 'mp4')
         arr = vid_obj.get_numpy()  # THWC uint8
         imageio.mimwrite(filepath, [f for f in arr], fps=vid_obj.fps, format='FFMPEG',
                          codec='libx264', pixelformat='yuv420p')
@@ -107,6 +128,15 @@ class Logger(ABC):
                 entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
                 if value.metadata:
                     entry.update(value.metadata)
+                sidecar_path = os.path.splitext(os.path.join(self._logs_dir, path))[0] + '.json'
+                with open(sidecar_path, 'w') as sidecar_file:
+                    json.dump(
+                        entry,
+                        sidecar_file,
+                        ensure_ascii=False,
+                        indent=2,
+                        allow_nan=False,
+                    )
                 entries.append(entry)
                 return None
             elif isinstance(value, LogTable):
@@ -131,7 +161,14 @@ class Logger(ABC):
                 del data[k]
 
         if entries:
-            filepath = os.path.join(self._logs_dir, 'media.jsonl')
+            process_index = int(getattr(self.config, 'process_index', 0))
+            num_processes = int(getattr(self.config, 'num_processes', 1))
+            index_name = (
+                f'media_rank_{process_index:04d}.jsonl'
+                if num_processes > 1
+                else 'media.jsonl'
+            )
+            filepath = os.path.join(self._logs_dir, index_name)
             with open(filepath, 'a') as f:
                 for entry in entries:
                     f.write(json.dumps(entry, ensure_ascii=False) + '\n')
@@ -199,11 +236,15 @@ class Logger(ABC):
         step: int,
         keys: Optional[str] = None,
     ):
+        media_due = self._should_log_media(step)
+        if not media_due:
+            data = {key: value for key, value in data.items() if not key.startswith('media/')}
+
         # 1. Process rules (Mean, Paths, wrappers) into IR
         formatted_dict = LogFormatter.format_dict(data)
 
         # 2. [NEW] Save media locally if configured (also removes media from dict)
-        if self._should_save_locally:
+        if media_due and self._should_save_locally:
             self._extract_and_save_media(formatted_dict, step)
 
         # 3. Save raw analysis arrays to pickle and keep them out of metrics JSONL
@@ -293,7 +334,7 @@ class LocalFileLogger(Logger):
     """Logger that only saves media (images / videos) to local files.
 
     Used on non-main processes so that every rank independently writes
-    its own ``train_samples`` when ``save_media_locally`` is enabled.
+    its own structured media shard when ``save_media_locally`` is enabled.
     Scalar metrics and reward pickles are already written by the main
     process — those are skipped here to avoid duplicate records.
     """
@@ -309,6 +350,7 @@ class LocalFileLogger(Logger):
 
     def log_data(self, data: Dict[str, Any], step: int, keys: Optional[str] = None):
         """Only save media locally; skip JSONL metrics and reward pickles."""
+        if not self._should_save_locally or not self._should_log_media(step):
+            return
         formatted_dict = LogFormatter.format_dict(data)
-        if self._should_save_locally:
-            self._extract_and_save_media(formatted_dict, step)
+        self._extract_and_save_media(formatted_dict, step)

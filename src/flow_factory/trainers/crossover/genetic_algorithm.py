@@ -37,11 +37,12 @@ Usage::
         seed=42,
     )
     applicable = GeneticAlgorithm.build_applicable_mask(samples, rewards)
-    evolved_samples, evolved_rewards = ga.evolve(
+    evolved_samples, evolved_rewards, stats, events, media = ga.evolve(
         parent_samples=samples,
         parent_rewards=rewards,
         applicable=applicable,
         epoch=epoch,
+        capture_media=True,
     )
 """
 
@@ -58,6 +59,7 @@ import torch
 import tqdm as tqdm_
 from accelerate.utils.operations import gather_object
 
+from ...logger import prepare_sample_for_media
 from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
 from ...utils.logger_utils import setup_logger
@@ -115,6 +117,41 @@ def _format_src_selection_log(selection: Dict[str, Any], n_pop: int) -> str:
         f"true_J={true_score_text} variance={selection['scalar_variance']:.6g} "
         f"degenerate_scalar_contrast={selection['degenerate_scalar_contrast']}"
     )
+
+
+def _prepare_ga_child_media(
+    children: List[BaseSample],
+    selection_event: Dict[str, Any],
+    generation: int,
+) -> List[BaseSample]:
+    """Attach complete lineage and selection evidence to every GA child."""
+    selected_ids = selection_event["selected_ids"].tolist()
+    selected_order = {int(candidate_id): order for order, candidate_id in enumerate(selected_ids)}
+    offspring = selection_event["offspring"]
+    media_samples = []
+    for child_index, child in enumerate(children):
+        candidate_id = int(offspring["candidate_ids"][child_index])
+        child_metadata = {
+            "ga": {
+                "candidate_id": candidate_id,
+                "candidate_origin": "child",
+                "generation": int(generation),
+                "selected": candidate_id in selected_order,
+                "selected_order": selected_order.get(candidate_id),
+                "rewards": {
+                    key: float(values[candidate_id])
+                    for key, values in selection_event["candidate_rewards"].items()
+                },
+                "selection_advantage": float(selection_event["selection_advantages"][candidate_id]),
+                "selection_score": float(selection_event["selection_scores"][candidate_id]),
+                "pareto": bool(selection_event["pareto_mask"][candidate_id]),
+                "primary_parent_id": int(offspring["primary_parent_ids"][child_index]),
+                "secondary_parent_id": int(offspring["secondary_parent_ids"][child_index]),
+                "group_selection": selection_event,
+            }
+        }
+        media_samples.append(prepare_sample_for_media(child, child_metadata))
+    return media_samples
 
 
 # ============================================================================
@@ -281,7 +318,14 @@ class GeneticAlgorithm:
         epoch: int,
         applicable: Optional[np.ndarray] = None,
         verbose: bool = True,
-    ) -> Tuple[List[BaseSample], Dict[str, torch.Tensor], Dict[str, Any], List[Dict[str, Any]]]:
+        capture_media: bool = False,
+    ) -> Tuple[
+        List[BaseSample],
+        Dict[str, torch.Tensor],
+        Dict[str, Any],
+        List[Dict[str, Any]],
+        Dict[int, List[BaseSample]],
+    ]:
         """Run GA on all groups and return the evolved population.
 
         Args:
@@ -354,6 +398,9 @@ class GeneticAlgorithm:
                 acc[f"gen{gen}_src_elite_child_count"] = 0
                 acc[f"gen{gen}_src_degenerate_count"] = 0
         ga_selection_events: List[Dict[str, Any]] = []
+        ga_media_samples: Dict[int, List[BaseSample]] = {
+            generation: [] for generation in range(self._n_generations)
+        }
 
         gid_items = sorted(gid_to_indices.items())
         if verbose and rank == 0:
@@ -395,18 +442,22 @@ class GeneticAlgorithm:
                     break
 
                 selection_event = stats.pop("selection_event")
-                ga_selection_events.append(
-                    {
-                        "epoch": int(epoch),
-                        "rank": int(rank),
-                        "gid": int(gid),
-                        "gen": gen_idx,
-                        "prompt": population[0].prompt,
-                        "source": population[0].source,
-                        "source_id": population[0].source_id,
-                        **selection_event,
-                    }
-                )
+                children = stats.pop("_media_children")
+                complete_event = {
+                    "epoch": int(epoch),
+                    "rank": int(rank),
+                    "gid": int(gid),
+                    "gen": gen_idx,
+                    "prompt": population[0].prompt,
+                    "source": population[0].source,
+                    "source_id": population[0].source_id,
+                    **selection_event,
+                }
+                ga_selection_events.append(complete_event)
+                if capture_media:
+                    ga_media_samples[gen_idx].extend(
+                        _prepare_ga_child_media(children, complete_event, gen_idx)
+                    )
 
                 # ---- Log to console ----
                 _logged_keys = sorted(
@@ -503,7 +554,13 @@ class GeneticAlgorithm:
             k: torch.tensor(v, device=device, dtype=torch.float32)
             for k, v in all_evolved_rewards.items()
         }
-        return all_evolved, evolved_rewards_tensors, acc, ga_selection_events
+        return (
+            all_evolved,
+            evolved_rewards_tensors,
+            acc,
+            ga_selection_events,
+            ga_media_samples,
+        )
 
     # ------------------------------------------------------------------
     # Generation step
@@ -1148,6 +1205,7 @@ class GeneticAlgorithm:
         }
         if src_stats is not None:
             stats["src_selection"] = src_stats
+        stats["_media_children"] = children
         return new_population, new_rewards, stats
 
     # ------------------------------------------------------------------

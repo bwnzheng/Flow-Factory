@@ -161,6 +161,7 @@ class DiffusionOPDTrainer(BaseTrainer):
                 self.evaluate()
 
             samples = self.sample()
+            self.log_media_samples(samples, category="training", context_name="final")
             self.prepare_feedback(samples)
             self.optimize(samples)
 

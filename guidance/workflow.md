@@ -438,3 +438,41 @@ Epoch N
 ```
 
 *DPO*: form chosen/rejected pairs at the **start** of `optimize()` (after advantages exist), then run the preference loss; there is no pair formation in `prepare_feedback()`.
+
+## Sampled Media Records
+
+Sampled media is emitted after feedback has been prepared, so its metadata can
+include the rewards, advantages, and sample weights used by optimization.
+Evaluation media is emitted after its dataset-specific reward buffer is
+finalized. Configure the shared local/backend interval in the `log` section:
+
+```yaml
+log:
+  media_save_freq: 20       # 0 disables local saves and backend uploads
+  max_log_samples: null     # null saves all samples; an integer caps each call
+  save_media_locally: true
+  image_save_format: jpg    # png or jpg
+  image_save_quality: 90
+```
+
+For step 40, local image paths follow this layout (videos use the parallel
+`logs/videos/` root):
+
+```text
+logs/images/
+├── training/
+│   ├── initial/step_000040/rank_0000/group_42/sample_000000.jpg
+│   └── final/step_000040/rank_0000/group_42/sample_000000.jpg
+├── evaluation/<dataset>/step_000040/rank_0000/group_7/sample_000000.jpg
+└── ga/gen0/step_000040/rank_0000/group_42/candidate_000004.jpg
+```
+
+Every media file has a JSON file with the same stem in the same directory. The
+sidecar schema includes the complete run configuration; rank, step, and epoch;
+prompt/source/sample identity; original per-sample fields such as rewards,
+advantages, and reweighting values; and stage-specific sampling/evaluation
+settings. GA child sidecars additionally contain lineage, all candidate reward
+vectors, parent and survivor selection evidence, Pareto membership, and ordered
+selected/rejected IDs. Arrays larger than 4096 elements are represented by
+shape and dtype rather than duplicated, so trajectories and model states remain
+in their canonical training artifacts.

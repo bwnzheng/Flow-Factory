@@ -145,7 +145,7 @@ train:
   seed: 42
 
   # Stopping
-  max_epochs: 61
+  max_epochs: 101
 
 # Scheduler Configuration
 scheduler:

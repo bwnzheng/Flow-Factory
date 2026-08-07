@@ -37,6 +37,8 @@ log:
   run_name: null  # Run name (auto: {model_type}_{finetune_type}_{timestamp})
   project: "Flow-Factory"  # Project name for logging
   logging_backend: "tensorboard"  # Options: wandb, swanlab, none
+  media_save_freq: 20  # Save or upload sampled media every N training steps; 0 disables media
+  max_log_samples: null  # Null saves every sampled item when media logging is due
   save_dir: "saves/"  # Directory to save model checkpoints and logs
   save_freq: 20  # Save frequency in epochs (0 to disable)
   save_model_only: true  # Save only the model weights (not optimizer, scheduler, etc.)

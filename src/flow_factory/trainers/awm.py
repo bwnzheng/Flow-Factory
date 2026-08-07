@@ -324,6 +324,7 @@ class AWMTrainer(BaseTrainer):
         adv_metrics = self.advantage_processor.pop_advantage_metrics()
         if adv_metrics:
             self.log_data(adv_metrics, step=self.step)
+        self.log_media_samples(samples, category="training", context_name="final")
 
     def optimize(self, samples: List[BaseSample]) -> None:
         """Policy optimization (Stage 6): AWM weighted matching with optional KL.

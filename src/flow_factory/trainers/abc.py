@@ -28,7 +28,7 @@ from tqdm import tqdm
 from PIL import Image
 from diffusers.utils.outputs import BaseOutput
 from accelerate import Accelerator
-from accelerate.utils import set_seed, ProjectConfiguration
+from accelerate.utils import set_seed, ProjectConfiguration, gather_object
 
 from ..hparams import *
 from ..models.abc import BaseAdapter
@@ -39,12 +39,13 @@ from ..data_utils.loader import (
 )
 from ..rewards import load_reward_model, BaseRewardModel, MultiRewardLoader, RewardProcessor, RewardBuffer
 from ..advantage import AdvantageProcessor
-from ..logger import load_logger, LogFormatter
+from ..logger import load_logger, LogFormatter, LocalFileLogger, prepare_sample_for_media
 from ..samples import BaseSample
 from ..utils.logger_utils import setup_logger
 from ..utils.base import create_generator, create_generator_by_prompt, filter_kwargs, json_default
 
 logger = setup_logger(__name__)
+
 
 class BaseTrainer(ABC):
     """
@@ -113,16 +114,111 @@ class BaseTrainer(ABC):
                     for k, v in metrics.items()
                 )
                 logger.info(" ".join(parts))
+
+    def should_log_media(self, step: Optional[int] = None) -> bool:
+        """Return whether the configured media interval is due."""
+        current_step = self.step if step is None else step
+        frequency = self.log_args.media_save_freq
+        return frequency > 0 and current_step % frequency == 0
+
+    def _build_media_context(
+        self,
+        category: str,
+        context_name: str,
+        local_index: int,
+        group_index: int,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build replay-oriented metadata shared by local and backend media."""
+        context = {
+            "run": {
+                "run_name": self.log_args.run_name,
+                "step": int(self.step),
+                "epoch": int(self.epoch),
+                "rank": int(self.accelerator.process_index),
+                "world_size": int(self.accelerator.num_processes),
+            },
+            "media": {
+                "category": category,
+                "context": context_name,
+                "local_index": int(local_index),
+                "group_index": int(group_index),
+            },
+            "configuration": self.config.to_dict(),
+        }
+        if extra_context:
+            context.update(extra_context)
+        return context
+
+    def log_media_samples(
+        self,
+        samples: List[BaseSample],
+        category: Literal["training", "evaluation", "ga"],
+        context_name: str,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log every sampled media item at the configured interval."""
+        if not self.should_log_media():
+            return
+        if not self.log_args.save_media_locally and self.log_args.logging_backend in {
+            None,
+            "none",
+        }:
+            return
+
+        limit = self.log_args.max_log_samples
+        selected_samples = samples if limit is None else samples[:limit]
+        group_counts: Dict[int, int] = {}
+        media_samples = []
+        for local_index, sample in enumerate(selected_samples):
+            group_id = int(sample.unique_id)
+            group_index = group_counts.get(group_id, 0)
+            group_counts[group_id] = group_index + 1
+            context = self._build_media_context(
+                category=category,
+                context_name=context_name,
+                local_index=local_index,
+                group_index=group_index,
+                extra_context=extra_context,
+            )
+            media_samples.append(prepare_sample_for_media(sample, context))
+
+        if not self.log_args.save_media_locally and self.accelerator.num_processes > 1:
+            media_samples = gather_object(media_samples)
+            if not self.accelerator.is_main_process:
+                return
+
+        payload: Dict[str, Any] = {}
+        for media_sample in media_samples:
+            metadata = media_sample.extra_kwargs["_media_metadata"]
+            media_context = metadata["context"]["media"]
+            run_context = metadata["context"]["run"]
+            group_id = metadata["sample"]["unique_id"]
+            candidate_id = metadata["context"].get("ga", {}).get("candidate_id")
+            if candidate_id is None:
+                candidate_id = metadata["sample"]["extra_kwargs"].get("ga_candidate_id")
+            item_name = (
+                f"candidate_{int(candidate_id):06d}"
+                if candidate_id is not None
+                else f"sample_{int(media_context['group_index']):06d}"
+            )
+            key = (
+                f"media/{category}/{context_name}/rank_{int(run_context['rank']):04d}/"
+                f"group_{group_id}/{item_name}"
+            )
+            payload[key] = media_sample
+
+        if payload:
+            self.log_data(payload, step=self.step)
     
     def _init_logging_backend(self):
         """Initialize logging backend if specified."""
         if self.accelerator.is_main_process:
             self.logger = load_logger(self.config)
+            if self.logger is None and self.log_args.save_media_locally:
+                self.logger = LocalFileLogger(self.config)
         else:
-            # Non-main process: create a local-file-only logger so that
-            # save_media_locally, reward pickles, and JSONL metrics are
-            # written by every rank independently.
-            from ..logger.abc import LocalFileLogger
+            # Non-main processes only write their rank-local media shard.
             self.logger = LocalFileLogger(self.config)
         self.accelerator.wait_for_everyone()
 
@@ -815,6 +911,18 @@ class BaseTrainer(ABC):
                         break
 
                 rewards = buffer.finalize(store_to_samples=True, split='pointwise')
+                self.log_media_samples(
+                    all_samples,
+                    category="evaluation",
+                    context_name=dataset_name,
+                    extra_context={
+                        "evaluation": {
+                            "dataset": dataset_name,
+                            "sampling_kwargs": eval_kwargs,
+                            "reward_names": sorted(rewards.keys()),
+                        }
+                    },
+                )
 
                 # Gather across ranks
                 rewards_tensors = {
@@ -835,7 +943,6 @@ class BaseTrainer(ABC):
                         for q in [0, 25, 50, 75, 100]:
                             log_data[f'eval/{dataset_name}/reward_{k}_p{q}'] = float(np.percentile(v, q))
                     log_data[f'eval/{dataset_name}/rewards_all'] = {k: v.tolist() for k, v in gathered_rewards.items()}
-                    log_data[f'eval/{dataset_name}/samples'] = all_samples
                     self.log_data(log_data, step=self.step)
 
         self.accelerator.wait_for_everyone()

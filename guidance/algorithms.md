@@ -295,6 +295,16 @@ diagnostics and per-group non-dominated-set sizes. Those raw fields are removed
 from `metrics.jsonl`; only their aggregate metrics remain there and in the
 platform backend.
 
+When sampled-media logging is due, the original GA population is recorded under
+`logs/images/training/initial/`, the final population consumed by optimization
+under `logs/images/training/final/`, and every generated child under
+`logs/images/ga/genN/`. The generation folders include rejected as well as
+selected children. Each media file has a same-stem JSON sidecar with candidate
+rewards, selection advantage and score, Pareto membership, selected order,
+parent IDs, and the complete group selection event. These files provide a
+human-viewable counterpart to the compact aggregate metrics and raw selection
+pickle.
+
 SRC operates directly on the raw outputs of the configured reward models and
 uses their existing source-aware training weights. Those
 weights therefore define both the preference vector and the calibration across
