@@ -148,10 +148,13 @@ log:
 These trackers allow you to visualize both **training samples** and **metric curves** online:
 
 The same `media_save_freq` gate applies to the online backend and local files.
-Local images are organized under
-`<save_dir>/<run_name>/logs/images/<category>/step_N/group_N/<context>/`.
+Training images are organized under
+`<save_dir>/<run_name>/logs/images/training/step_N/group_N/<context>/`.
 Training contexts include `initial`, `final`, and one `genN` directory per GA
-generation. Media from all ranks is gathered before the main process writes it.
+generation. Evaluation images are stored directly under
+`logs/images/evaluation/step_N/<dataset>/`; group and sample identifiers are
+flattened into each filename. Media from all ranks is gathered before the main
+process writes it.
 For local storage, the originating rank remains in metadata but is not part of
 the path. Every image or video has a same-stem JSON sidecar containing
 prompt/source identity,

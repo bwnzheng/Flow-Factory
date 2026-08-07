@@ -80,7 +80,16 @@ class Logger(ABC):
             context = parts[2] if len(parts) > 2 else 'default'
             remainder = parts[3:] if len(parts) > 3 else ['sample']
             storage_category = 'training' if category == 'ga' else category
-            if len(remainder) >= 2:
+            if category == 'evaluation':
+                filename = '_'.join(remainder)
+                directory = os.path.join(
+                    self._logs_dir,
+                    root,
+                    storage_category,
+                    f'step_{step:06d}',
+                    context,
+                )
+            elif len(remainder) >= 2:
                 group = remainder[0]
                 filename = remainder[-1]
                 directory = os.path.join(

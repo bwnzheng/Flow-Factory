@@ -365,7 +365,7 @@ def test_media_manifest_writes_run_context_once(tmp_path):
     [
         (
             "media/evaluation/benchmark/group_42/sample_000000",
-            "images/evaluation/step_000020/group_42/benchmark/sample_000000.jpg",
+            "images/evaluation/step_000020/benchmark/group_42_sample_000000.jpg",
         ),
         (
             "media/ga/gen2/group_42/candidate_000004",
@@ -373,12 +373,40 @@ def test_media_manifest_writes_run_context_once(tmp_path):
         ),
     ],
 )
-def test_local_media_uses_step_group_context_layout(tmp_path, key, relative_path):
+def test_local_media_uses_category_specific_layout(tmp_path, key, relative_path):
     logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
 
     logger.log_data({key: _media_sample()}, step=20)
 
     assert (tmp_path / "media-run" / "logs" / relative_path).exists()
+
+
+def test_evaluation_media_flattens_group_and_table_items_within_each_step(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    key = "media/evaluation/benchmark/group_42/sample_000000/generated_video/0"
+
+    logger.log_data({key: LogImage(torch.zeros(3, 8, 8))}, step=20)
+    logger.log_data({key: LogImage(torch.zeros(3, 8, 8))}, step=40)
+
+    eval_dir = (
+        tmp_path
+        / "media-run"
+        / "logs"
+        / "images"
+        / "evaluation"
+    )
+    assert sorted(path.name for path in eval_dir.iterdir()) == [
+        "step_000020",
+        "step_000040",
+    ]
+    expected_files = [
+        "group_42_sample_000000_generated_video_0.jpg",
+        "group_42_sample_000000_generated_video_0.json",
+    ]
+    step_20_dir = eval_dir / "step_000020" / "benchmark"
+    step_40_dir = eval_dir / "step_000040" / "benchmark"
+    assert sorted(path.name for path in step_20_dir.iterdir()) == expected_files
+    assert sorted(path.name for path in step_40_dir.iterdir()) == expected_files
 
 
 def test_media_sample_filters_inapplicable_rewards_without_mutating_training_sample(tmp_path):

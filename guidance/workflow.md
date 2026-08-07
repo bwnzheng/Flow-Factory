@@ -469,7 +469,7 @@ logs/images/
 │           ├── final/sample_000000.jpg
 │           └── gen0/candidate_000004.jpg
 └── evaluation/
-    └── step_000040/group_7/<dataset>/sample_000000.jpg
+    └── step_000040/<dataset>/group_7_sample_000000.jpg
 ```
 
 Media from every rank is gathered to the main process before local saving, so
