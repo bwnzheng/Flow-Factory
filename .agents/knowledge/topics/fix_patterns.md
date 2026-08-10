@@ -174,6 +174,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Converting a scientific container to Python-native values does not make its floating-point contents JSON-compliant. Re-run recursive validation after unpacking and enforce it again at strict persistence boundaries.
 - **Related Constraint**: N/A
 
+### SRC scalar contrast overemphasized large advantages or lifted near-zero samples
+- **Date**: 2026-08-10
+- **Symptom**: Raw SRC scores grew without bound with large scalar advantage magnitude, while replacing the magnitude with a hard sign removed the distinction between small nonzero and high-confidence scalar contrasts.
+- **Root Cause**: The raw scalar factor was linear and unbounded, whereas the sign-only factor was discontinuous at zero and discarded all confidence in the scalar contrast magnitude.
+- **Fix**: `advantage/sample_weighting.py` now supports configurable raw and saturated SRC scores. Saturated mode divides each frozen-group scalar advantage by its absolute value plus the frozen-group RMS and a numerical epsilon; both score variants are logged and covered by formula, limiting-behavior, configuration, and integration tests.
+- **Lesson**: A bounded per-sample contrast factor should remain continuous at zero, use a scale frozen from the same reference group, and approach a sign-only limit only when the contrast dominates that scale.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

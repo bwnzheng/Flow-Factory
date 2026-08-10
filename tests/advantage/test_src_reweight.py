@@ -26,6 +26,8 @@ def _compute(
     *,
     groups: np.ndarray | None = None,
     interpolation: float = 0.6,
+    score_type: str = "saturated",
+    epsilon: float = 1e-8,
 ):
     num_rewards, num_samples = rewards.shape
     if groups is None:
@@ -37,8 +39,9 @@ def _compute(
         group_indices=groups,
         interpolation=interpolation,
         temperature=0.7,
-        epsilon=1e-8,
+        epsilon=epsilon,
         degeneracy_threshold=1e-12,
+        score_type=score_type,
     )
 
 
@@ -68,22 +71,101 @@ def test_src_probabilities_and_weighted_advantages_satisfy_group_invariants():
     assert result.lower_bound_reweighted[0] >= result.lower_bound_uniform[0]
 
 
-def test_src_contributions_use_only_scalar_contrast_sign():
+def test_src_raw_score_matches_magnitude_weighted_definition():
     rewards = np.array(
         [
             [0.0, 1.0, 4.0],
             [0.0, 2.0, 2.0],
         ]
     )
-    result = _compute(rewards)
+    result = _compute(rewards, score_type="raw")
     centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
     scalar_rewards = rewards.sum(axis=0)
     scalar_centered = scalar_rewards - scalar_rewards.mean()
+    expected_contributions = centered_rewards * scalar_centered[None, :]
+    expected_scores = expected_contributions.min(axis=0)
+
+    np.testing.assert_allclose(result.contributions, expected_contributions)
+    np.testing.assert_allclose(result.raw_scores, expected_scores)
+    np.testing.assert_allclose(result.scores, expected_scores)
+    np.testing.assert_allclose(
+        result.normalized_scores,
+        expected_scores / (np.mean(np.square(scalar_centered)) + 1e-8),
+    )
+
+
+def test_src_saturated_score_matches_frozen_rms_definition():
+    rewards = np.array(
+        [
+            [0.0, 1.0, 4.0],
+            [0.0, 2.0, 2.0],
+        ]
+    )
+    epsilon = 1e-8
+    result = _compute(rewards, score_type="saturated", epsilon=epsilon)
+    centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    scalar_rewards = rewards.sum(axis=0)
+    scalar_centered = scalar_rewards - scalar_rewards.mean()
+    scalar_rms = np.sqrt(np.mean(np.square(scalar_centered)))
+    saturation = scalar_centered / (np.abs(scalar_centered) + scalar_rms + epsilon)
+    expected_contributions = centered_rewards * saturation[None, :]
+    expected_scores = expected_contributions.min(axis=0)
+
+    np.testing.assert_allclose(result.contributions, expected_contributions)
+    np.testing.assert_allclose(result.saturated_scores, expected_scores)
+    np.testing.assert_allclose(result.scores, expected_scores)
+    np.testing.assert_allclose(result.normalized_scores, expected_scores)
+
+
+def test_src_saturated_score_suppresses_near_zero_scalar_contrast():
+    delta = 1e-9
+    rewards = np.array(
+        [
+            [-1.0, 1.0, 1.0],
+            [-1.0, -1.0 + delta, 1.0 - delta],
+        ]
+    )
+    result = _compute(rewards, score_type="saturated")
+    scalar_rewards = rewards.sum(axis=0)
+    scalar_centered = scalar_rewards - scalar_rewards.mean()
+    scalar_rms = np.sqrt(np.mean(np.square(scalar_centered)))
+
+    assert abs(scalar_centered[1]) < 1e-8 * scalar_rms
+    assert abs(result.saturated_scores[1]) < 1e-8
+
+
+def test_src_saturated_score_approaches_sign_profile_for_large_scalar_contrast():
+    rewards = np.zeros((2, 100), dtype=np.float64)
+    rewards[:, -1] = 100.0
+    result = _compute(rewards, score_type="saturated")
+    centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    scalar_rewards = rewards.sum(axis=0)
+    scalar_centered = scalar_rewards - scalar_rewards.mean()
+    sign_profile = centered_rewards[:, -1] * np.sign(scalar_centered[-1])
 
     np.testing.assert_allclose(
-        result.contributions,
-        centered_rewards * np.sign(scalar_centered)[None, :],
+        result.contributions[:, -1],
+        sign_profile,
+        rtol=0.11,
     )
+
+
+def test_src_score_type_switch_preserves_both_diagnostics():
+    rewards = np.array([[0.0, 0.4, 1.0], [0.0, 0.8, 0.9]])
+    raw = _compute(rewards, score_type="raw")
+    saturated = _compute(rewards, score_type="saturated")
+
+    np.testing.assert_allclose(raw.raw_scores, saturated.raw_scores)
+    np.testing.assert_allclose(raw.saturated_scores, saturated.saturated_scores)
+    np.testing.assert_allclose(raw.scores, raw.raw_scores)
+    np.testing.assert_allclose(saturated.scores, saturated.saturated_scores)
+    assert not np.allclose(raw.probabilities, saturated.probabilities)
+
+
+def test_src_weighted_centering_diagnostics_remain_sign_based():
+    rewards = np.array([[0.0, 1.0, 4.0], [0.0, 2.0, 2.0]])
+    result = _compute(rewards, score_type="saturated")
+    scalar_rewards = rewards.sum(axis=0)
 
     weighted_reward_means = rewards @ result.probabilities
     weighted_centered_rewards = rewards - weighted_reward_means[:, None]
@@ -142,6 +224,21 @@ def test_src_requires_two_positive_active_rewards():
         )
 
 
+def test_src_rejects_invalid_score_type():
+    with pytest.raises(ValueError, match="score_type"):
+        compute_src_reweight(
+            reward_matrix=np.array([[0.0, 1.0], [0.0, 1.0]]),
+            weight_matrix=np.ones((2, 2)),
+            applicable=np.ones((2, 2), dtype=bool),
+            group_indices=np.array([0, 0]),
+            interpolation=0.5,
+            temperature=1.0,
+            epsilon=1e-8,
+            degeneracy_threshold=1e-12,
+            score_type="unknown",
+        )
+
+
 def _src_config(trainer_type: str = "grpo", reward_count: int = 2):
     return {
         "data": {
@@ -174,6 +271,24 @@ def test_src_config_accepts_shared_linear_advantage_trainer():
     args = Arguments.from_dict(_src_config())
 
     assert args.training_args.sample_weighting == "src"
+    assert args.training_args.src_score_type == "saturated"
+
+
+def test_src_config_accepts_raw_score_type():
+    config = _src_config()
+    config["train"]["src_score_type"] = "raw"
+
+    args = Arguments.from_dict(config)
+
+    assert args.training_args.src_score_type == "raw"
+
+
+def test_src_config_rejects_invalid_score_type():
+    config = _src_config()
+    config["train"]["src_score_type"] = "unknown"
+
+    with pytest.raises(ValueError, match="src_score_type"):
+        Arguments.from_dict(config)
 
 
 def test_src_config_accepts_on_policy_nft_consumer():
@@ -254,7 +369,15 @@ def test_advantage_processor_stores_src_weights_and_logs_without_rank_reduce(sam
     assert metrics["train/sample_weight_mean"] == pytest.approx(1.0)
     assert metrics["train/src_probability_sum_error_max"] == pytest.approx(0.0, abs=1e-6)
     assert metrics["train/src_weighted_centering_error_max"] == pytest.approx(0.0, abs=1e-6)
+    assert "train/src_raw_score_mean" in metrics
+    assert "train/src_raw_score_min" in metrics
+    assert "train/src_raw_score_max" in metrics
+    assert "train/src_saturated_score_mean" in metrics
+    assert "train/src_saturated_score_min" in metrics
+    assert "train/src_saturated_score_max" in metrics
     assert len(metrics["train/src_groups"]) == 1
+    assert "raw_scores" in metrics["train/src_groups"][0]
+    assert "saturated_scores" in metrics["train/src_groups"][0]
     assert "train/src_conflict_ratio_quality" in metrics
 
 

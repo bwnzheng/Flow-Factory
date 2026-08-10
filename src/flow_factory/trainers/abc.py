@@ -342,6 +342,7 @@ class BaseTrainer(ABC):
             max_log_samples=self.log_args.max_log_samples,
             source_id_to_name=self.config.data_args.source_id_to_name,
             sample_weighting=self.training_args.sample_weighting,
+            src_score_type=self.training_args.src_score_type,
             src_reweight_interpolation=self.training_args.src_reweight_interpolation,
             src_reweight_temperature=self.training_args.src_reweight_temperature,
             src_reweight_epsilon=self.training_args.src_reweight_epsilon,
@@ -360,6 +361,7 @@ class BaseTrainer(ABC):
             )
             logger.info(
                 "SRC-Reweight enabled: sample_weighting(src), "
+                f"src_score_type({self.training_args.src_score_type}), "
                 f"src_reweight_interpolation({self.training_args.src_reweight_interpolation}), "
                 f"src_reweight_temperature({self.training_args.src_reweight_temperature}), "
                 f"src_reweight_epsilon({self.training_args.src_reweight_epsilon}), "

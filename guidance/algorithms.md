@@ -127,11 +127,19 @@ eval:
 `sample_weighting: src` enables prompt-local Sample-wise Reward Concordance
 weighting without adding a new trainer or changing rollout support. For each
 original on-policy group, the shared `AdvantageProcessor` freezes the unweighted
-reward means, computes
-`c_ik = w_k (r_ik - mean_k) sign(R_i - mean_R)`, and uses the weakest active
-coordinate `s_i = min_k c_ik`. Here `sign(0) = 0`, so the implementation never
-divides by a zero scalar contrast. The normalized sampling score
-`s_i / (Var(R) + epsilon)` is mapped to a bounded probability
+reward means and scalar advantages `A_i = R_i - mean_R`. The default
+`src_score_type: saturated` computes the frozen-group RMS scale
+`sigma_A = sqrt(mean_i(A_i^2))`, then uses
+`c_ik = w_k (r_ik - mean_k) A_i / (|A_i| + sigma_A + epsilon)` and
+`s_i = min_{k:w_k>0} c_ik`. This keeps the score continuous near zero, suppresses
+samples with `|A_i| << sigma_A`, and approaches the sign-only profile
+`w_k (r_ik - mean_k) sign(A_i)` when `|A_i| >> sigma_A`.
+
+`src_score_type: raw` preserves the historical covariance contribution
+`c_ik = w_k (r_ik - mean_k) A_i` and its variance calibration
+`s_i / (mean_i(A_i^2) + epsilon)`. Saturated scores are passed directly to the
+same existing temperature mapping; they are not divided by scalar variance a
+second time. In either mode, the selected score is mapped to a bounded probability
 
 `p_i = (1 - lambda) / K + lambda * softmax(score_i / temperature)`.
 
@@ -148,6 +156,7 @@ train:
   trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm (on-policy only)
   advantage_aggregation: sum
   sample_weighting: src  # Options: none, src
+  src_score_type: saturated  # Options: raw, saturated
   src_reweight_interpolation: 0.5  # lambda in [0, 1)
   src_reweight_temperature: 1.0  # > 0
   src_reweight_epsilon: 1.0e-8
@@ -167,8 +176,9 @@ as the rollout/reference distribution.
 Logging includes probability and `sample_weight` distributions, ESS and
 ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower
 bounds, degeneracy rate, frozen and weighted-recentered per-reward
-contribution/conflict metrics, weighted centering/probability-sum errors, and
-`train/src_groups` with per-sample scores, probabilities, multipliers,
+contribution/conflict metrics, weighted centering/probability-sum errors, raw
+and saturated score mean/min/max summaries, and `train/src_groups` with both
+per-sample score variants, the selected score, probabilities, multipliers,
 advantages, and both contribution vectors. NFT additionally logs its
 optimality clipping ratio and positive-branch probability. SRC adds no rank
 reduction: its diagnostics ride the existing float32 logging gather and are

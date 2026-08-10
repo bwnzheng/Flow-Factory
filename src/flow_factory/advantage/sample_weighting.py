@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -28,6 +29,8 @@ class SRCReweightResult:
     contributions: np.ndarray
     weighted_contributions: np.ndarray
     scores: np.ndarray
+    raw_scores: np.ndarray
+    saturated_scores: np.ndarray
     normalized_scores: np.ndarray
     probabilities: np.ndarray
     loss_multipliers: np.ndarray
@@ -51,6 +54,7 @@ def compute_src_reweight(
     temperature: float,
     epsilon: float,
     degeneracy_threshold: float,
+    score_type: Literal["raw", "saturated"] = "saturated",
 ) -> SRCReweightResult:
     """Compute frozen-group SRC probabilities and effective advantages.
 
@@ -64,15 +68,16 @@ def compute_src_reweight(
         applicable: Boolean reward-applicability mask aligned with ``reward_matrix``.
         group_indices: Prompt-group identifier for every sample.
         interpolation: Mixture coefficient between uniform and concordance weights.
-        temperature: Positive softmax temperature for normalized SRC scores.
-        epsilon: Positive numerical safeguard used by variance normalization.
+        temperature: Positive softmax temperature for the selected SRC scores.
+        epsilon: Positive numerical safeguard for raw calibration and saturation.
         degeneracy_threshold: Scalar-variance threshold for uniform fallback.
+        score_type: Frozen-group SRC score formula used for softmax weighting.
 
     Returns:
         SRC diagnostics, probabilities, and effective advantages aligned with samples.
 
     Note:
-        SRC contributions use only the sign of each centered scalar reward.
+        Saturated SRC uses the frozen original group's scalar-advantage RMS.
         Scalar magnitudes still determine the downstream weighted advantages.
     """
     rewards = np.asarray(reward_matrix, dtype=np.float64)
@@ -100,6 +105,8 @@ def compute_src_reweight(
         raise ValueError(f"epsilon must be > 0, got {epsilon}.")
     if degeneracy_threshold < 0.0:
         raise ValueError(f"degeneracy_threshold must be >= 0, got {degeneracy_threshold}.")
+    if score_type not in {"raw", "saturated"}:
+        raise ValueError(f"score_type must be 'raw' or 'saturated', got {score_type!r}.")
     if np.any(weights[applicable_mask] < 0.0):
         raise ValueError("SRC-Reweight requires nonnegative active reward weights.")
 
@@ -107,6 +114,8 @@ def compute_src_reweight(
     contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
     weighted_contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
     scores = np.zeros(num_samples, dtype=np.float64)
+    raw_scores = np.zeros(num_samples, dtype=np.float64)
+    saturated_scores = np.zeros(num_samples, dtype=np.float64)
     normalized_scores = np.zeros(num_samples, dtype=np.float64)
     probabilities = np.zeros(num_samples, dtype=np.float64)
     loss_multipliers = np.ones(num_samples, dtype=np.float64)
@@ -156,15 +165,28 @@ def compute_src_reweight(
         centered_rewards = active_rewards - active_rewards.mean(axis=1, keepdims=True)
         scalar_rewards = active_weights @ active_rewards
         scalar_centered = scalar_rewards - scalar_rewards.mean()
-        scalar_directions = np.sign(scalar_centered)
-        group_contributions = (
-            active_weights[:, None] * centered_rewards * scalar_directions[None, :]
-        )
-        group_scores = group_contributions.min(axis=0)
         scalar_variance = float(np.mean(np.square(scalar_centered)))
+        scalar_rms = np.sqrt(scalar_variance)
+        group_raw_contributions = (
+            active_weights[:, None] * centered_rewards * scalar_centered[None, :]
+        )
+        saturation = scalar_centered / (np.abs(scalar_centered) + scalar_rms + epsilon)
+        group_saturated_contributions = (
+            active_weights[:, None] * centered_rewards * saturation[None, :]
+        )
+        group_raw_scores = group_raw_contributions.min(axis=0)
+        group_saturated_scores = group_saturated_contributions.min(axis=0)
+        if score_type == "raw":
+            group_contributions = group_raw_contributions
+            group_scores = group_raw_scores
+        else:
+            group_contributions = group_saturated_contributions
+            group_scores = group_saturated_scores
 
         contributions[np.flatnonzero(active)[:, None], sample_indices] = group_contributions
         scores[sample_indices] = group_scores
+        raw_scores[sample_indices] = group_raw_scores
+        saturated_scores[sample_indices] = group_saturated_scores
         scalar_variances[sample_indices] = scalar_variance
 
         is_degenerate = scalar_variance <= degeneracy_threshold
@@ -172,7 +194,9 @@ def compute_src_reweight(
             group_probabilities = np.full(group_size, 1.0 / group_size, dtype=np.float64)
             group_normalized_scores = np.zeros(group_size, dtype=np.float64)
         else:
-            group_normalized_scores = group_scores / (scalar_variance + epsilon)
+            group_normalized_scores = (
+                group_scores / (scalar_variance + epsilon) if score_type == "raw" else group_scores
+            )
             logits = group_normalized_scores / temperature
             logits = logits - logits.max()
             concordant_probabilities = np.exp(logits)
@@ -216,6 +240,8 @@ def compute_src_reweight(
         contributions=contributions,
         weighted_contributions=weighted_contributions,
         scores=scores,
+        raw_scores=raw_scores,
+        saturated_scores=saturated_scores,
         normalized_scores=normalized_scores,
         probabilities=probabilities,
         loss_multipliers=loss_multipliers,

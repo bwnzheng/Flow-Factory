@@ -68,6 +68,7 @@ train:
   per_device_batch_size: 1  # Batch size per device
   group_size: 12  # Group size for GRPO sampling
   sample_weighting: none  # Options: none, src
+  src_score_type: saturated  # Options: raw, saturated
   src_reweight_interpolation: 0.5  # SRC lambda in [0, 1)
   src_reweight_temperature: 1.0  # Positive SRC softmax temperature
   src_reweight_epsilon: 1.0e-8  # Positive numerical safeguard

@@ -90,6 +90,7 @@ class AdvantageProcessor:
         src_reweight_epsilon: float = 1e-8,
         src_reweight_degeneracy_threshold: float = 1e-12,
         sample_weighting_consumer: Literal["linear_advantage", "nft"] = "linear_advantage",
+        src_score_type: Literal["raw", "saturated"] = "saturated",
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -104,8 +105,13 @@ class AdvantageProcessor:
                 "sample_weighting_consumer must be 'linear_advantage' or 'nft', "
                 f"got {sample_weighting_consumer!r}."
             )
+        if src_score_type not in {"raw", "saturated"}:
+            raise ValueError(
+                f"src_score_type must be 'raw' or 'saturated', got {src_score_type!r}."
+            )
         self.sample_weighting = sample_weighting
         self.sample_weighting_consumer = sample_weighting_consumer
+        self.src_score_type = src_score_type
         self.src_reweight_interpolation = src_reweight_interpolation
         self.src_reweight_temperature = src_reweight_temperature
         self.src_reweight_epsilon = src_reweight_epsilon
@@ -769,6 +775,7 @@ class AdvantageProcessor:
                 temperature=self.src_reweight_temperature,
                 epsilon=self.src_reweight_epsilon,
                 degeneracy_threshold=self.src_reweight_degeneracy_threshold,
+                score_type=self.src_score_type,
             )
             if self.sample_weighting_consumer == "nft":
                 if self.global_std:
@@ -1058,6 +1065,8 @@ class AdvantageProcessor:
         """Flatten SRC diagnostics for the existing float32 logging gather."""
         diagnostics = {
             "score": result.scores,
+            "raw_score": result.raw_scores,
+            "saturated_score": result.saturated_scores,
             "normalized_score": result.normalized_scores,
             "probability": result.probabilities,
             "loss_multiplier": result.loss_multipliers,
@@ -1101,6 +1110,8 @@ class AdvantageProcessor:
         log_data: Dict[str, Any] = {}
         for diagnostic_key, metric_name in (
             ("score", "src_score"),
+            ("raw_score", "src_raw_score"),
+            ("saturated_score", "src_saturated_score"),
             ("normalized_score", "src_normalized_score"),
             ("probability", "src_probability"),
             ("loss_multiplier", "sample_weight"),
@@ -1165,6 +1176,8 @@ class AdvantageProcessor:
                 {
                     "group_id": int(group_id),
                     "scores": diagnostics["score"][indices].tolist(),
+                    "raw_scores": diagnostics["raw_score"][indices].tolist(),
+                    "saturated_scores": diagnostics["saturated_score"][indices].tolist(),
                     "normalized_scores": diagnostics["normalized_score"][indices].tolist(),
                     "probabilities": probability.tolist(),
                     "loss_multipliers": diagnostics["loss_multiplier"][indices].tolist(),

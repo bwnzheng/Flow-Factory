@@ -190,13 +190,23 @@ class TrainingArguments(ArgABC):
             )
         },
     )
+    src_score_type: Literal["raw", "saturated"] = field(
+        default="saturated",
+        metadata={
+            "help": (
+                "SRC score formula. 'raw' uses magnitude-weighted scalar contrast; "
+                "'saturated' bounds each sample's scalar-contrast factor by its frozen-group "
+                "RMS scale."
+            )
+        },
+    )
     src_reweight_interpolation: float = field(
         default=0.5,
         metadata={"help": "SRC interpolation lambda in [0, 1)."},
     )
     src_reweight_temperature: float = field(
         default=1.0,
-        metadata={"help": "Positive softmax temperature for dimensionless SRC scores."},
+        metadata={"help": "Positive softmax temperature for the selected SRC score."},
     )
     src_reweight_epsilon: float = field(
         default=1e-8,
@@ -312,6 +322,11 @@ class TrainingArguments(ArgABC):
         if self.sample_weighting not in {"none", "src"}:
             raise ValueError(
                 f"`sample_weighting` must be 'none' or 'src', got {self.sample_weighting!r}."
+            )
+        if self.src_score_type not in {"raw", "saturated"}:
+            raise ValueError(
+                "`src_score_type` must be 'raw' or 'saturated', "
+                f"got {self.src_score_type!r}."
             )
         if not 0.0 <= self.src_reweight_interpolation < 1.0:
             raise ValueError(
