@@ -235,6 +235,27 @@ def test_src_concordant_pair_has_equal_positive_fitness():
     assert scores.degenerate_scalar_contrast is False
 
 
+def test_src_uses_only_scalar_advantage_sign_in_contributions():
+    scores = compute_src_contributions(
+        np.array([[0.0, 0.0], [1.0, 2.0], [4.0, 2.0]]),
+        np.array([2.0, 0.5]),
+    )
+
+    expected = (
+        scores.centered_rewards
+        * np.sign(scores.scalar_advantages)[:, None]
+        * np.array([2.0, 0.5])[None, :]
+    )
+    np.testing.assert_allclose(scores.contribution_matrix, expected)
+    nonzero = np.abs(scores.scalar_advantages) > 0
+    magnitude_weighted = (
+        scores.centered_rewards[nonzero]
+        * scores.scalar_advantages[nonzero, None]
+        * np.array([2.0, 0.5])[None, :]
+    )
+    assert not np.allclose(scores.contribution_matrix[nonzero], magnitude_weighted)
+
+
 def test_src_equal_scalar_specialists_are_degenerate():
     scores = compute_src_contributions(
         np.array([[1.0, 0.0], [0.0, 1.0]]),

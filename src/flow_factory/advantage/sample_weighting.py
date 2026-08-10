@@ -70,6 +70,10 @@ def compute_src_reweight(
 
     Returns:
         SRC diagnostics, probabilities, and effective advantages aligned with samples.
+
+    Note:
+        SRC contributions use only the sign of each centered scalar reward.
+        Scalar magnitudes still determine the downstream weighted advantages.
     """
     rewards = np.asarray(reward_matrix, dtype=np.float64)
     weights = np.asarray(weight_matrix, dtype=np.float64)
@@ -152,7 +156,10 @@ def compute_src_reweight(
         centered_rewards = active_rewards - active_rewards.mean(axis=1, keepdims=True)
         scalar_rewards = active_weights @ active_rewards
         scalar_centered = scalar_rewards - scalar_rewards.mean()
-        group_contributions = active_weights[:, None] * centered_rewards * scalar_centered[None, :]
+        scalar_directions = np.sign(scalar_centered)
+        group_contributions = (
+            active_weights[:, None] * centered_rewards * scalar_directions[None, :]
+        )
         group_scores = group_contributions.min(axis=0)
         scalar_variance = float(np.mean(np.square(scalar_centered)))
 
@@ -178,8 +185,11 @@ def compute_src_reweight(
         centered_weighted = scalar_rewards - weighted_mean
         weighted_reward_means = active_rewards @ group_probabilities
         weighted_centered_rewards = active_rewards - weighted_reward_means[:, None]
+        weighted_scalar_directions = np.sign(centered_weighted)
         group_weighted_contributions = (
-            active_weights[:, None] * weighted_centered_rewards * centered_weighted[None, :]
+            active_weights[:, None]
+            * weighted_centered_rewards
+            * weighted_scalar_directions[None, :]
         )
         weighted_variance = float(group_probabilities @ np.square(centered_weighted))
         group_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)

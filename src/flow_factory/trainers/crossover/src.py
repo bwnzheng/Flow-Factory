@@ -131,7 +131,7 @@ def compute_src_contributions(
     reward_matrix: np.ndarray,
     weights: np.ndarray,
 ) -> SRCContributionScore:
-    """Compute Sample-wise Reward Concordance against one frozen pool.
+    """Compute sign-only Sample-wise Reward Concordance against one frozen pool.
 
     Args:
         reward_matrix: Candidate rewards shaped ``(n_candidates, n_rewards)``.
@@ -139,6 +139,11 @@ def compute_src_contributions(
 
     Returns:
         Frozen pool reference values and one weakest-coordinate fitness per sample.
+
+    Note:
+        Scalar contrast contributes only through its sign. NumPy defines
+        ``sign(0) == 0``, so zero contrast yields zero contribution without
+        division by zero.
     """
     matrix = _validate_reward_matrix(reward_matrix)
     weight_vector = _validate_weights(weights, matrix.shape[1])
@@ -146,7 +151,8 @@ def compute_src_contributions(
     centered = matrix - pool_mean
     scalar_rewards = matrix @ weight_vector
     scalar_advantages = centered @ weight_vector
-    contributions = centered * scalar_advantages[:, None] * weight_vector[None, :]
+    scalar_directions = np.sign(scalar_advantages)
+    contributions = centered * scalar_directions[:, None] * weight_vector[None, :]
     fitness = np.min(contributions[:, weight_vector > 0], axis=1)
     variance_tolerance, _ = _scalar_tolerances(matrix, weight_vector)
     scalar_variance = float(np.mean(np.square(scalar_advantages)))

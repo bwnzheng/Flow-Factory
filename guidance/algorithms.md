@@ -128,8 +128,9 @@ eval:
 weighting without adding a new trainer or changing rollout support. For each
 original on-policy group, the shared `AdvantageProcessor` freezes the unweighted
 reward means, computes
-`c_ik = w_k (r_ik - mean_k) (R_i - mean_R)`, and uses the weakest active
-coordinate `s_i = min_k c_ik`. The dimensionless score
+`c_ik = w_k (r_ik - mean_k) sign(R_i - mean_R)`, and uses the weakest active
+coordinate `s_i = min_k c_ik`. Here `sign(0) = 0`, so the implementation never
+divides by a zero scalar contrast. The normalized sampling score
 `s_i / (Var(R) + epsilon)` is mapped to a bounded probability
 
 `p_i = (1 - lambda) / K + lambda * softmax(score_i / temperature)`.
@@ -253,12 +254,16 @@ samples for contrastive training. `src` is the scalar-elitist Sample-wise Reward
 Concordance selector. It merges
 parents and offspring, freezes the merged pool's reward and scalar-reward
 means, and computes each candidate's weakest active reward contribution
-`min_k w_k (r_ik - mean_k) (R_i - mean_R)` exactly once. The highest scalar
+`min_k w_k (r_ik - mean_k) sign(R_i - mean_R)` exactly once. This is equivalent
+to dividing the previous contribution by `abs(R_i - mean_R)` for nonzero scalar
+contrast, while defining zero contrast to contribute zero. The highest scalar
 reward candidate is always retained; the remaining `group_size - 1` slots are
 filled by descending contribution fitness, then scalar reward, then stable
 candidate ID. This path does not apply Pareto filtering or recompute covariance
-for hypothetical subsets. It logs both the frozen-reference lower-bound
-diagnostics and the true recentered covariance of the selected group.
+for hypothetical subsets. Because scalar magnitude is removed, the frozen SRC
+profile no longer exactly decomposes the covariance vector. The selector logs
+its frozen-reference lower-bound diagnostics and, separately, the true
+recentered covariance of the selected group.
 
 Its per-group console line reports the scalar elite origin, `frozen_J`, the
 separable `lower_bound`, their approximation `gap`, the recentered `true_J`,

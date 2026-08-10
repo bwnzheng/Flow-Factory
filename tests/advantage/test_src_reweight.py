@@ -68,6 +68,32 @@ def test_src_probabilities_and_weighted_advantages_satisfy_group_invariants():
     assert result.lower_bound_reweighted[0] >= result.lower_bound_uniform[0]
 
 
+def test_src_contributions_use_only_scalar_contrast_sign():
+    rewards = np.array(
+        [
+            [0.0, 1.0, 4.0],
+            [0.0, 2.0, 2.0],
+        ]
+    )
+    result = _compute(rewards)
+    centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    scalar_rewards = rewards.sum(axis=0)
+    scalar_centered = scalar_rewards - scalar_rewards.mean()
+
+    np.testing.assert_allclose(
+        result.contributions,
+        centered_rewards * np.sign(scalar_centered)[None, :],
+    )
+
+    weighted_reward_means = rewards @ result.probabilities
+    weighted_centered_rewards = rewards - weighted_reward_means[:, None]
+    weighted_scalar_centered = scalar_rewards - result.weighted_means[0]
+    np.testing.assert_allclose(
+        result.weighted_contributions,
+        weighted_centered_rewards * np.sign(weighted_scalar_centered)[None, :],
+    )
+
+
 def test_src_interpolation_zero_recovers_uniform_group_relative_update():
     rewards = np.array([[0.0, 0.4, 1.0], [0.1, 0.8, 0.9]])
     result = _compute(rewards, interpolation=0.0)
