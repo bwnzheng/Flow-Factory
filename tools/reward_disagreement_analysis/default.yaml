@@ -1,0 +1,28 @@
+# Reward-disagreement analysis reads only saves/<run>/logs/rewards/train_step_*.pkl.
+# It never loads reward models, rollout media, checkpoints, or training configs.
+
+save_dir: "saves"
+
+# If logs/media.jsonl has a run_context, the tool recovers the resolved
+# per-source reward weights automatically. This mapping is only a fallback for
+# older runs without that saved context.
+reward_weights:
+  # pick_score: 1.0
+  # clip_score: 1.0
+  # ocr_reward: 1.0
+
+runs:
+  # - name: "sd3-5_lora_nft_20260808_215750"
+  #   label: "SRC-NFT"
+  #   # Per-run weights augment the global fallback mapping above.
+  #   # reward_weights:
+  #   #   pick_score: 1.0
+
+analysis:
+  # Samples with either advantage at or below the corresponding threshold are
+  # neutral. They are excluded from the relevant disagreement-rate denominator.
+  reward_epsilon: 1.0e-8
+  scalar_epsilon: 1.0e-8
+
+output:
+  dir: "analysis_output/reward_disagreement_analysis"
