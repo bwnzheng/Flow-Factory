@@ -64,6 +64,50 @@ def plot_disagreement_trajectories(rows: Iterable[dict[str, Any]], output_dir: s
         plt.close(figure)
 
 
+def plot_per_reward_disagreement_trajectories(
+    rows: Iterable[dict[str, Any]], output_dir: str | Path
+) -> None:
+    """Write one focused disagreement-rate trajectory figure for each reward."""
+    by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["metric"] not in {"natural_disagreement_rate", "effective_disagreement_rate"}:
+            continue
+        reward = str(row["reward"])
+        if reward:
+            by_combination_reward[(str(row["reward_combination"]), reward)].append(row)
+
+    for (combination, reward), reward_rows in by_combination_reward.items():
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for (label, _reward, metric), line_rows in sorted(_group_lines(reward_rows).items()):
+            steps, values = _series(line_rows)
+            linestyle = "-" if metric == "natural_disagreement_rate" else "--"
+            mass_label = "Uniform" if metric == "natural_disagreement_rate" else "Effective"
+            axis.plot(
+                steps,
+                values,
+                linestyle=linestyle,
+                marker="o",
+                markersize=3,
+                label=f"{label} · {mass_label}",
+            )
+        axis.set_title(f"{reward} disagreement: {combination.replace('__', ' + ')}")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Disagreement rate")
+        axis.set_ylim(-0.02, 1.02)
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+        figure.tight_layout()
+        path = (
+            Path(output_dir)
+            / combination
+            / "per_reward_disagreement"
+            / f"{_filename_component(reward)}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
 def plot_group_metric_trajectories(rows: Iterable[dict[str, Any]], output_dir: str | Path) -> None:
     """Write FCR, valid mass, and disagreement-count trajectory figures."""
     metrics = (
@@ -153,4 +197,11 @@ def _series(rows: Iterable[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
     return (
         np.asarray([int(row["step"]) for row in ordered]),
         np.asarray([float(row["value"]) for row in ordered]),
+    )
+
+
+def _filename_component(value: str) -> str:
+    """Return a portable filename component while preserving readable reward names."""
+    return "".join(
+        character if character.isalnum() or character in "._-" else "_" for character in value
     )

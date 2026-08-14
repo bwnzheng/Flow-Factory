@@ -83,5 +83,6 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 - `scalar_advantage_identity_max_abs_error` audits the equivalence between
   centered scalar rewards and weighted centered reward dimensions.
 
-The output directory also contains `metadata.json` and one figure pair per
+The output directory also contains `metadata.json`, an all-reward disagreement
+overview, group metrics, and `per_reward_disagreement/<reward>.png` for every
 active reward combination.

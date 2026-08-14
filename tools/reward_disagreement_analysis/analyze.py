@@ -40,6 +40,7 @@ from tools.reward_disagreement_analysis.metrics import (
 from tools.reward_disagreement_analysis.plots import (
     plot_disagreement_trajectories,
     plot_group_metric_trajectories,
+    plot_per_reward_disagreement_trajectories,
 )
 from tools.reward_disagreement_analysis.reward_logs import (
     RewardGroup,
@@ -85,6 +86,7 @@ def main() -> None:
         encoding="utf-8",
     )
     plot_disagreement_trajectories(rows, output_dir)
+    plot_per_reward_disagreement_trajectories(rows, output_dir)
     plot_group_metric_trajectories(rows, output_dir)
     print(
         "[Reward disagreement] "

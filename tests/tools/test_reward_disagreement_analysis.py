@@ -33,6 +33,7 @@ from tools.reward_disagreement_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_disagreement_metrics,
 )
+from tools.reward_disagreement_analysis.plots import plot_per_reward_disagreement_trajectories
 from tools.reward_disagreement_analysis.reward_logs import load_train_reward_groups
 
 
@@ -220,3 +221,30 @@ def test_analysis_rejects_missing_historical_weight(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Cannot recover scalarization weights"):
         run_analysis(config)
+
+
+def test_per_reward_disagreement_plots_are_written_separately(tmp_path: Path) -> None:
+    rows = [
+        {
+            "run_label": "SRC-NFT",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": reward,
+            "metric": metric,
+            "value": value,
+        }
+        for reward, values in {
+            "clip_score": ((0.2, 0.3), (0.1, 0.2)),
+            "pick_score": ((0.4, 0.5), (0.3, 0.4)),
+        }.items()
+        for metric, metric_values in zip(
+            ("natural_disagreement_rate", "effective_disagreement_rate"), values
+        )
+        for step, value in enumerate(metric_values)
+    ]
+
+    plot_per_reward_disagreement_trajectories(rows, tmp_path)
+
+    output_dir = tmp_path / "clip_score__pick_score" / "per_reward_disagreement"
+    assert (output_dir / "clip_score.png").stat().st_size > 0
+    assert (output_dir / "pick_score.png").stat().st_size > 0
