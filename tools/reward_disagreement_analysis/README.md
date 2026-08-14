@@ -41,10 +41,6 @@ runs:
   - name: "sd3-5_lora_nft_20260808_215750"
     label: "SRC-NFT"
 
-analysis:
-  reward_epsilon: 1.0e-8
-  scalar_epsilon: 1.0e-8
-
 output:
   dir: "analysis_output/reward_disagreement_analysis"
 ```
@@ -65,24 +61,24 @@ weights `w`, the tool computes:
 single_reward_advantage[i, k] = r[i, k] - mean_i(r[i, k])
 scalar_advantage[i] = sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))
 disagreement[i, k] = single_reward_advantage[i, k] * scalar_advantage[i] < 0
+has_conflict[i] = any_k(disagreement[i, k])
 ```
 
-Near-zero single-reward or scalar advantages are neutral. They are excluded
-from the corresponding rate denominator. Fully concordant samples must be
-valid on every active dimension, so neutral samples cannot inflate FCR.
+The strict inequality means an exact-zero advantage is non-conflicting. There
+is no validity threshold and no filtered denominator: all samples in the frozen
+prompt-local rollout group carry their original uniform mass.
 
 Each step reports a macro-average over prompt groups, never a recentered pool
 of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 
-- `natural_disagreement_rate` and `natural_fully_concordant_ratio` describe
-  samples produced by the current policy under uniform group mass.
-- `effective_*` rows use saved SRC probabilities and are emitted only for
-  groups with `src_groups[].probabilities`.
-- `*_disagreement_count_probability` records the conflict-count distribution
-  over fully valid samples.
-- `scalar_advantage_identity_max_abs_error` audits the equivalence between
-  centered scalar rewards and weighted centered reward dimensions.
+- `natural_per_reward_disagreement_rate` is the uniform fraction of samples
+  for which one named reward conflicts with the scalar decision. It identifies
+  the source of natural-rollout conflict and is the only per-reward metric.
+- `natural_conflict_mass` is the uniform sample mass with at least one
+  conflicting reward.
+- `effective_conflict_mass` is the corresponding SRC probability mass and is
+  emitted only for groups with saved `src_groups[].probabilities`.
 
-The output directory also contains `metadata.json`, an all-reward disagreement
-overview, group metrics, and `per_reward_disagreement/<reward>.png` for every
-active reward combination.
+The output directory also contains `metadata.json`,
+`per_reward_disagreement/<reward>.png` for every active reward combination,
+and `conflict_mass.png` comparing Uniform with Effective conflict mass.

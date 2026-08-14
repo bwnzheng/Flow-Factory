@@ -27,50 +27,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_disagreement_trajectories(rows: Iterable[dict[str, Any]], output_dir: str | Path) -> None:
-    """Write one natural/effective disagreement trajectory figure per reward set."""
-    by_combination: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        if row["metric"] in {"natural_disagreement_rate", "effective_disagreement_rate"}:
-            by_combination[str(row["reward_combination"])].append(row)
-
-    for combination, combination_rows in by_combination.items():
-        if not combination_rows:
-            continue
-        figure, axis = plt.subplots(figsize=(9, 5))
-        grouped = _group_lines(combination_rows)
-        for (label, reward, metric), line_rows in sorted(grouped.items()):
-            steps, values = _series(line_rows)
-            linestyle = "-" if metric == "natural_disagreement_rate" else "--"
-            metric_label = "uniform" if metric == "natural_disagreement_rate" else "effective"
-            axis.plot(
-                steps,
-                values,
-                linestyle=linestyle,
-                marker="o",
-                markersize=3,
-                label=(f"{label} · {reward} · {metric_label}"),
-            )
-        axis.set_title(f"Reward disagreement: {combination.replace('__', ' + ')}")
-        axis.set_xlabel("Training step")
-        axis.set_ylabel("Disagreement rate")
-        axis.set_ylim(-0.02, 1.02)
-        axis.grid(alpha=0.25)
-        axis.legend(fontsize=8, ncol=2)
-        figure.tight_layout()
-        path = Path(output_dir) / combination / "disagreement_rates.png"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(path, dpi=180)
-        plt.close(figure)
-
-
 def plot_per_reward_disagreement_trajectories(
     rows: Iterable[dict[str, Any]], output_dir: str | Path
 ) -> None:
-    """Write one focused disagreement-rate trajectory figure for each reward."""
+    """Write one natural disagreement trajectory figure for each reward.
+
+    Args:
+        rows: Tidy metric rows produced by the offline analysis.
+        output_dir: Directory that receives combination-specific figures.
+    """
     by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        if row["metric"] not in {"natural_disagreement_rate", "effective_disagreement_rate"}:
+        if row["metric"] != "natural_per_reward_disagreement_rate":
             continue
         reward = str(row["reward"])
         if reward:
@@ -78,21 +46,12 @@ def plot_per_reward_disagreement_trajectories(
 
     for (combination, reward), reward_rows in by_combination_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
-        for (label, _reward, metric), line_rows in sorted(_group_lines(reward_rows).items()):
+        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
             steps, values = _series(line_rows)
-            linestyle = "-" if metric == "natural_disagreement_rate" else "--"
-            mass_label = "Uniform" if metric == "natural_disagreement_rate" else "Effective"
-            axis.plot(
-                steps,
-                values,
-                linestyle=linestyle,
-                marker="o",
-                markersize=3,
-                label=f"{label} · {mass_label}",
-            )
+            axis.plot(steps, values, marker="o", markersize=3, label=label)
         axis.set_title(f"{reward} disagreement: {combination.replace('__', ' + ')}")
         axis.set_xlabel("Training step")
-        axis.set_ylabel("Disagreement rate")
+        axis.set_ylabel("Natural disagreement rate")
         axis.set_ylim(-0.02, 1.02)
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8)
@@ -108,87 +67,67 @@ def plot_per_reward_disagreement_trajectories(
         plt.close(figure)
 
 
-def plot_group_metric_trajectories(rows: Iterable[dict[str, Any]], output_dir: str | Path) -> None:
-    """Write FCR, valid mass, and disagreement-count trajectory figures."""
-    metrics = (
-        "natural_fully_concordant_ratio",
-        "natural_fully_concordant_positive_ratio",
-        "natural_fully_concordant_negative_ratio",
-        "natural_fully_valid_ratio",
-        "natural_mean_disagreement_count",
-        "effective_fully_concordant_ratio",
-        "effective_fully_concordant_positive_ratio",
-        "effective_fully_concordant_negative_ratio",
-        "effective_fully_valid_mass",
-        "effective_mean_disagreement_count",
-    )
+def plot_conflict_mass_trajectories(rows: Iterable[dict[str, Any]], output_dir: str | Path) -> None:
+    """Write one Uniform-versus-Effective conflict-mass figure per reward set.
+
+    Args:
+        rows: Tidy metric rows produced by the offline analysis.
+        output_dir: Directory that receives combination-specific figures.
+    """
+    metrics = {"natural_conflict_mass", "effective_conflict_mass"}
     by_combination: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row["metric"] in metrics:
             by_combination[str(row["reward_combination"])].append(row)
 
     labels = {
-        "natural_fully_concordant_ratio": "Uniform FCR",
-        "natural_fully_concordant_positive_ratio": "Uniform positive FCR",
-        "natural_fully_concordant_negative_ratio": "Uniform negative FCR",
-        "natural_fully_valid_ratio": "Uniform fully-valid ratio",
-        "natural_mean_disagreement_count": "Uniform mean disagreement count",
-        "effective_fully_concordant_ratio": "Effective FCR",
-        "effective_fully_concordant_positive_ratio": "Effective positive FCR",
-        "effective_fully_concordant_negative_ratio": "Effective negative FCR",
-        "effective_fully_valid_mass": "Effective fully-valid mass",
-        "effective_mean_disagreement_count": "Effective mean disagreement count",
+        "natural_conflict_mass": "Uniform conflict mass",
+        "effective_conflict_mass": "Effective conflict mass",
     }
     for combination, combination_rows in by_combination.items():
-        figure, axes = plt.subplots(2, 3, figsize=(14, 7), sharex=True)
-        metric_groups = (
-            ("natural_fully_concordant_ratio", "effective_fully_concordant_ratio"),
-            (
-                "natural_fully_concordant_positive_ratio",
-                "effective_fully_concordant_positive_ratio",
-            ),
-            (
-                "natural_fully_concordant_negative_ratio",
-                "effective_fully_concordant_negative_ratio",
-            ),
-            ("natural_fully_valid_ratio", "effective_fully_valid_mass"),
-            ("natural_mean_disagreement_count", "effective_mean_disagreement_count"),
-        )
-        for axis, metric_pair in zip(axes.flat, metric_groups):
-            metric_rows = [row for row in combination_rows if row["metric"] in metric_pair]
-            for (label, _reward, metric), line_rows in sorted(_group_lines(metric_rows).items()):
-                steps, values = _series(line_rows)
-                linestyle = "-" if metric.startswith("natural_") else "--"
-                axis.plot(
-                    steps,
-                    values,
-                    linestyle=linestyle,
-                    marker="o",
-                    markersize=3,
-                    label=(f"{label} · {labels[metric]}"),
-                )
-            axis.set_title(" / ".join(labels[metric] for metric in metric_pair))
-            axis.grid(alpha=0.25)
-            axis.legend(fontsize=7)
-            if "count" not in " ".join(metric_pair):
-                axis.set_ylim(-0.02, 1.02)
-        axes.flat[-1].axis("off")
-        figure.suptitle(f"Prompt-local group metrics: {combination.replace('__', ' + ')}")
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for (run_label, metric), line_rows in sorted(
+            _group_by_run_metric(combination_rows).items()
+        ):
+            steps, values = _series(line_rows)
+            axis.plot(
+                steps,
+                values,
+                linestyle="-" if metric == "natural_conflict_mass" else "--",
+                marker="o",
+                markersize=3,
+                label=f"{run_label} · {labels[metric]}",
+            )
+        axis.set_title(f"Conflict mass: {combination.replace('__', ' + ')}")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Conflict mass")
+        axis.set_ylim(-0.02, 1.02)
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
         figure.tight_layout()
-        path = Path(output_dir) / combination / "group_metrics.png"
+        path = Path(output_dir) / combination / "conflict_mass.png"
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
         plt.close(figure)
 
 
-def _group_lines(
-    rows: Iterable[dict[str, Any]],
-) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+def _group_by_run(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         value = float(row["value"])
         if np.isfinite(value):
-            grouped[(str(row["run_label"]), str(row["reward"]), str(row["metric"]))].append(row)
+            grouped[str(row["run_label"])].append(row)
+    return grouped
+
+
+def _group_by_run_metric(
+    rows: Iterable[dict[str, Any]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        value = float(row["value"])
+        if np.isfinite(value):
+            grouped[(str(row["run_label"]), str(row["metric"]))].append(row)
     return grouped
 
 

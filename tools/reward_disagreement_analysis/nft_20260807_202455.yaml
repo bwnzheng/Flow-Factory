@@ -8,9 +8,5 @@ runs:
   - name: "sd3-5_lora_nft_20260807_202455"
     label: "NFT (uniform)"
 
-analysis:
-  reward_epsilon: 1.0e-8
-  scalar_epsilon: 1.0e-8
-
 output:
   dir: "analysis_output/reward_disagreement_analysis/nft_20260807_202455"

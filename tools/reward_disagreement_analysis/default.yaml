@@ -18,11 +18,5 @@ runs:
   #   # reward_weights:
   #   #   pick_score: 1.0
 
-analysis:
-  # Samples with either advantage at or below the corresponding threshold are
-  # neutral. They are excluded from the relevant disagreement-rate denominator.
-  reward_epsilon: 1.0e-8
-  scalar_epsilon: 1.0e-8
-
 output:
   dir: "analysis_output/reward_disagreement_analysis"

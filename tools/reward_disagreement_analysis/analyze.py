@@ -38,8 +38,7 @@ from tools.reward_disagreement_analysis.metrics import (
     compute_reward_disagreement_metrics,
 )
 from tools.reward_disagreement_analysis.plots import (
-    plot_disagreement_trajectories,
-    plot_group_metric_trajectories,
+    plot_conflict_mass_trajectories,
     plot_per_reward_disagreement_trajectories,
 )
 from tools.reward_disagreement_analysis.reward_logs import (
@@ -65,8 +64,6 @@ class AnalysisConfig:
 
     save_dir: str = "saves"
     runs: list[RunSpec] = field(default_factory=list)
-    reward_epsilon: float = 1e-8
-    scalar_epsilon: float = 1e-8
     output_dir: str = "analysis_output/reward_disagreement_analysis"
 
 
@@ -85,9 +82,8 @@ def main() -> None:
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    plot_disagreement_trajectories(rows, output_dir)
     plot_per_reward_disagreement_trajectories(rows, output_dir)
-    plot_group_metric_trajectories(rows, output_dir)
+    plot_conflict_mass_trajectories(rows, output_dir)
     print(
         "[Reward disagreement] "
         f"runs={len(config.runs)} metric_rows={len(rows)} output={output_dir}"
@@ -121,8 +117,6 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                     group.rewards,
                     weights,
                     sample_weights=group.probabilities,
-                    reward_eps=config.reward_epsilon,
-                    scalar_eps=config.scalar_epsilon,
                 )
                 for group in groups
             ]
@@ -144,13 +138,18 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         )
 
     metadata = {
-        "metric_version": 1,
+        "metric_version": 2,
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
         "effective_aggregation": "SRC_probability_mass_after_natural_decision",
-        "reward_epsilon": config.reward_epsilon,
-        "scalar_epsilon": config.scalar_epsilon,
+        "metrics": {
+            "natural_per_reward_disagreement_rate": (
+                "uniform_fraction_with_reward_advantage_times_scalar_advantage_less_than_zero"
+            ),
+            "natural_conflict_mass": "uniform_mass_with_at_least_one_conflicting_reward",
+            "effective_conflict_mass": "SRC_probability_mass_with_at_least_one_conflicting_reward",
+        },
         "runs": run_metadata,
     }
     return rows, metadata
@@ -163,9 +162,11 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
     if not isinstance(raw, dict):
         raise ValueError("Analysis configuration must be a YAML mapping.")
 
-    analysis = raw.get("analysis", {})
-    if not isinstance(analysis, dict):
-        raise ValueError("analysis must be a mapping when present.")
+    if "analysis" in raw:
+        raise ValueError(
+            "analysis is no longer supported: conflict metrics use the exact strict-negative "
+            "definition without neutral thresholds. Remove the analysis mapping."
+        )
     output = raw.get("output", {})
     if not isinstance(output, dict):
         raise ValueError("output must be a mapping when present.")
@@ -196,14 +197,6 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
     return AnalysisConfig(
         save_dir=str(raw.get("save_dir", "saves")),
         runs=runs,
-        reward_epsilon=_parse_nonnegative_float(
-            analysis.get("reward_epsilon", 1e-8),
-            "analysis.reward_epsilon",
-        ),
-        scalar_epsilon=_parse_nonnegative_float(
-            analysis.get("scalar_epsilon", 1e-8),
-            "analysis.scalar_epsilon",
-        ),
         output_dir=str(output.get("dir", "analysis_output/reward_disagreement_analysis")),
     )
 
@@ -231,13 +224,6 @@ def _parse_weight_mapping(value: Any, field_name: str) -> dict[str, float]:
         weight = _parse_positive_float(raw_weight, f"{field_name}.{reward_name}")
         result[reward_name] = weight
     return result
-
-
-def _parse_nonnegative_float(value: Any, field_name: str) -> float:
-    number = float(value)
-    if not np.isfinite(number) or number < 0.0:
-        raise ValueError(f"{field_name} must be finite and nonnegative, got {value!r}.")
-    return number
 
 
 def _parse_positive_float(value: Any, field_name: str) -> float:
@@ -323,59 +309,26 @@ def _metric_rows(
         "n_effective_groups": metrics.get("n_effective_groups", 0),
     }
     rows: list[dict[str, Any]] = []
-    per_reward_metrics = (
-        ("natural_disagreement_rate", "disagreement_rate_per_reward"),
-        ("natural_valid_ratio", "valid_ratio_per_reward"),
-        ("effective_disagreement_rate", "effective_disagreement_rate_per_reward"),
-        ("effective_valid_mass", "effective_valid_mass_per_reward"),
-    )
-    for metric_name, key in per_reward_metrics:
-        if key not in metrics:
-            continue
-        for reward_name, value in zip(reward_names, metrics[key]):
-            rows.append(
-                {**common, "reward": reward_name, "metric": metric_name, "value": float(value)}
-            )
-
-    scalar_metrics = (
-        ("natural_fully_valid_ratio", "fully_valid_ratio"),
-        ("natural_fully_concordant_ratio", "fully_concordant_ratio"),
-        ("natural_fully_concordant_positive_ratio", "fully_concordant_positive_ratio"),
-        ("natural_fully_concordant_negative_ratio", "fully_concordant_negative_ratio"),
-        ("natural_mean_disagreement_count", "mean_disagreement_count"),
-        ("scalar_advantage_identity_max_abs_error", "scalar_advantage_identity_max_abs_error"),
-        ("effective_fully_valid_mass", "effective_fully_valid_mass"),
-        ("effective_fully_concordant_ratio", "effective_fully_concordant_ratio"),
-        (
-            "effective_fully_concordant_positive_ratio",
-            "effective_fully_concordant_positive_ratio",
-        ),
-        (
-            "effective_fully_concordant_negative_ratio",
-            "effective_fully_concordant_negative_ratio",
-        ),
-        ("effective_mean_disagreement_count", "effective_mean_disagreement_count"),
-    )
-    for metric_name, key in scalar_metrics:
-        if key in metrics:
-            rows.append(
-                {**common, "reward": "", "metric": metric_name, "value": float(metrics[key])}
-            )
-
-    histogram_metrics = (
-        ("natural_disagreement_count_probability", "disagreement_count_histogram"),
-        ("effective_disagreement_count_probability", "effective_disagreement_count_histogram"),
-    )
-    for metric_name, key in histogram_metrics:
-        if key not in metrics:
-            continue
-        for count, value in enumerate(metrics[key]):
+    for reward_name, value in zip(
+        reward_names,
+        metrics["natural_per_reward_disagreement_rate"],
+    ):
+        rows.append(
+            {
+                **common,
+                "reward": reward_name,
+                "metric": "natural_per_reward_disagreement_rate",
+                "value": float(value),
+            }
+        )
+    for metric_name in ("natural_conflict_mass", "effective_conflict_mass"):
+        if metric_name in metrics:
             rows.append(
                 {
                     **common,
-                    "reward": f"conflicts={count}",
+                    "reward": "",
                     "metric": metric_name,
-                    "value": float(value),
+                    "value": float(metrics[metric_name]),
                 }
             )
     return rows

@@ -33,11 +33,14 @@ from tools.reward_disagreement_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_disagreement_metrics,
 )
-from tools.reward_disagreement_analysis.plots import plot_per_reward_disagreement_trajectories
+from tools.reward_disagreement_analysis.plots import (
+    plot_conflict_mass_trajectories,
+    plot_per_reward_disagreement_trajectories,
+)
 from tools.reward_disagreement_analysis.reward_logs import load_train_reward_groups
 
 
-def test_group_metrics_keep_uniform_centering_when_effective_mass_is_supplied() -> None:
+def test_group_metrics_report_natural_and_effective_conflict_mass() -> None:
     rewards = np.asarray(
         [
             [0.0, 2.0],
@@ -50,72 +53,44 @@ def test_group_metrics_keep_uniform_centering_when_effective_mass_is_supplied() 
         rewards,
         reward_weights=np.asarray([1.0, 0.25]),
         sample_weights=np.asarray([0.1, 0.2, 0.7]),
-        reward_eps=0.0,
-        scalar_eps=0.0,
     )
 
-    np.testing.assert_allclose(metrics["disagreement_rate_per_reward"], [0.0, 1.0])
-    assert metrics["fully_concordant_ratio"] == pytest.approx(0.0)
     np.testing.assert_allclose(
-        metrics["effective_disagreement_rate_per_reward"],
-        [0.0, 1.0],
+        metrics["natural_per_reward_disagreement_rate"],
+        [0.0, 2.0 / 3.0],
     )
-    assert metrics["effective_fully_concordant_ratio"] == pytest.approx(0.0)
-    assert metrics["scalar_advantage_identity_max_abs_error"] < 1e-12
+    assert metrics["natural_conflict_mass"] == pytest.approx(2.0 / 3.0)
+    assert metrics["effective_conflict_mass"] == pytest.approx(0.8)
 
 
-def test_neutral_samples_are_excluded_from_rates_and_fully_concordant_ratio() -> None:
-    rewards = np.asarray(
-        [
-            [0.0, 0.0],
-            [1.0, -1.0],
-            [2.0, -2.0],
-        ]
-    )
-
+def test_exact_zero_advantages_are_non_conflicting_without_filtered_denominators() -> None:
     metrics = compute_reward_disagreement_metrics(
-        rewards,
+        np.asarray([[0.0, 0.0], [1.0, -1.0], [2.0, -2.0]]),
         reward_weights=np.asarray([1.0, 1.0]),
-        reward_eps=0.1,
-        scalar_eps=0.1,
     )
 
-    assert metrics["fully_valid_ratio"] == pytest.approx(0.0)
-    assert np.isnan(metrics["fully_concordant_ratio"])
-    assert np.isnan(metrics["mean_disagreement_count"])
-    assert np.isnan(metrics["disagreement_count_histogram"]).all()
-
-
-def test_positive_and_negative_fully_concordant_ratios_use_their_own_denominators() -> None:
-    metrics = compute_reward_disagreement_metrics(
-        np.asarray([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]),
-        reward_weights=np.asarray([1.0, 1.0]),
-        reward_eps=0.0,
-        scalar_eps=0.0,
-    )
-
-    assert metrics["fully_concordant_positive_ratio"] == pytest.approx(1.0)
-    assert metrics["fully_concordant_negative_ratio"] == pytest.approx(1.0)
+    np.testing.assert_allclose(metrics["natural_per_reward_disagreement_rate"], [0.0, 0.0])
+    assert metrics["natural_conflict_mass"] == pytest.approx(0.0)
 
 
 def test_aggregate_group_metrics_macro_averages_prompt_groups() -> None:
     first = compute_reward_disagreement_metrics(
         np.asarray([[0.0, 1.0], [1.0, 0.0]]),
         reward_weights=np.asarray([0.25, 1.0]),
-        reward_eps=0.0,
-        scalar_eps=0.0,
     )
     second = compute_reward_disagreement_metrics(
         np.asarray([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]]),
         reward_weights=np.asarray([1.0, 0.25]),
-        reward_eps=0.0,
-        scalar_eps=0.0,
     )
 
     aggregate = aggregate_group_metrics([first, second])
 
     assert aggregate["n_groups"] == 2
-    np.testing.assert_allclose(aggregate["disagreement_rate_per_reward"], [0.5, 0.5])
+    np.testing.assert_allclose(
+        aggregate["natural_per_reward_disagreement_rate"],
+        [0.5, 1.0 / 3.0],
+    )
+    assert aggregate["natural_conflict_mass"] == pytest.approx(5.0 / 6.0)
 
 
 def _write_train_pickle(path: Path, step: int) -> None:
@@ -125,14 +100,8 @@ def _write_train_pickle(path: Path, step: int) -> None:
         "pick_score": [np.asarray([0.0, 1.0]), np.asarray([0.0, 2.0])],
         "clip_score": [np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])],
         "src_groups": [
-            {
-                "group_id": 0,
-                "probabilities": [0.25, 0.75],
-            },
-            {
-                "group_id": 1,
-                "probabilities": [0.75, 0.25],
-            },
+            {"group_id": 0, "probabilities": [0.25, 0.75]},
+            {"group_id": 1, "probabilities": [0.75, 0.25]},
         ],
     }
     with path.open("wb") as handle:
@@ -156,18 +125,15 @@ def test_saved_reward_reader_and_analysis_need_explicit_weights(tmp_path: Path) 
         runs=[
             RunSpec(name="run", label="SRC", reward_weights={"pick_score": 1.0, "clip_score": 1.0})
         ],
-        reward_epsilon=0.0,
-        scalar_epsilon=0.0,
         output_dir=str(tmp_path / "output"),
     )
 
     rows, metadata = run_analysis(config)
 
-    assert {row["metric"] for row in rows} >= {
-        "natural_disagreement_rate",
-        "effective_disagreement_rate",
-        "natural_fully_concordant_ratio",
-        "effective_fully_concordant_ratio",
+    assert {row["metric"] for row in rows} == {
+        "natural_per_reward_disagreement_rate",
+        "natural_conflict_mass",
+        "effective_conflict_mass",
     }
     assert metadata["runs"][0]["n_effective_groups"] == 2
 
@@ -190,8 +156,6 @@ def test_analysis_recovers_weights_from_saved_media_run_context(tmp_path: Path) 
     config = AnalysisConfig(
         save_dir=str(tmp_path / "saves"),
         runs=[RunSpec(name="run", label="SRC", reward_weights={})],
-        reward_epsilon=0.0,
-        scalar_epsilon=0.0,
         output_dir=str(tmp_path / "output"),
     )
 
@@ -223,28 +187,50 @@ def test_analysis_rejects_missing_historical_weight(tmp_path: Path) -> None:
         run_analysis(config)
 
 
-def test_per_reward_disagreement_plots_are_written_separately(tmp_path: Path) -> None:
+def test_analysis_rejects_removed_neutral_threshold_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        "runs:\n  - name: run\nanalysis:\n  reward_epsilon: 1.0e-8\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="analysis is no longer supported"):
+        _parse_config(config_path)
+
+
+def test_conflict_mass_and_per_reward_plots_are_written(tmp_path: Path) -> None:
     rows = [
         {
             "run_label": "SRC-NFT",
             "step": step,
             "reward_combination": "clip_score__pick_score",
             "reward": reward,
+            "metric": "natural_per_reward_disagreement_rate",
+            "value": value,
+        }
+        for reward, values in {"clip_score": (0.2, 0.3), "pick_score": (0.4, 0.5)}.items()
+        for step, value in enumerate(values)
+    ]
+    rows.extend(
+        {
+            "run_label": "SRC-NFT",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": "",
             "metric": metric,
             "value": value,
         }
-        for reward, values in {
-            "clip_score": ((0.2, 0.3), (0.1, 0.2)),
-            "pick_score": ((0.4, 0.5), (0.3, 0.4)),
+        for metric, values in {
+            "natural_conflict_mass": (0.5, 0.6),
+            "effective_conflict_mass": (0.3, 0.4),
         }.items()
-        for metric, metric_values in zip(
-            ("natural_disagreement_rate", "effective_disagreement_rate"), values
-        )
-        for step, value in enumerate(metric_values)
-    ]
+        for step, value in enumerate(values)
+    )
 
     plot_per_reward_disagreement_trajectories(rows, tmp_path)
+    plot_conflict_mass_trajectories(rows, tmp_path)
 
-    output_dir = tmp_path / "clip_score__pick_score" / "per_reward_disagreement"
-    assert (output_dir / "clip_score.png").stat().st_size > 0
-    assert (output_dir / "pick_score.png").stat().st_size > 0
+    output_dir = tmp_path / "clip_score__pick_score"
+    assert (output_dir / "per_reward_disagreement" / "clip_score.png").stat().st_size > 0
+    assert (output_dir / "per_reward_disagreement" / "pick_score.png").stat().st_size > 0
+    assert (output_dir / "conflict_mass.png").stat().st_size > 0
