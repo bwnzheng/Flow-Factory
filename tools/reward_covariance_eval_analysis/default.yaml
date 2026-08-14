@@ -1,0 +1,65 @@
+# Fresh checkpoint-rollout reward covariance analysis.
+#
+# This tool never reads training reward PKLs.  It generates repeated samples
+# from one or more saved LoRA checkpoints, scores every generated image with
+# the configured reward models, and computes all covariance statistics inside
+# each prompt before macro-averaging across prompts.
+
+model:
+  base_model: "stabilityai/stable-diffusion-3.5-medium"
+  dtype: "bfloat16"
+  device: null  # Auto-detect NPU, then CUDA, then CPU; an explicit index is also valid.
+  num_processes: 1  # One worker per accelerator; set >1 only for idle GPUs.
+
+evaluation:
+  num_samples_per_prompt: 16  # At least 16 is recommended for 3+ rewards.
+  generation_batch_size: 1
+  reward_batch_size: 16
+  seed: 42
+  num_inference_steps: 40
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+
+# Use source-specific reward suites.  A reward must be present for every
+# generated image in its source; the tool will reject partial reward vectors.
+sources:
+  - name: "pickscore"
+    prompts_file: "dataset/pickscore/test.txt"
+    max_prompts: 0  # 0 evaluates the entire set.
+    rewards:
+      - name: "pick_score"
+        reward_model: "PickScore"
+      - name: "clip_score"
+        reward_model: "CLIP"
+
+  - name: "ocr"
+    prompts_file: "dataset/ocr/test.txt"
+    max_prompts: 0
+    rewards:
+      - name: "pick_score"
+        reward_model: "PickScore"
+      - name: "clip_score"
+        reward_model: "CLIP"
+      - name: "ocr_reward"
+        reward_model: "OCR"
+
+  # - name: "geneval"
+  #   prompts_file: "dataset/geneval/test.jsonl"
+  #   prompt_key: "prompt"
+  #   max_prompts: 0
+  #   rewards:
+  #     - name: "pick_score"
+  #       reward_model: "PickScore"
+  #     - name: "clip_score"
+  #       reward_model: "CLIP"
+  #     - name: "geneval_reward"
+  #       reward_model: "GenEval"  # Use "geneval_ascend" on NPU.
+
+runs:
+  - name: "example_run"
+    checkpoint: "saves/example_run/checkpoints/checkpoint-60"
+    label: "example"
+
+output:
+  dir: "analysis_output/reward_covariance_eval_analysis"

@@ -1,8 +1,49 @@
-save_dir: "saves"
+# Ready-to-run fresh checkpoint evaluation for the compared NFT runs.
+model:
+  base_model: "stabilityai/stable-diffusion-3.5-medium"
+  dtype: "bfloat16"
+  device: "cuda:2"
+  num_processes: 1
+
+evaluation:
+  num_samples_per_prompt: 16
+  generation_batch_size: 1
+  reward_batch_size: 16
+  seed: 42
+  num_inference_steps: 40
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+
+sources:
+  - name: "pickscore"
+    prompts_file: "dataset/pickscore/test.txt"
+    max_prompts: 0
+    rewards:
+      - {name: "pick_score", reward_model: "PickScore"}
+      - {name: "clip_score", reward_model: "CLIP"}
+  - name: "ocr"
+    prompts_file: "dataset/ocr/test.txt"
+    max_prompts: 0
+    rewards:
+      - {name: "pick_score", reward_model: "PickScore"}
+      - {name: "clip_score", reward_model: "CLIP"}
+      - {name: "ocr_reward", reward_model: "OCR"}
+  # - name: "geneval"
+  #   prompts_file: "dataset/geneval/test.jsonl"
+  #   prompt_key: "prompt"
+  #   max_prompts: 0
+  #   rewards:
+  #     - {name: "pick_score", reward_model: "PickScore"}
+  #     - {name: "clip_score", reward_model: "CLIP"}
+  #     - {name: "geneval_reward", reward_model: "GenEval"}  # Use geneval_ascend on NPU.
+
 runs:
   - name: "sd3-5_lora_nft_20260807_202455"
     label: "NFT (uniform)"
+    checkpoint: "saves/sd3-5_lora_nft_20260807_202455/checkpoints/checkpoint-60"
   - name: "sd3-5_lora_nft_20260808_215750"
     label: "SRC-NFT"
+    checkpoint: "saves/sd3-5_lora_nft_20260808_215750/checkpoints/checkpoint-60"
 output:
   dir: "analysis_output/reward_covariance_eval_analysis/nft_src_vs_uniform"
