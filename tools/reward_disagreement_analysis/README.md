@@ -1,4 +1,4 @@
-# Reward Disagreement Analysis
+# Reward Concordance Analysis
 
 This is an offline experiment for `notes/reward-disagreement.md`. It reads only
 the saved train reward pickles at:
@@ -11,8 +11,7 @@ It does not load reward models, checkpoints, or a training configuration from
 outside the saved run. It reads raw rewards from the PKLs and, when present, the
 `run_context` already saved in `logs/media.jsonl`. Each prompt's rollout group
 is centered independently with the uniform mean of its original raw rewards.
-SRC probabilities are used only after that natural decision has been computed,
-to report effective training-mass statistics.
+The analysis does not use SRC probabilities or any reweighted statistic.
 
 ## Required provenance
 
@@ -66,30 +65,28 @@ For each prompt-local frozen reward matrix `r` and positive scalarization
 weights `w`, the tool computes:
 
 ```text
-single_reward_advantage[i, k] = r[i, k] - mean_i(r[i, k])
+reward_advantage[i, k] = r[i, k] - mean_i(r[i, k])
 scalar_advantage[i] = sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))
-disagreement[i, k] = single_reward_advantage[i, k] * scalar_advantage[i] < 0
-has_conflict[i] = any_k(disagreement[i, k])
+conflict_score[i, k] = w[k] * reward_advantage[i, k] * scalar_advantage[i]
+sample_lower_bound[i] = min_k(conflict_score[i, k])
 ```
 
-The strict inequality means an exact-zero advantage is non-conflicting. There
-is no validity threshold and no filtered denominator: all samples in the frozen
-prompt-local rollout group carry their original uniform mass.
+Positive conflict scores mean the named reward supports the scalar training
+direction; negative values mean it opposes that direction. The lower bound
+keeps the weakest reward score for every sample, so strong agreement on one
+reward cannot hide opposition on another.
 
 Each step reports a macro-average over prompt groups, never a recentered pool
 of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 
-- `natural_per_reward_disagreement_rate` is the uniform fraction of samples
-  for which one named reward conflicts with the scalar decision. It identifies
-  the source of natural-rollout conflict and is the only per-reward metric.
-- `natural_conflict_mass` is the uniform sample mass with at least one
-  conflicting reward.
-- `effective_conflict_mass` is the corresponding SRC probability mass and is
-  emitted only for groups with saved `src_groups[].probabilities`.
+- `per_reward_conflict_score` is the prompt-group mean raw conflict score for
+  each active reward.
+- `reward_concordance_lower_bound` is the prompt-group mean of each sample's
+  weakest raw conflict score. It is the sample-wise reward-concordance lower
+  bound under the frozen uniform reference.
 
 The output directory also contains `metadata.json`,
-`per_reward_disagreement/<reward>.png` for every active reward combination,
-and `conflict_mass.png` comparing Uniform with Effective conflict mass.
+`per_reward_conflict_score/<reward>.png` for every active reward combination,
+and `reward_concordance_lower_bound.png` for the overall lower-bound curve.
 When multiple runs are configured, every figure overlays their `run_label`
-trajectories. A non-SRC run contributes only Uniform conflict mass; an SRC run
-contributes both Uniform and Effective conflict mass.
+trajectories. All runs use exactly the same raw-reward calculation.

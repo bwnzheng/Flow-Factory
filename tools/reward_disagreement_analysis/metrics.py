@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prompt-local conflict-mass metrics for multi-reward scalarization.
+"""Prompt-local raw sample-wise reward-concordance metrics.
 
-Every call operates on one frozen rollout group. Reward and scalar advantages
-are centered with the original group's uniform reward means. SRC probabilities,
-when saved for that group, only reweight the resulting sample-level conflict
-indicator; they never redefine the advantages or per-reward conflict source.
+Every call operates on one frozen rollout group. It uses only raw saved rewards
+and the historical scalarization weights, with the original uniform group mean
+as the reference. No SRC probability or reweighted statistic is used.
 """
 
 from __future__ import annotations
@@ -27,86 +26,65 @@ from typing import Any, Sequence
 import numpy as np
 
 
-def compute_reward_disagreement_metrics(
+def compute_reward_concordance_metrics(
     rewards: np.ndarray,
     reward_weights: np.ndarray,
-    sample_weights: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Compute natural and optional effective conflict mass for one prompt group.
+    """Compute raw reward conflict scores and their sample-wise lower bound.
 
     Args:
         rewards: Finite raw rewards shaped ``(group_size, n_rewards)``.
         reward_weights: Positive scalarization weights shaped ``(n_rewards,)``.
-        sample_weights: Optional nonnegative SRC probabilities shaped
-            ``(group_size,)``. They are normalized to a probability vector and
-            aggregate only the already-computed conflict indicator.
 
     Returns:
-        Group-level natural per-reward disagreement and overall conflict mass.
-        When ``sample_weights`` is supplied, also returns effective conflict
-        mass. Exact-zero advantages are non-conflicting because the definition
-        uses a strict negative product.
+        The mean raw conflict score for every reward and the mean of each
+        sample's weakest reward score. The latter is the sample-wise reward-
+        concordance lower bound under the frozen uniform group reference.
     """
     matrix = _validate_rewards(rewards)
     group_size, n_rewards = matrix.shape
     weights = _validate_reward_weights(reward_weights, n_rewards)
 
-    reward_advantages = matrix - matrix.mean(axis=0, keepdims=True)
-    scalar_advantages = (matrix @ weights) - (matrix @ weights).mean()
-    disagreement = reward_advantages * scalar_advantages[:, None] < 0.0
-    has_conflict = disagreement.any(axis=1)
+    centered_rewards = matrix - matrix.mean(axis=0, keepdims=True)
+    scalar_rewards = matrix @ weights
+    scalar_advantages = scalar_rewards - scalar_rewards.mean()
+    conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
 
-    result: dict[str, Any] = {
+    return {
         "group_size": group_size,
-        "natural_per_reward_disagreement_rate": disagreement.mean(axis=0),
-        "natural_conflict_mass": float(has_conflict.mean()),
+        "per_reward_conflict_score": conflict_scores.mean(axis=0),
+        "reward_concordance_lower_bound": float(conflict_scores.min(axis=1).mean()),
     }
-    if sample_weights is not None:
-        probabilities = _validate_probabilities(sample_weights, group_size)
-        result["effective_conflict_mass"] = float(probabilities @ has_conflict)
-    return result
 
 
 def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Macro-average prompt-local conflict metrics across groups.
+    """Macro-average prompt-local reward-concordance metrics across groups.
 
     Args:
         group_metrics: Metrics from prompt-local rollout groups at one step and
             reward combination.
 
     Returns:
-        One equally prompt-weighted summary. Effective conflict mass is
-        averaged only across groups that saved SRC probabilities.
+        An equally prompt-weighted summary without probability reweighting.
     """
     if not group_metrics:
         raise ValueError("Cannot aggregate an empty collection of prompt-group metrics.")
 
-    n_rewards = len(group_metrics[0]["natural_per_reward_disagreement_rate"])
+    n_rewards = len(group_metrics[0]["per_reward_conflict_score"])
     for metrics in group_metrics:
-        if len(metrics["natural_per_reward_disagreement_rate"]) != n_rewards:
+        if len(metrics["per_reward_conflict_score"]) != n_rewards:
             raise ValueError("All groups must have the same number of active rewards.")
 
-    result: dict[str, Any] = {
+    return {
         "n_groups": len(group_metrics),
         "mean_group_size": float(np.mean([metrics["group_size"] for metrics in group_metrics])),
-        "natural_per_reward_disagreement_rate": np.mean(
-            [metrics["natural_per_reward_disagreement_rate"] for metrics in group_metrics], axis=0
+        "per_reward_conflict_score": np.mean(
+            [metrics["per_reward_conflict_score"] for metrics in group_metrics], axis=0
         ),
-        "natural_conflict_mass": float(
-            np.mean([metrics["natural_conflict_mass"] for metrics in group_metrics])
+        "reward_concordance_lower_bound": float(
+            np.mean([metrics["reward_concordance_lower_bound"] for metrics in group_metrics])
         ),
     }
-    effective = [metrics for metrics in group_metrics if "effective_conflict_mass" in metrics]
-    if effective:
-        result.update(
-            {
-                "n_effective_groups": len(effective),
-                "effective_conflict_mass": float(
-                    np.mean([metrics["effective_conflict_mass"] for metrics in effective])
-                ),
-            }
-        )
-    return result
 
 
 def _validate_rewards(rewards: np.ndarray) -> np.ndarray:
@@ -129,17 +107,3 @@ def _validate_reward_weights(reward_weights: np.ndarray, n_rewards: int) -> np.n
             "reward_weights must be finite and strictly positive for every active reward."
         )
     return weights
-
-
-def _validate_probabilities(sample_weights: np.ndarray, group_size: int) -> np.ndarray:
-    probabilities = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
-    if probabilities.shape != (group_size,):
-        raise ValueError(
-            f"sample_weights must have shape ({group_size},), got {probabilities.shape}."
-        )
-    if not np.isfinite(probabilities).all() or np.any(probabilities < 0.0):
-        raise ValueError("sample_weights must be finite and nonnegative.")
-    total = float(probabilities.sum())
-    if total <= 0.0:
-        raise ValueError("sample_weights must have positive total mass.")
-    return probabilities / total

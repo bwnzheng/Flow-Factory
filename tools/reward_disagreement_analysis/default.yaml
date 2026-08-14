@@ -1,4 +1,4 @@
-# Reward-disagreement analysis reads only saves/<run>/logs/rewards/train_step_*.pkl.
+# Reward-concordance analysis reads only saves/<run>/logs/rewards/train_step_*.pkl.
 # It never loads reward models, rollout media, checkpoints, or training configs.
 
 save_dir: "saves"

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run offline reward-disagreement analysis from saved run logs.
+"""Run offline reward-concordance analysis from saved run logs.
 
 Usage::
 
@@ -35,11 +35,11 @@ import yaml
 
 from tools.reward_disagreement_analysis.metrics import (
     aggregate_group_metrics,
-    compute_reward_disagreement_metrics,
+    compute_reward_concordance_metrics,
 )
 from tools.reward_disagreement_analysis.plots import (
-    plot_conflict_mass_trajectories,
-    plot_per_reward_disagreement_trajectories,
+    plot_per_reward_conflict_score_trajectories,
+    plot_reward_concordance_lower_bound_trajectories,
 )
 from tools.reward_disagreement_analysis.reward_logs import (
     RewardGroup,
@@ -82,10 +82,10 @@ def main() -> None:
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    plot_per_reward_disagreement_trajectories(rows, output_dir)
-    plot_conflict_mass_trajectories(rows, output_dir)
+    plot_per_reward_conflict_score_trajectories(rows, output_dir)
+    plot_reward_concordance_lower_bound_trajectories(rows, output_dir)
     print(
-        "[Reward disagreement] "
+        "[Reward concordance] "
         f"runs={len(config.runs)} metric_rows={len(rows)} output={output_dir}"
     )
 
@@ -100,7 +100,6 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         step_groups = load_train_reward_groups(rewards_dir)
         saved_weight_context = load_saved_reward_weight_context(run_dir)
         groups_seen = 0
-        effective_groups = 0
         weight_sources: dict[str, str] = {}
 
         by_step_combination: dict[tuple[int, tuple[str, ...]], list[RewardGroup]] = {}
@@ -113,16 +112,14 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
             weights, weight_source = _weights_for_group(run, reward_names, saved_weight_context)
             weight_sources["__".join(reward_names)] = weight_source
             metrics = [
-                compute_reward_disagreement_metrics(
+                compute_reward_concordance_metrics(
                     group.rewards,
                     weights,
-                    sample_weights=group.probabilities,
                 )
                 for group in groups
             ]
             aggregate = aggregate_group_metrics(metrics)
             groups_seen += len(groups)
-            effective_groups += int(aggregate.get("n_effective_groups", 0))
             rows.extend(_metric_rows(run, step, reward_names, aggregate))
 
         run_metadata.append(
@@ -133,22 +130,19 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 "reward_weight_sources": weight_sources,
                 "n_steps": len(step_groups),
                 "n_groups": groups_seen,
-                "n_effective_groups": effective_groups,
             }
         )
 
     metadata = {
-        "metric_version": 2,
+        "metric_version": 3,
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
-        "effective_aggregation": "SRC_probability_mass_after_natural_decision",
         "metrics": {
-            "natural_per_reward_disagreement_rate": (
-                "uniform_fraction_with_reward_advantage_times_scalar_advantage_less_than_zero"
+            "per_reward_conflict_score": "mean_raw_weighted_reward_contribution",
+            "reward_concordance_lower_bound": (
+                "mean_over_samples_of_the_minimum_raw_reward_contribution"
             ),
-            "natural_conflict_mass": "uniform_mass_with_at_least_one_conflicting_reward",
-            "effective_conflict_mass": "SRC_probability_mass_with_at_least_one_conflicting_reward",
         },
         "runs": run_metadata,
     }
@@ -164,8 +158,8 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
 
     if "analysis" in raw:
         raise ValueError(
-            "analysis is no longer supported: conflict metrics use the exact strict-negative "
-            "definition without neutral thresholds. Remove the analysis mapping."
+            "analysis is no longer supported: raw reward-concordance metrics have no neutral "
+            "thresholds. Remove the analysis mapping."
         )
     output = raw.get("output", {})
     if not isinstance(output, dict):
@@ -306,31 +300,28 @@ def _metric_rows(
         "step": step,
         "reward_combination": "__".join(reward_names),
         "n_groups": metrics["n_groups"],
-        "n_effective_groups": metrics.get("n_effective_groups", 0),
     }
     rows: list[dict[str, Any]] = []
     for reward_name, value in zip(
         reward_names,
-        metrics["natural_per_reward_disagreement_rate"],
+        metrics["per_reward_conflict_score"],
     ):
         rows.append(
             {
                 **common,
                 "reward": reward_name,
-                "metric": "natural_per_reward_disagreement_rate",
+                "metric": "per_reward_conflict_score",
                 "value": float(value),
             }
         )
-    for metric_name in ("natural_conflict_mass", "effective_conflict_mass"):
-        if metric_name in metrics:
-            rows.append(
-                {
-                    **common,
-                    "reward": "",
-                    "metric": metric_name,
-                    "value": float(metrics[metric_name]),
-                }
-            )
+    rows.append(
+        {
+            **common,
+            "reward": "",
+            "metric": "reward_concordance_lower_bound",
+            "value": float(metrics["reward_concordance_lower_bound"]),
+        }
+    )
     return rows
 
 
@@ -341,7 +332,6 @@ def _write_rows(rows: list[dict[str, Any]], path: Path) -> None:
         "step",
         "reward_combination",
         "n_groups",
-        "n_effective_groups",
         "reward",
         "metric",
         "value",

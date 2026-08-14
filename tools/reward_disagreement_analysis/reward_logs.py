@@ -42,7 +42,6 @@ class RewardGroup:
     prompt: str
     reward_names: tuple[str, ...]
     rewards: np.ndarray
-    probabilities: np.ndarray | None
 
 
 @dataclass(frozen=True)
@@ -122,8 +121,6 @@ def _parse_train_payload(payload: Any, path: Path) -> list[RewardGroup]:
     prompts = [str(prompt) for prompt in prompts_raw]
     n_groups = len(prompts)
     reward_names = _reward_names(payload, n_groups, path)
-    src_metadata = _src_metadata_by_group(payload.get("src_groups"), n_groups, path)
-
     result: list[RewardGroup] = []
     for group_id, prompt in enumerate(prompts):
         arrays: dict[str, np.ndarray] = {}
@@ -158,18 +155,10 @@ def _parse_train_payload(payload: Any, path: Path) -> list[RewardGroup]:
             )
         if len(available) < 2:
             raise ValueError(
-                f"Reward-disagreement analysis requires at least two finite rewards; "
+                f"Reward-concordance analysis requires at least two finite rewards; "
                 f"step {step}, group {group_id} has {available} ({path})."
             )
 
-        metadata = src_metadata.get(group_id)
-        probabilities = None if metadata is None else metadata["probabilities"]
-        n_samples = next(iter(sample_counts))
-        if probabilities is not None and probabilities.shape != (n_samples,):
-            raise ValueError(
-                f"SRC probabilities at step {step}, group {group_id} have shape "
-                f"{probabilities.shape}, expected ({n_samples},) ({path})."
-            )
         result.append(
             RewardGroup(
                 step=step,
@@ -177,7 +166,6 @@ def _parse_train_payload(payload: Any, path: Path) -> list[RewardGroup]:
                 prompt=prompt,
                 reward_names=tuple(available),
                 rewards=np.column_stack([arrays[name] for name in available]),
-                probabilities=probabilities,
             )
         )
     return result
@@ -197,40 +185,6 @@ def _reward_names(payload: dict[str, Any], n_groups: int, path: Path) -> list[st
     if len(names) < 2:
         raise ValueError(f"Expected at least two reward fields in {path}, got {names}.")
     return sorted(names)
-
-
-def _src_metadata_by_group(
-    source: Any,
-    n_groups: int,
-    path: Path,
-) -> dict[int, dict[str, Any]]:
-    if source is None:
-        return {}
-    if not isinstance(source, (list, tuple)) or len(source) != n_groups:
-        raise ValueError(f"'src_groups' must be a sequence of {n_groups} entries in {path}.")
-
-    result: dict[int, dict[str, Any]] = {}
-    for entry in source:
-        if not isinstance(entry, dict) or "group_id" not in entry or "probabilities" not in entry:
-            raise ValueError(
-                f"Each src_groups entry must include group_id and probabilities ({path})."
-            )
-        group_id = int(entry["group_id"])
-        if group_id in result or group_id < 0 or group_id >= n_groups:
-            raise ValueError(f"Invalid or duplicate SRC group_id {group_id} in {path}.")
-        probabilities = np.asarray(entry["probabilities"], dtype=np.float64).reshape(-1)
-        if not np.isfinite(probabilities).all() or np.any(probabilities < 0.0):
-            raise ValueError(f"Invalid SRC probabilities for group {group_id} in {path}.")
-        total = float(probabilities.sum())
-        if not np.isclose(total, 1.0, rtol=1e-5, atol=1e-6):
-            raise ValueError(
-                f"SRC probabilities for group {group_id} sum to {total:.9g}, expected 1 ({path})."
-            )
-
-        result[group_id] = {"probabilities": probabilities / total}
-    if set(result) != set(range(n_groups)):
-        raise ValueError(f"SRC group IDs must cover 0..{n_groups - 1} in {path}.")
-    return result
 
 
 def _parse_saved_reward_weight_context(
