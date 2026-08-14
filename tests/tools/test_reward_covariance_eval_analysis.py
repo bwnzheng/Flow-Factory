@@ -32,6 +32,7 @@ from tools.reward_covariance_eval_analysis.analyze import (
     _generate_images,
     _write_analysis_artifacts,
     load_config,
+    load_prompt_records,
 )
 from tools.reward_covariance_eval_analysis.reward_scoring import _partition, _worker_device
 
@@ -43,6 +44,16 @@ def test_default_config_is_weight_free_and_uses_fresh_rollouts() -> None:
     assert config.model.num_processes == 1
     assert config.model.device is None
     assert [source.name for source in config.sources] == ["pickscore", "ocr"]
+    assert [source.max_prompts for source in config.sources] == [100, 100]
+
+
+def test_load_prompt_records_respects_source_limit(tmp_path: Path) -> None:
+    prompts_path = tmp_path / "prompts.txt"
+    prompts_path.write_text("zero\none\ntwo\n", encoding="utf-8")
+
+    records = load_prompt_records(prompts_path, max_prompts=2)
+
+    assert [record.prompt for record in records] == ["zero", "one"]
 
 
 def test_multi_process_config_rejects_indexed_device(tmp_path: Path) -> None:

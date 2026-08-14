@@ -16,6 +16,11 @@ Each prompt and all of its repeated samples stay on one reward worker.
 Reward workers use spawned OS processes so CUDA/NPU runtime state is not
 inherited through `fork`.
 
+Each source has an independent `max_prompts` limit. The shipped configs use
+`max_prompts: 100`; set it to `0` only when the entire prompt file should be
+evaluated. Prompts are truncated in file order before inference, so generation
+and every reward model process the same bounded prompt set.
+
 The run is resumable. Existing generated images are skipped by
 `tools.model_inference`; each reward has a separate JSONL cache. The output for
 each `(run, source)` contains:

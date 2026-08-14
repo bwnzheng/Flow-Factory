@@ -26,7 +26,7 @@ evaluation:
 sources:
   - name: "pickscore"
     prompts_file: "dataset/pickscore/test.txt"
-    max_prompts: 0  # 0 evaluates the entire set.
+    max_prompts: 100  # Maximum prompts loaded from this source; 0 evaluates all prompts.
     rewards:
       - name: "pick_score"
         reward_model: "PickScore"
@@ -35,7 +35,7 @@ sources:
 
   - name: "ocr"
     prompts_file: "dataset/ocr/test.txt"
-    max_prompts: 0
+    max_prompts: 100
     rewards:
       - name: "pick_score"
         reward_model: "PickScore"
@@ -47,7 +47,7 @@ sources:
   # - name: "geneval"
   #   prompts_file: "dataset/geneval/test.jsonl"
   #   prompt_key: "prompt"
-  #   max_prompts: 0
+  #   max_prompts: 100
   #   rewards:
   #     - name: "pick_score"
   #       reward_model: "PickScore"
