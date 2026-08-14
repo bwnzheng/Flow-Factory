@@ -52,6 +52,14 @@ python -m tools.reward_disagreement_analysis.analyze \
   -c tools/reward_disagreement_analysis/default.yaml
 ```
 
+To compare the saved SRC-NFT run with its non-SRC NFT counterpart in the same
+figures, run:
+
+```bash
+python -m tools.reward_disagreement_analysis.analyze \
+  -c tools/reward_disagreement_analysis/nft_src_vs_uniform.yaml
+```
+
 ## Metrics
 
 For each prompt-local frozen reward matrix `r` and positive scalarization
@@ -82,3 +90,6 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 The output directory also contains `metadata.json`,
 `per_reward_disagreement/<reward>.png` for every active reward combination,
 and `conflict_mass.png` comparing Uniform with Effective conflict mass.
+When multiple runs are configured, every figure overlays their `run_label`
+trajectories. A non-SRC run contributes only Uniform conflict mass; an SRC run
+contributes both Uniform and Effective conflict mass.

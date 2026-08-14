@@ -1,0 +1,13 @@
+# Compare the SRC-NFT run with its non-SRC NFT counterpart. Historical reward
+# weights for both runs are recovered from each run's logs/media.jsonl context.
+
+save_dir: "saves"
+
+runs:
+  - name: "sd3-5_lora_nft_20260808_215750"
+    label: "SRC-NFT"
+  - name: "sd3-5_lora_nft_20260807_202455"
+    label: "NFT (uniform)"
+
+output:
+  dir: "analysis_output/reward_disagreement_analysis/nft_src_vs_uniform"
