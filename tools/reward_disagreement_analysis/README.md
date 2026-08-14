@@ -40,6 +40,10 @@ runs:
   - name: "sd3-5_lora_nft_20260808_215750"
     label: "SRC-NFT"
 
+plot:
+  # Positive odd centered moving-average window; 1 disables smoothing.
+  smoothing_window: 5
+
 output:
   dir: "analysis_output/reward_disagreement_analysis"
 ```
@@ -90,3 +94,6 @@ The output directory also contains `metadata.json`,
 and `reward_concordance_lower_bound.png` for the overall lower-bound curve.
 When multiple runs are configured, every figure overlays their `run_label`
 trajectories. All runs use exactly the same raw-reward calculation.
+Every plotted curve is smoothed independently with the centered moving-average
+window in `plot.smoothing_window`. At the first and last few recorded steps,
+the average uses the available in-range points; use `1` to plot raw values.

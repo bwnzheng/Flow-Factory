@@ -34,6 +34,7 @@ from tools.reward_disagreement_analysis.metrics import (
     compute_reward_concordance_metrics,
 )
 from tools.reward_disagreement_analysis.plots import (
+    _smoothed_series,
     plot_per_reward_conflict_score_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
 )
@@ -181,6 +182,31 @@ def test_analysis_rejects_removed_neutral_threshold_configuration(tmp_path: Path
 
     with pytest.raises(ValueError, match="analysis is no longer supported"):
         _parse_config(config_path)
+
+
+def test_plot_smoothing_window_is_configurable_and_requires_an_odd_integer(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        "runs:\n  - name: run\nplot:\n  smoothing_window: 3\n",
+        encoding="utf-8",
+    )
+    assert _parse_config(config_path).smoothing_window == 3
+
+    config_path.write_text(
+        "runs:\n  - name: run\nplot:\n  smoothing_window: 4\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="positive odd integer"):
+        _parse_config(config_path)
+
+
+def test_centered_smoothing_uses_available_edge_points() -> None:
+    rows = [{"step": step, "value": value} for step, value in enumerate((0.0, 3.0, 6.0, 9.0, 12.0))]
+
+    steps, values = _smoothed_series(rows, smoothing_window=3)
+
+    np.testing.assert_array_equal(steps, np.arange(5))
+    np.testing.assert_allclose(values, [1.5, 3.0, 6.0, 9.0, 10.5])
 
 
 def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: Path) -> None:

@@ -64,6 +64,7 @@ class AnalysisConfig:
 
     save_dir: str = "saves"
     runs: list[RunSpec] = field(default_factory=list)
+    smoothing_window: int = 5
     output_dir: str = "analysis_output/reward_disagreement_analysis"
 
 
@@ -82,8 +83,16 @@ def main() -> None:
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    plot_per_reward_conflict_score_trajectories(rows, output_dir)
-    plot_reward_concordance_lower_bound_trajectories(rows, output_dir)
+    plot_per_reward_conflict_score_trajectories(
+        rows,
+        output_dir,
+        smoothing_window=config.smoothing_window,
+    )
+    plot_reward_concordance_lower_bound_trajectories(
+        rows,
+        output_dir,
+        smoothing_window=config.smoothing_window,
+    )
     print(
         "[Reward concordance] "
         f"runs={len(config.runs)} metric_rows={len(rows)} output={output_dir}"
@@ -138,6 +147,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
+        "plot_smoothing_window": config.smoothing_window,
         "metrics": {
             "per_reward_conflict_score": "mean_raw_weighted_reward_contribution",
             "reward_concordance_lower_bound": (
@@ -164,6 +174,9 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
     output = raw.get("output", {})
     if not isinstance(output, dict):
         raise ValueError("output must be a mapping when present.")
+    plot = raw.get("plot", {})
+    if not isinstance(plot, dict):
+        raise ValueError("plot must be a mapping when present.")
     global_weights = _parse_weight_mapping(raw.get("reward_weights", {}), "reward_weights")
 
     runs_raw = raw.get("runs", [])
@@ -191,6 +204,10 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
     return AnalysisConfig(
         save_dir=str(raw.get("save_dir", "saves")),
         runs=runs,
+        smoothing_window=_parse_positive_odd_int(
+            plot.get("smoothing_window", 5),
+            "plot.smoothing_window",
+        ),
         output_dir=str(output.get("dir", "analysis_output/reward_disagreement_analysis")),
     )
 
@@ -224,6 +241,18 @@ def _parse_positive_float(value: Any, field_name: str) -> float:
     number = float(value)
     if not np.isfinite(number) or number <= 0.0:
         raise ValueError(f"{field_name} must be finite and strictly positive, got {value!r}.")
+    return number
+
+
+def _parse_positive_odd_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive odd integer, got {value!r}.")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be a positive odd integer, got {value!r}.") from error
+    if number != value or number < 1 or number % 2 == 0:
+        raise ValueError(f"{field_name} must be a positive odd integer, got {value!r}.")
     return number
 
 

@@ -28,13 +28,15 @@ import numpy as np
 
 
 def plot_per_reward_conflict_score_trajectories(
-    rows: Iterable[dict[str, Any]], output_dir: str | Path
+    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
 ) -> None:
     """Write one raw conflict-score trajectory figure for each reward.
 
     Args:
         rows: Tidy metric rows produced by the offline analysis.
         output_dir: Directory that receives combination-specific figures.
+        smoothing_window: Positive odd number of adjacent recorded steps used
+            for centered moving-average smoothing. ``1`` disables smoothing.
     """
     by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -47,7 +49,7 @@ def plot_per_reward_conflict_score_trajectories(
     for (combination, reward), reward_rows in by_combination_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(reward_rows).items()):
-            steps, values = _series(line_rows)
+            steps, values = _smoothed_series(line_rows, smoothing_window)
             axis.plot(steps, values, marker="o", markersize=3, label=label)
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"{reward} conflict score: {combination.replace('__', ' + ')}")
@@ -68,13 +70,15 @@ def plot_per_reward_conflict_score_trajectories(
 
 
 def plot_reward_concordance_lower_bound_trajectories(
-    rows: Iterable[dict[str, Any]], output_dir: str | Path
+    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
 ) -> None:
     """Write one sample-wise reward-concordance lower-bound figure per reward set.
 
     Args:
         rows: Tidy metric rows produced by the offline analysis.
         output_dir: Directory that receives combination-specific figures.
+        smoothing_window: Positive odd number of adjacent recorded steps used
+            for centered moving-average smoothing. ``1`` disables smoothing.
     """
     by_combination: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -84,7 +88,7 @@ def plot_reward_concordance_lower_bound_trajectories(
     for combination, combination_rows in by_combination.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(combination_rows).items()):
-            steps, values = _series(line_rows)
+            steps, values = _smoothed_series(line_rows, smoothing_window)
             axis.plot(steps, values, marker="o", markersize=3, label=label)
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"Reward-concordance lower bound: {combination.replace('__', ' + ')}")
@@ -114,6 +118,24 @@ def _series(rows: Iterable[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
         np.asarray([int(row["step"]) for row in ordered]),
         np.asarray([float(row["value"]) for row in ordered]),
     )
+
+
+def _smoothed_series(
+    rows: Iterable[dict[str, Any]], smoothing_window: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one sorted trajectory with centered moving-average smoothing."""
+    if smoothing_window < 1 or smoothing_window % 2 == 0:
+        raise ValueError("smoothing_window must be a positive odd integer.")
+    steps, values = _series(rows)
+    if smoothing_window == 1 or values.size < 2:
+        return steps, values
+    radius = smoothing_window // 2
+    smoothed = np.empty_like(values)
+    for index in range(values.size):
+        start = max(0, index - radius)
+        end = min(values.size, index + radius + 1)
+        smoothed[index] = values[start:end].mean()
+    return steps, smoothed
 
 
 def _filename_component(value: str) -> str:

@@ -8,5 +8,9 @@ runs:
   - name: "sd3-5_lora_nft_20260807_202455"
     label: "NFT (uniform)"
 
+plot:
+  # Positive odd centered moving-average window; 1 disables smoothing.
+  smoothing_window: 5
+
 output:
   dir: "analysis_output/reward_disagreement_analysis/nft_20260807_202455"
