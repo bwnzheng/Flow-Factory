@@ -96,4 +96,6 @@ When multiple runs are configured, every figure overlays their `run_label`
 trajectories. All runs use exactly the same raw-reward calculation.
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
-the average uses the available in-range points; use `1` to plot raw values.
+the average uses the available in-range points. The original unsmoothed curve
+is retained as a same-color transparent background trace; use `1` when the
+foreground should equal the raw values.

@@ -49,8 +49,25 @@ def plot_per_reward_conflict_score_trajectories(
     for (combination, reward), reward_rows in by_combination_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+            raw_steps, raw_values = _series(line_rows)
+            raw_line = axis.plot(
+                raw_steps,
+                raw_values,
+                alpha=0.22,
+                linewidth=1.0,
+                label="_nolegend_",
+                zorder=1,
+            )[0]
             steps, values = _smoothed_series(line_rows, smoothing_window)
-            axis.plot(steps, values, marker="o", markersize=3, label=label)
+            axis.plot(
+                steps,
+                values,
+                color=raw_line.get_color(),
+                marker="o",
+                markersize=3,
+                label=label,
+                zorder=2,
+            )
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"{reward} conflict score: {combination.replace('__', ' + ')}")
         axis.set_xlabel("Training step")
@@ -88,8 +105,25 @@ def plot_reward_concordance_lower_bound_trajectories(
     for combination, combination_rows in by_combination.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(combination_rows).items()):
+            raw_steps, raw_values = _series(line_rows)
+            raw_line = axis.plot(
+                raw_steps,
+                raw_values,
+                alpha=0.22,
+                linewidth=1.0,
+                label="_nolegend_",
+                zorder=1,
+            )[0]
             steps, values = _smoothed_series(line_rows, smoothing_window)
-            axis.plot(steps, values, marker="o", markersize=3, label=label)
+            axis.plot(
+                steps,
+                values,
+                color=raw_line.get_color(),
+                marker="o",
+                markersize=3,
+                label=label,
+                zorder=2,
+            )
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"Reward-concordance lower bound: {combination.replace('__', ' + ')}")
         axis.set_xlabel("Training step")

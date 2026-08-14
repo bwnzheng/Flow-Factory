@@ -12,15 +12,15 @@ reward_weights:
   # ocr_reward: 1.0
 
 runs:
-  # - name: "sd3-5_lora_nft_20260808_215750"
-  #   label: "SRC-NFT"
-  #   # Per-run weights augment the global fallback mapping above.
-  #   # reward_weights:
-  #   #   pick_score: 1.0
+  - name: "sd3-5_lora_nft_20260808_215750"
+    label: "SRC-NFT"
+    # Per-run weights augment the global fallback mapping above.
+    # reward_weights:
+    #   pick_score: 1.0
 
 plot:
   # Positive odd centered moving-average window; 1 disables smoothing.
   smoothing_window: 5
 
 output:
-  dir: "analysis_output/reward_disagreement_analysis"
+  dir: "analysis_output/reward_disagreement_analysis/nft_20260808_215750"
