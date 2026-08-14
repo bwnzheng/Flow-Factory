@@ -42,7 +42,7 @@ def plot_disagreement_trajectories(rows: Iterable[dict[str, Any]], output_dir: s
         for (label, reward, metric), line_rows in sorted(grouped.items()):
             steps, values = _series(line_rows)
             linestyle = "-" if metric == "natural_disagreement_rate" else "--"
-            metric_label = "natural" if metric == "natural_disagreement_rate" else "effective"
+            metric_label = "uniform" if metric == "natural_disagreement_rate" else "effective"
             axis.plot(
                 steps,
                 values,
@@ -84,11 +84,11 @@ def plot_group_metric_trajectories(rows: Iterable[dict[str, Any]], output_dir: s
             by_combination[str(row["reward_combination"])].append(row)
 
     labels = {
-        "natural_fully_concordant_ratio": "Natural FCR",
-        "natural_fully_concordant_positive_ratio": "Natural positive FCR",
-        "natural_fully_concordant_negative_ratio": "Natural negative FCR",
-        "natural_fully_valid_ratio": "Natural fully-valid ratio",
-        "natural_mean_disagreement_count": "Natural mean disagreement count",
+        "natural_fully_concordant_ratio": "Uniform FCR",
+        "natural_fully_concordant_positive_ratio": "Uniform positive FCR",
+        "natural_fully_concordant_negative_ratio": "Uniform negative FCR",
+        "natural_fully_valid_ratio": "Uniform fully-valid ratio",
+        "natural_mean_disagreement_count": "Uniform mean disagreement count",
         "effective_fully_concordant_ratio": "Effective FCR",
         "effective_fully_concordant_positive_ratio": "Effective positive FCR",
         "effective_fully_concordant_negative_ratio": "Effective negative FCR",
