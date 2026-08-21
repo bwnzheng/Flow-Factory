@@ -34,9 +34,11 @@ class SRCReweightResult:
     normalized_scores: np.ndarray
     probabilities: np.ndarray
     loss_multipliers: np.ndarray
+    uniform_advantages: np.ndarray
     weighted_advantages: np.ndarray
     effective_advantages: np.ndarray
     scalar_variances: np.ndarray
+    uniform_means: np.ndarray
     weighted_means: np.ndarray
     weighted_variances: np.ndarray
     effective_sample_sizes: np.ndarray
@@ -77,8 +79,10 @@ def compute_src_reweight(
         SRC diagnostics, probabilities, and effective advantages aligned with samples.
 
     Note:
-        Saturated SRC uses the frozen original group's scalar-advantage RMS.
-        Scalar magnitudes still determine the downstream weighted advantages.
+        SRC probabilities are used as an outer sample-mass multiplier. The
+        optimization advantage remains centered and scaled with the original
+        uniform prompt-group statistics; the weighted-centered quantities are
+        retained as diagnostics for the SRC distribution itself.
     """
     rewards = np.asarray(reward_matrix, dtype=np.float64)
     weights = np.asarray(weight_matrix, dtype=np.float64)
@@ -119,9 +123,11 @@ def compute_src_reweight(
     normalized_scores = np.zeros(num_samples, dtype=np.float64)
     probabilities = np.zeros(num_samples, dtype=np.float64)
     loss_multipliers = np.ones(num_samples, dtype=np.float64)
+    uniform_advantages = np.zeros(num_samples, dtype=np.float64)
     weighted_advantages = np.zeros(num_samples, dtype=np.float64)
     effective_advantages = np.zeros(num_samples, dtype=np.float64)
     scalar_variances = np.zeros(num_samples, dtype=np.float64)
+    uniform_means = np.zeros(num_samples, dtype=np.float64)
     weighted_means = np.zeros(num_samples, dtype=np.float64)
     weighted_variances = np.zeros(num_samples, dtype=np.float64)
     effective_sample_sizes = np.zeros(num_samples, dtype=np.float64)
@@ -188,6 +194,8 @@ def compute_src_reweight(
         raw_scores[sample_indices] = group_raw_scores
         saturated_scores[sample_indices] = group_saturated_scores
         scalar_variances[sample_indices] = scalar_variance
+        uniform_mean = float(scalar_rewards.mean())
+        uniform_means[sample_indices] = uniform_mean
 
         is_degenerate = scalar_variance <= degeneracy_threshold
         if is_degenerate:
@@ -216,7 +224,9 @@ def compute_src_reweight(
             * weighted_scalar_directions[None, :]
         )
         weighted_variance = float(group_probabilities @ np.square(centered_weighted))
-        group_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
+        uniform_centered = scalar_rewards - uniform_mean
+        group_uniform_advantages = uniform_centered / np.sqrt(scalar_variance + epsilon)
+        group_weighted_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
         group_multipliers = group_size * group_probabilities
 
         normalized_scores[sample_indices] = group_normalized_scores
@@ -225,8 +235,9 @@ def compute_src_reweight(
         )
         probabilities[sample_indices] = group_probabilities
         loss_multipliers[sample_indices] = group_multipliers
-        weighted_advantages[sample_indices] = group_advantages
-        effective_advantages[sample_indices] = group_multipliers * group_advantages
+        uniform_advantages[sample_indices] = group_uniform_advantages
+        weighted_advantages[sample_indices] = group_weighted_advantages
+        effective_advantages[sample_indices] = group_multipliers * group_uniform_advantages
         weighted_means[sample_indices] = weighted_mean
         weighted_variances[sample_indices] = weighted_variance
         effective_sample_sizes[sample_indices] = 1.0 / float(
@@ -245,9 +256,11 @@ def compute_src_reweight(
         normalized_scores=normalized_scores,
         probabilities=probabilities,
         loss_multipliers=loss_multipliers,
+        uniform_advantages=uniform_advantages,
         weighted_advantages=weighted_advantages,
         effective_advantages=effective_advantages,
         scalar_variances=scalar_variances,
+        uniform_means=uniform_means,
         weighted_means=weighted_means,
         weighted_variances=weighted_variances,
         effective_sample_sizes=effective_sample_sizes,

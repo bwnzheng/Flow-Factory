@@ -182,6 +182,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: A bounded per-sample contrast factor should remain continuous at zero, use a scale frozen from the same reference group, and approach a sign-only limit only when the contrast dominates that scale.
 - **Related Constraint**: N/A
 
+### SRC sample mass changed the optimization baseline
+- **Date**: 2026-08-21
+- **Symptom**: SRC's probability-weighted reward mean and variance changed each sample's advantage, so a sample could cross from a positive to a negative supervision signal even though SRC was intended to reweight sample importance only.
+- **Root Cause**: The implementation used the SRC probability distribution both to define the reward baseline and to multiply the optimization objective, conflating reweighted sample mass with the ordinary reward-relative supervision signal.
+- **Fix**: `advantage/sample_weighting.py` now keeps uniform prompt-group means, variances, and advantages for optimization; `AdvantageProcessor` applies `K * probability` exactly once to linear advantages or the complete NFT per-sample loss. Weighted-centered advantages remain available as SRC diagnostics, and guidance documents now state the separation explicitly.
+- **Lesson**: A sample-weighting method must distinguish the distribution used to rank or weight samples from the baseline used to define their reward direction. If the latter is intentionally changed, expose it as a separate objective mode rather than silently changing per-sample supervision.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

@@ -780,13 +780,12 @@ class AdvantageProcessor:
             if self.sample_weighting_consumer == "nft":
                 if self.global_std:
                     _, baseline_std = self._global_mean_std(aggregated_rewards)
-                    advantages = (aggregated_rewards - src_result.weighted_means) / baseline_std
+                    advantages = (aggregated_rewards - src_result.uniform_means) / baseline_std
                 else:
-                    weighted_prompt_std = np.maximum(np.sqrt(src_result.weighted_variances), 1e-6)
-                    advantages = (
-                        aggregated_rewards - src_result.weighted_means
-                    ) / weighted_prompt_std
+                    advantages = src_result.uniform_advantages
             else:
+                # SRC linear consumers retain prompt-local normalization; SRC only
+                # changes the outer sample mass and does not alter the baseline.
                 advantages = src_result.effective_advantages
         elif self.global_std:
             # Group-normalise (vectorized via bincount). When *norm_mask* is None
@@ -1070,9 +1069,11 @@ class AdvantageProcessor:
             "normalized_score": result.normalized_scores,
             "probability": result.probabilities,
             "loss_multiplier": result.loss_multipliers,
+            "uniform_advantage": result.uniform_advantages,
             "weighted_advantage": result.weighted_advantages,
             "effective_advantage": result.effective_advantages,
             "scalar_variance": result.scalar_variances,
+            "uniform_mean": result.uniform_means,
             "weighted_mean": result.weighted_means,
             "weighted_variance": result.weighted_variances,
             "ess": result.effective_sample_sizes,
@@ -1115,6 +1116,7 @@ class AdvantageProcessor:
             ("normalized_score", "src_normalized_score"),
             ("probability", "src_probability"),
             ("loss_multiplier", "sample_weight"),
+            ("uniform_advantage", "src_uniform_advantage"),
             ("weighted_advantage", "src_weighted_advantage"),
         ):
             for stat_name, value in stats(diagnostics[diagnostic_key]).items():
@@ -1163,13 +1165,16 @@ class AdvantageProcessor:
         )
 
         probability_sum_errors = []
+        uniform_centering_errors = []
         weighted_centering_errors = []
         src_groups = []
         for group_id in unique_groups:
             indices = np.flatnonzero(group_indices == group_id)
             probability = diagnostics["probability"][indices]
+            uniform_advantage = diagnostics["uniform_advantage"][indices]
             weighted_advantage = diagnostics["weighted_advantage"][indices]
             probability_sum_errors.append(abs(float(probability.sum()) - 1.0))
+            uniform_centering_errors.append(abs(float(uniform_advantage.mean())))
             weighted_centering_errors.append(abs(float(probability @ weighted_advantage)))
             first_index = indices[0]
             src_groups.append(
@@ -1181,6 +1186,7 @@ class AdvantageProcessor:
                     "normalized_scores": diagnostics["normalized_score"][indices].tolist(),
                     "probabilities": probability.tolist(),
                     "loss_multipliers": diagnostics["loss_multiplier"][indices].tolist(),
+                    "uniform_advantages": uniform_advantage.tolist(),
                     "weighted_advantages": weighted_advantage.tolist(),
                     "contributions": {
                         reward_key: diagnostics[f"contribution::{reward_key}"][indices].tolist()
@@ -1210,6 +1216,7 @@ class AdvantageProcessor:
                         for reward_key in reward_keys
                     },
                     "scalar_variance": float(diagnostics["scalar_variance"][first_index]),
+                    "uniform_mean": float(diagnostics["uniform_mean"][first_index]),
                     "weighted_variance": float(diagnostics["weighted_variance"][first_index]),
                     "ess": float(diagnostics["ess"][first_index]),
                     "lower_bound_uniform": float(diagnostics["lower_bound_uniform"][first_index]),
@@ -1221,6 +1228,9 @@ class AdvantageProcessor:
             )
 
         log_data["train/src_probability_sum_error_max"] = max(probability_sum_errors, default=0.0)
+        log_data["train/src_uniform_centering_error_max"] = max(
+            uniform_centering_errors, default=0.0
+        )
         log_data["train/src_weighted_centering_error_max"] = max(
             weighted_centering_errors, default=0.0
         )

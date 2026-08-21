@@ -60,13 +60,17 @@ def test_src_probabilities_and_weighted_advantages_satisfy_group_invariants():
     assert result.probabilities.min() >= (1.0 - 0.6) / 4.0 - 1e-12
     assert result.effective_sample_sizes[0] <= 4.0
     assert result.effective_sample_sizes[0] > 1.0
+    assert result.uniform_advantages.mean() == pytest.approx(0.0, abs=1e-8)
+    assert result.uniform_advantages @ result.uniform_advantages / 4.0 == pytest.approx(
+        1.0, rel=1e-6
+    )
     assert result.probabilities @ result.weighted_advantages == pytest.approx(0.0, abs=1e-8)
     assert result.probabilities @ np.square(result.weighted_advantages) == pytest.approx(
         1.0, rel=1e-6
     )
     np.testing.assert_allclose(
         result.effective_advantages,
-        result.loss_multipliers * result.weighted_advantages,
+        result.loss_multipliers * result.uniform_advantages,
     )
     assert result.lower_bound_reweighted[0] >= result.lower_bound_uniform[0]
 
@@ -362,6 +366,10 @@ def test_advantage_processor_stores_src_weights_and_logs_without_rank_reduce(sam
         },
         aggregation_func="sum",
     )
+    expected_src = _compute(np.array([[0.0, 0.4, 1.0], [0.0, 0.8, 0.9]]))
+    np.testing.assert_allclose(
+        advantages.cpu().numpy(), expected_src.effective_advantages, rtol=1e-6, atol=1e-6
+    )
     metrics = processor.pop_advantage_metrics()
 
     assert advantages.dtype == torch.float32
@@ -375,6 +383,7 @@ def test_advantage_processor_stores_src_weights_and_logs_without_rank_reduce(sam
     assert "train/src_saturated_score_mean" in metrics
     assert "train/src_saturated_score_min" in metrics
     assert "train/src_saturated_score_max" in metrics
+    assert "train/src_uniform_advantage_mean" in metrics
     assert len(metrics["train/src_groups"]) == 1
     assert "raw_scores" in metrics["train/src_groups"][0]
     assert "saturated_scores" in metrics["train/src_groups"][0]
@@ -434,7 +443,7 @@ def test_nft_consumer_keeps_outer_weight_separate_and_uses_baseline_global_std()
     )
     src_result = _compute(rewards)
     scalar_rewards = rewards.sum(axis=0)
-    expected = (scalar_rewards - src_result.weighted_means) / scalar_rewards.std()
+    expected = (scalar_rewards - scalar_rewards.mean()) / scalar_rewards.std()
     metrics = processor.pop_advantage_metrics()
 
     np.testing.assert_allclose(advantages.cpu().numpy(), expected, rtol=1e-6)
