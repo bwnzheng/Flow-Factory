@@ -761,10 +761,10 @@ class AdvantageProcessor:
 
         src_result: Optional[SRCReweightResult] = None
         if self.sample_weighting == "src":
-            if crossover_active:
+            if self._pareto_enabled:
                 raise ValueError(
-                    "sample_weighting='src' cannot be combined with crossover samples because "
-                    "SRC-Reweight is defined on the original on-policy rollout support."
+                    "sample_weighting='src' cannot be combined with Pareto-filtered samples; "
+                    "SRC-Reweight is supported for the final GA survivor population instead."
                 )
             src_result = compute_src_reweight(
                 reward_matrix=stack,

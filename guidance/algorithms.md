@@ -125,8 +125,10 @@ eval:
 ### SRC-Reweight sample weighting
 
 `sample_weighting: src` enables prompt-local Sample-wise Reward Concordance
-weighting without adding a new trainer or changing rollout support. For each
-original on-policy group, the shared `AdvantageProcessor` freezes the unweighted
+weighting without adding a new trainer. For ordinary trainers, the shared
+`AdvantageProcessor` applies it to the rollout group; for GA trainers, it applies
+to the fixed `group_size` survivor population returned by genetic evolution.
+In both cases, the processor freezes the unweighted
 reward means and scalar advantages `A_i = R_i - mean_R`. The default
 `src_score_type: saturated` computes the frozen-group RMS scale
 `sigma_A = sqrt(mean_i(A_i^2))`, then uses
@@ -155,7 +157,7 @@ branch mixture. Independent KL regularizers remain uniformly aggregated.
 
 ```yaml
 train:
-  trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm (on-policy only)
+  trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm, ga_grpo_guard, ga_nft
   advantage_aggregation: sum
   sample_weighting: src  # Options: none, src
   src_score_type: saturated  # Options: raw, saturated
@@ -171,9 +173,10 @@ uniform prompt baseline and apply SRC only as an outer sample multiplier.
 NFT preserves its declared normalizer contract while retaining the ordinary
 uniform prompt mean: `global_std: true` uses the baseline unweighted global
 rollout standard deviation; `global_std: false` uses the uniform prompt-group
-standard deviation. SRC cannot be combined with off-policy AWM, crossover,
-DPO, DGPO, or CRD. NFT may use either its current policy or EMA sampling policy
-as the rollout/reference distribution.
+standard deviation. SRC cannot be combined with off-policy AWM, DPO, DGPO, or
+CRD. GA trainers use the final evolved survivor population as the SRC support;
+`ga_nft` retains NFT's outer-loss multiplier contract and may use either its
+current policy or EMA sampling policy as the rollout/reference distribution.
 
 Logging includes probability and `sample_weight` distributions, ESS and
 ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower

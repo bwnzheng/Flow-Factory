@@ -278,6 +278,14 @@ def test_src_config_accepts_shared_linear_advantage_trainer():
     assert args.training_args.src_score_type == "saturated"
 
 
+@pytest.mark.parametrize("trainer_type", ["ga_grpo_guard", "ga_nft"])
+def test_src_config_accepts_ga_trainers(trainer_type):
+    args = Arguments.from_dict(_src_config(trainer_type=trainer_type))
+
+    assert args.training_args.sample_weighting == "src"
+    assert args.training_args.trainer_type == trainer_type
+
+
 def test_src_config_accepts_raw_score_type():
     config = _src_config()
     config["train"]["src_score_type"] = "raw"
@@ -388,6 +396,53 @@ def test_advantage_processor_stores_src_weights_and_logs_without_rank_reduce(sam
     assert "raw_scores" in metrics["train/src_groups"][0]
     assert "saturated_scores" in metrics["train/src_groups"][0]
     assert "train/src_conflict_ratio_quality" in metrics
+
+
+@pytest.mark.parametrize("consumer", ["linear_advantage", "nft"])
+def test_advantage_processor_supports_src_on_ga_survivor_population(consumer):
+    samples = [
+        BaseSample(
+            prompt="prompt",
+            _unique_id=23,
+            extra_kwargs={"is_crossover_child": index == 2},
+        )
+        for index in range(3)
+    ]
+    rewards = {
+        "quality": torch.tensor([0.0, 0.4, 1.0]),
+        "safety": torch.tensor([0.0, 0.8, 0.9]),
+    }
+    processor = AdvantageProcessor(
+        accelerator=Float32ReduceAccelerator() if consumer == "nft" else NoReduceAccelerator(),
+        reward_weights={"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        group_size=3,
+        global_std=True,
+        sampler_type="group_contiguous",
+        verbose=False,
+        sample_weighting="src",
+        sample_weighting_consumer=consumer,
+        src_reweight_interpolation=0.6,
+        src_reweight_temperature=0.7,
+    )
+    processor._ga_enabled = True
+    processor._child_in_norm = True
+
+    advantages = processor.compute_advantages(samples, rewards, aggregation_func="sum")
+    expected_src = _compute(np.array([[0.0, 0.4, 1.0], [0.0, 0.8, 0.9]]))
+
+    if consumer == "linear_advantage":
+        np.testing.assert_allclose(
+            advantages.cpu().numpy(), expected_src.effective_advantages, rtol=1e-6, atol=1e-6
+        )
+    else:
+        np.testing.assert_allclose(
+            advantages.cpu().numpy(), expected_src.uniform_advantages, rtol=1e-6, atol=1e-6
+        )
+    np.testing.assert_allclose(
+        [sample.extra_kwargs["sample_weight"].item() for sample in samples],
+        expected_src.loss_multipliers,
+        rtol=1e-6,
+    )
 
 
 def test_globally_gathered_baseline_metrics_are_not_rank_reduced_again():

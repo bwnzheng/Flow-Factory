@@ -349,14 +349,18 @@ class BaseTrainer(ABC):
             src_reweight_degeneracy_threshold=(
                 self.training_args.src_reweight_degeneracy_threshold
             ),
-            sample_weighting_consumer=("nft" if trainer_type == "nft" else "linear_advantage"),
+            sample_weighting_consumer=(
+                "nft" if trainer_type in {"nft", "ga_nft"} else "linear_advantage"
+            ),
         )
 
         if self.training_args.sample_weighting == "src":
-            sample_weighting_consumer = "nft_full_loss" if trainer_type == "nft" else "advantage"
+            sample_weighting_consumer = (
+                "nft_full_loss" if trainer_type in {"nft", "ga_nft"} else "advantage"
+            )
             normalization_note = (
                 "NFT keeps its configured global-versus-prompt normalizer contract."
-                if trainer_type == "nft"
+                if trainer_type in {"nft", "ga_nft"}
                 else "The configured global_std is not used by SRC-Reweight."
             )
             logger.info(

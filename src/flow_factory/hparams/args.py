@@ -243,15 +243,23 @@ class Arguments(ArgABC):
         if ta.sample_weighting == "none":
             return
 
-        supported_trainers = {"grpo", "grpo-guard", "dppo", "nft", "awm"}
+        supported_trainers = {
+            "grpo",
+            "grpo-guard",
+            "dppo",
+            "nft",
+            "awm",
+            "ga_grpo_guard",
+            "ga_nft",
+        }
         trainer_type = str(ta.trainer_type).lower()
         if trainer_type not in supported_trainers:
             raise ValueError(
                 "`sample_weighting: src` has no declared objective-specific integration for "
                 "this trainer. Supported trainer types are "
                 f"{sorted(supported_trainers)}; got trainer_type={trainer_type!r}. DPO forms "
-                "pairs, DGPO performs another group reduction, "
-                "CRD recenters implicit rewards, and crossover changes the rollout support."
+                "pairs, DGPO performs another group reduction, and CRD recenters implicit "
+                "rewards."
             )
         if getattr(ta, "advantage_aggregation", None) != "sum":
             raise ValueError(
