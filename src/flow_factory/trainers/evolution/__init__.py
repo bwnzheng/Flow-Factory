@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover/__init__.py
-"""Crossover strategies and shared sampling utilities for augmenting
-intermediate denoising states during RL training."""
+# src/flow_factory/trainers/evolution/__init__.py
+"""Evolution utilities for genetic augmentation during RL training."""
 
 from .abc import BaseCrossover, CrossoverOutput
 from .genetic_algorithm import GeneticAlgorithm

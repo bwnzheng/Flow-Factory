@@ -34,7 +34,7 @@ from ..hparams import GANFTTrainingArguments
 from ..samples import BaseSample
 from ..utils.base import create_generator
 from ..utils.logger_utils import setup_logger
-from .crossover import (
+from .evolution import (
     GeneticAlgorithm,
     create_crossover_strategy,
     sample_crossover_step,

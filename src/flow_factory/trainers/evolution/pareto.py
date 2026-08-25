@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover/pareto.py
+# src/flow_factory/trainers/evolution/pareto.py
 """
 Pareto-front utilities for crossover sample selection and filtering.
 

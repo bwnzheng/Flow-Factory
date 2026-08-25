@@ -34,7 +34,7 @@ from ..hparams import GAGRPOGuardTrainingArguments
 from ..samples import BaseSample
 from ..utils.base import create_generator, filter_kwargs, move_tensors_to_device
 from ..utils.logger_utils import setup_logger
-from .crossover import (
+from .evolution import (
     GeneticAlgorithm,
     create_crossover_strategy,
     sample_crossover_step,

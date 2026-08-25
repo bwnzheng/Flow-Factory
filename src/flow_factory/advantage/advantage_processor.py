@@ -1400,7 +1400,7 @@ class AdvantageProcessor:
         Stores ``train/nondom_size_in_group_{mean,max,min,std}`` in
         ``_pending_nondom_stats``.
         """
-        from ..trainers.crossover.pareto import compute_pareto_mask
+        from ..trainers.evolution.pareto import compute_pareto_mask
 
         reward_keys = sorted(gathered_rewards.keys())
         if not reward_keys:
@@ -1463,7 +1463,7 @@ class AdvantageProcessor:
         Returns:
             ``(S,)`` bool — ``True`` for non-dominated (keep).
         """
-        from ..trainers.crossover.pareto import filter_by_group
+        from ..trainers.evolution.pareto import filter_by_group
 
         parent_mask = ~child_mask
         pareto_mask, stats = filter_by_group(gathered_rewards, group_indices, parent_mask)

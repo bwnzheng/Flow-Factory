@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover/abc.py
+# src/flow_factory/trainers/evolution/abc.py
 """
 Abstract base class for crossover strategies.
 

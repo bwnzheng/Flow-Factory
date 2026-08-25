@@ -21,12 +21,12 @@ import torch
 
 from flow_factory.hparams import GAArguments
 from flow_factory.samples import BaseSample, T2ISample
-from flow_factory.trainers.crossover.genetic_algorithm import (
+from flow_factory.trainers.evolution.genetic_algorithm import (
     GeneticAlgorithm,
     _prepare_ga_child_media,
 )
-from flow_factory.trainers.crossover.pareto import compute_pareto_mask
-from flow_factory.trainers.crossover.src import (
+from flow_factory.trainers.evolution.pareto import compute_pareto_mask
+from flow_factory.trainers.evolution.src import (
     compute_src_contributions,
     covariance_group_score,
     population_covariance,

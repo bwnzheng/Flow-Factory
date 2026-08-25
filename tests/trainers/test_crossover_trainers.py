@@ -28,7 +28,7 @@ from flow_factory.hparams import (
 from flow_factory.hparams.args import Arguments
 from flow_factory.hparams.training_args import list_registered_training_args
 from flow_factory.samples import BaseSample
-from flow_factory.trainers.crossover.genetic_algorithm import (
+from flow_factory.trainers.evolution.genetic_algorithm import (
     GeneticAlgorithm,
     _format_src_selection_log,
 )
@@ -675,7 +675,7 @@ def test_ga_stats_gather_raw_selection_events_from_every_rank(monkeypatch):
         return [*local_events, gathered[1]]
 
     monkeypatch.setattr(
-        "flow_factory.trainers.crossover.genetic_algorithm.gather_object",
+        "flow_factory.trainers.evolution.genetic_algorithm.gather_object",
         fake_gather_object,
     )
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover/genetic_algorithm.py
+# src/flow_factory/trainers/evolution/genetic_algorithm.py
 """
 Genetic Algorithm for per-group population evolution.
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# src/flow_factory/trainers/crossover/strategies.py
+# src/flow_factory/trainers/evolution/strategies.py
 """
 Built-in crossover strategies for intermediate denoising states.
 
