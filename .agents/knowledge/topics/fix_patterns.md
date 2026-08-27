@@ -222,6 +222,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: For synchronous model calls, emit a start event before entering the call and a completion event after it; completion-only progress cannot distinguish slow inference from a blocked worker.
 - **Related Constraint**: N/A
 
+### VisionReward passed an HF repository ID to SAT
+- **Date**: 2026-08-27
+- **Symptom**: Every standalone reward worker failed during VisionReward construction with `KeyError: 'THUDM/VisionReward-Image-bf16'` from SAT's `MODEL_URLS` lookup.
+- **Root Cause**: The adapter passed a Hugging Face repository identifier to a SAT loader that accepts only registered short names or an extracted local checkpoint directory; its surrounding calls also diverged from the upstream `VisualLlamaEVA` image-inference API.
+- **Fix**: `vision_reward.py` now validates an extracted directory containing `model_config.json`, uses the official concrete loader and scoring head, and calls the upstream processor/chat/VQAScore signatures. `tools/reward_evaluation/scoring.py` runs optional lightweight validators before spawning workers, and the evaluator guidance documents split-checkpoint extraction plus the isolated-server path for incompatible Transformers environments.
+- **Lesson**: Third-party model identifiers are not interchangeable across loaders. Validate the artifact format and dependency boundary in the parent process, then construct heavyweight models only after the contract is known to be satisfiable.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

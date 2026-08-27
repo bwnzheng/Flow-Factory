@@ -99,6 +99,7 @@ def score_reward(
             f"output={output_path}"
         )
     if missing:
+        _validate_reward_config(reward_config, device, dtype, batch_size)
         chunks = _partition_by_prompt(missing, num_processes)
         results: Dict[str, float] = {}
         _progress(
@@ -166,6 +167,30 @@ def score_reward(
             f"expected({len(expected)}), cached({len(cached)})."
         )
     return {key: cached[key] for key in sorted(expected)}
+
+
+def _validate_reward_config(
+    reward_config: Mapping[str, Any], device: str, dtype: str, batch_size: int
+) -> None:
+    """Run an optional lightweight validator before spawning reward workers.
+
+    Heavy reward models are intentionally still constructed inside workers, but
+    path/configuration errors should be reported once in the parent process
+    instead of being repeated by every device worker.  Existing rewards do not
+    need to implement this hook.
+    """
+    config = RewardArguments.from_dict(
+        {
+            **dict(reward_config),
+            "device": device,
+            "dtype": dtype,
+            "batch_size": batch_size,
+        }
+    )
+    model_class = get_reward_model_class(str(config.reward_model))
+    validator = getattr(model_class, "validate_config", None)
+    if validator is not None:
+        validator(config)
 
 
 def _score_chunk(

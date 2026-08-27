@@ -82,6 +82,47 @@ weights must be installed on the evaluation host. For example, `clap` and
 `imagebind` require their audio stack even though this tool only supplies the
 image field; registry import failures are reported directly by the command.
 
+### VisionReward
+
+VisionReward is not loaded from its Hugging Face repository ID. The upstream
+SAT loader accepts a local directory containing `model_config.json`; the
+released checkpoint is split into archive parts. In the VisionReward checkout,
+download the model and extract it once:
+
+```bash
+huggingface-cli download zai-org/VisionReward-Image-bf16 \
+  --local-dir /path/to/VisionReward-Image-bf16
+cd /path/to/VisionReward-Image-bf16
+cat ckpts/split_part_* > ckpts/visionreward_image.tar
+tar -xf ckpts/visionreward_image.tar
+```
+
+Then set `extra_kwargs.model_path` to the extracted directory (the directory
+that contains `model_config.json`), not to
+`THUDM/VisionReward-Image-bf16`. Alternatively, set
+`VISIONREWARD_MODEL=/path/to/VisionReward-Image-bf16`; that environment
+variable overrides the template's placeholder ID. The evaluator performs this check before
+spawning workers, so a missing/incomplete checkpoint is reported once rather
+than independently by every device process.
+
+The official VisionReward stack pins older PyTorch/Transformers versions than
+Flow-Factory. If those packages cannot coexist, run VisionReward in its own
+environment behind the HTTP reward-server contract described in
+`guidance/rewards.md` and configure the evaluator with
+`flow_factory.rewards.my_reward_remote.RemotePointwiseRewardModel`:
+
+```yaml
+- name: "vision_reward"
+  reward_model: "flow_factory.rewards.my_reward_remote.RemotePointwiseRewardModel"
+  server_url: "http://127.0.0.1:18001"
+  timeout: 300
+  retry_attempts: 3
+```
+
+The server must expose `/health` and `/compute`; `reward_server/example_server.py`
+is a protocol template. Keep `model.num_processes: 1` for one server instance,
+or run one server per device/port when parallel isolated workers are needed.
+
 ## Outputs
 
 For each `(run, source)` pair, the output directory contains:

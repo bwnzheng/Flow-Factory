@@ -21,8 +21,14 @@ from pathlib import Path
 
 import pytest
 import torch
+from PIL import Image
 
 from flow_factory.rewards.unireward import _single_device_map
+from flow_factory.rewards.vision_reward import (
+    VisionRewardModel,
+    _load_image_score_head,
+    _resolve_model_path,
+)
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
 from tools.reward_evaluation.evaluate import (
@@ -136,6 +142,84 @@ def test_offline_accelerator_view_provides_noop_barrier() -> None:
     assert view.wait_for_everyone() is None
 
 
+def test_vision_reward_uses_extracted_checkpoint_directory(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "visionreward"
+    checkpoint.mkdir()
+    (checkpoint / "model_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "latest").write_text("1\n", encoding="utf-8")
+    (checkpoint / "1").mkdir()
+    (checkpoint / "1" / "mp_rank_00_model_states.pt").write_bytes(b"placeholder")
+
+    assert _resolve_model_path({"model_path": str(checkpoint)}) == checkpoint.resolve()
+
+
+def test_vision_reward_rejects_huggingface_id_before_worker_start() -> None:
+    with pytest.raises(FileNotFoundError, match="Hugging Face repository ID"):
+        _resolve_model_path({"model_path": "THUDM/VisionReward-Image-bf16"})
+
+
+def test_vision_reward_model_environment_overrides_template_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "visionreward"
+    checkpoint.mkdir()
+    (checkpoint / "model_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "latest").write_text("1\n", encoding="utf-8")
+    (checkpoint / "1").mkdir()
+    (checkpoint / "1" / "mp_rank_00_model_states.pt").write_bytes(b"placeholder")
+    monkeypatch.setenv("VISIONREWARD_MODEL", str(checkpoint))
+
+    assert (
+        _resolve_model_path({"model_path": "THUDM/VisionReward-Image-bf16"}) == checkpoint.resolve()
+    )
+
+
+def test_vision_reward_selected_head_matches_upstream_files() -> None:
+    root = Path(__file__).parents[2] / "VisionReward" / "VisionReward_Image"
+    questions, coefficients, intercept = _load_image_score_head(
+        root / "VisionReward_image_qa_select.txt", root / "weight_select.json"
+    )
+    assert len(questions) == 30
+    assert coefficients.shape == (28,)
+    assert intercept == 0.0
+
+
+def test_vision_reward_score_uses_official_feature_order() -> None:
+    class Alignment:
+        def __call__(self, *, images, texts):
+            assert len(images) == len(texts) == 1
+            return torch.tensor([[0.25]])
+
+    calls = []
+
+    def chat(**kwargs):
+        calls.append(kwargs)
+        return "yes<|end_of_text|>", [], None
+
+    model = object.__new__(VisionRewardModel)
+    model.device = torch.device("cpu")
+    model.dtype = torch.float32
+    model._questions = [f"question-{index}" for index in range(30)]
+    model._score_coefficients = torch.ones(28).numpy()
+    model._score_intercept = 0.0
+    model._vqa_scorer = Alignment()
+    model._chat_fn = chat
+    model._model = object()
+    model._text_processor = type("TextProcessor", (), {"invalid_slices": []})()
+    model._image_processor = object()
+    model._max_length = 32
+    model._top_p = 0.4
+    model._top_k = 1
+    model._temperature = 0.8
+    model._chat_args = type("ChatArgs", (), {})()
+
+    result = model._score_single("a prompt", Image.new("RGB", (2, 2)))
+
+    assert result == {"overall": 27.25, "alignment": 0.25}
+    assert len(calls) == 30
+    assert all("img_processor" in call and "image_processor" not in call for call in calls)
+
+
 def test_unireward_device_map_pins_model_to_worker_device() -> None:
     assert _single_device_map(torch.device("cuda:3")) == {"": 3}
     assert _single_device_map(torch.device("cpu")) == {"": "cpu"}
@@ -150,6 +234,7 @@ def test_reward_cache_keeps_previous_checkpoint_scopes(
         return {scoring_module._sample_key(row): float(row["checkpoint_step"]) for row in rows}
 
     monkeypatch.setattr(scoring_module, "_score_chunk", fake_score_chunk)
+    monkeypatch.setattr(scoring_module, "get_reward_model_class", lambda _: object)
     rows_step_1 = [
         {
             "checkpoint_step": 1,
@@ -197,6 +282,48 @@ def test_reward_cache_keeps_previous_checkpoint_scopes(
     output = capsys.readouterr().out
     assert "[Reward] start name=fake" in output
     assert "[Reward] complete name=fake" in output
+
+
+def test_reward_validator_runs_before_worker_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    class ValidatedReward:
+        @classmethod
+        def validate_config(cls, config):
+            calls.append((str(config.device), config.batch_size))
+
+    def fake_score_chunk(
+        reward_config, rows, all_rows, image_root, prompt_records, device, dtype, batch_size
+    ):
+        return {scoring_module._sample_key(row): 1.0 for row in rows}
+
+    monkeypatch.setattr(scoring_module, "get_reward_model_class", lambda _: ValidatedReward)
+    monkeypatch.setattr(scoring_module, "_score_chunk", fake_score_chunk)
+    rows = [
+        {
+            "prompt_index": 0,
+            "sample_index": 0,
+            "prompt": "prompt",
+            "image_path": "p0_s0.png",
+        }
+    ]
+
+    result = scoring_module.score_reward(
+        {"name": "validated", "reward_model": "validated"},
+        rows,
+        tmp_path,
+        [],
+        tmp_path / "reward.jsonl",
+        "cpu",
+        "float32",
+        1,
+        3,
+    )
+
+    assert result == {"p0_s0": 1.0}
+    assert calls == [("cpu", 3)]
 
 
 def test_write_artifacts_reports_all_reward_statistics(tmp_path: Path) -> None:
