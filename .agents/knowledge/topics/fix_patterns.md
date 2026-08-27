@@ -206,6 +206,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Setting the current accelerator is not a placement guarantee when a loader performs automatic device mapping. Parallel one-model-per-worker evaluators must pass an explicit full-model device map.
 - **Related Constraint**: N/A
 
+### Standalone reward evaluation appeared silent during long scoring
+- **Date**: 2026-08-27
+- **Symptom**: `tools.reward_evaluation` could run for a long time with low accelerator utilization, no visible reward progress, and no `reward_scores` or final result files until every image and reward worker completed.
+- **Root Cause**: The evaluator only printed a final completion line. Image inference and reward scoring had no flushed stage/worker progress, while reward caches were written only after all worker futures returned; long VLM scoring therefore looked stalled and left no durable intermediate result.
+- **Fix**: `tools/reward_evaluation/evaluate.py` now emits flushed run/source/image/reward/checkpoint progress. `scoring.py` reports worker lifecycle and approximately ten progress updates per chunk, flushes output, and writes the resumable reward cache after each completed worker. Model-inference progress prints are flushed as well, and the README documents the incremental cache behavior.
+- **Lesson**: Long-running evaluators need observable boundaries before and during expensive model calls, plus durable partial artifacts at safe completion boundaries. Low accelerator utilization alone does not distinguish model loading, CPU/PIL preprocessing, sequential autoregressive scoring, and a deadlock.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

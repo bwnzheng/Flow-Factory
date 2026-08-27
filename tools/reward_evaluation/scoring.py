@@ -34,6 +34,11 @@ from flow_factory.rewards.abc import GroupwiseRewardModel
 from flow_factory.rewards.registry import get_reward_model_class
 
 
+def _progress(message: str) -> None:
+    """Emit evaluator progress immediately, including from spawned workers."""
+    print(message, flush=True)
+
+
 @dataclass(frozen=True)
 class _AcceleratorView:
     """Provide the accelerator fields consumed by offline reward models."""
@@ -86,21 +91,38 @@ def score_reward(
         )
 
     missing = [row for row in manifest_rows if _sample_key(row) not in cached]
+    reward_name = str(reward_config.get("name", reward_config.get("reward_model", "reward")))
+    if not missing:
+        _progress(
+            f"[Reward] cache complete name={reward_name} samples={len(expected)} "
+            f"output={output_path}"
+        )
     if missing:
         chunks = _partition_by_prompt(missing, num_processes)
         results: Dict[str, float] = {}
+        _progress(
+            f"[Reward] start name={reward_name} samples={len(manifest_rows)} "
+            f"missing={len(missing)} workers={len(chunks)} batch_size={batch_size} "
+            f"output={output_path}"
+        )
         if len(chunks) == 1:
-            results.update(
-                _score_chunk(
-                    dict(reward_config),
-                    chunks[0],
-                    manifest_rows,
-                    image_root,
-                    prompt_records,
-                    _worker_device(device, 0, num_processes),
-                    dtype,
-                    batch_size,
-                )
+            worker_device = _worker_device(device, 0, num_processes)
+            chunk_results = _score_chunk(
+                dict(reward_config),
+                chunks[0],
+                manifest_rows,
+                image_root,
+                prompt_records,
+                worker_device,
+                dtype,
+                batch_size,
+            )
+            results.update(chunk_results)
+            cached.update(chunk_results)
+            _write_scores(output_path, cached)
+            _progress(
+                f"[Reward] worker complete name={reward_name} device={worker_device} "
+                f"samples={len(chunk_results)} cached={len(cached)}/{len(expected)}"
             )
         else:
             with ProcessPoolExecutor(
@@ -121,9 +143,21 @@ def score_reward(
                     for index, chunk in enumerate(chunks)
                 }
                 for future in as_completed(futures):
-                    results.update(future.result())
+                    worker_index = futures[future]
+                    chunk_results = future.result()
+                    results.update(chunk_results)
+                    cached.update(chunk_results)
+                    _write_scores(output_path, cached)
+                    _progress(
+                        f"[Reward] worker complete name={reward_name} "
+                        f"worker={worker_index} samples={len(chunk_results)} "
+                        f"cached={len(cached)}/{len(expected)}"
+                    )
         cached.update(results)
         _write_scores(output_path, cached)
+        _progress(
+            f"[Reward] complete name={reward_name} samples={len(expected)} " f"output={output_path}"
+        )
 
     if not expected.issubset(cached):
         raise ValueError(
@@ -143,6 +177,8 @@ def _score_chunk(
     dtype: str,
     batch_size: int,
 ) -> Dict[str, float]:
+    reward_name = str(reward_config.get("name", reward_config.get("reward_model", "reward")))
+    _progress(f"[Reward worker] start name={reward_name} device={device} samples={len(rows)}")
     device_object = torch.device(device)
     device_index = device_object.index or 0
     if device_object.type == "cuda":
@@ -164,7 +200,21 @@ def _score_chunk(
         config=config,
         accelerator=_AcceleratorView(device=device_object, local_process_index=device_index),
     )
+    _progress(f"[Reward worker] model ready name={reward_name} device={device}")
     results: Dict[str, float] = {}
+    progress_interval = max(1, (len(rows) + 9) // 10)
+    processed = 0
+    last_reported = 0
+
+    def report_progress() -> None:
+        nonlocal last_reported
+        if processed == len(rows) or processed - last_reported >= progress_interval:
+            _progress(
+                f"[Reward worker] progress name={reward_name} device={device} "
+                f"processed={processed}/{len(rows)}"
+            )
+            last_reported = processed
+
     try:
         if is_groupwise:
             # A cache may contain some samples from a group. Re-score the full
@@ -173,17 +223,22 @@ def _score_chunk(
             for group_rows in groups:
                 values = _call_model(model, group_rows, image_root, prompt_records)
                 results.update({_sample_key(row): value for row, value in zip(group_rows, values)})
+                processed += len(group_rows)
+                report_progress()
         else:
             for start in range(0, len(rows), batch_size):
                 batch = rows[start : start + batch_size]
                 values = _call_model(model, batch, image_root, prompt_records)
                 results.update({_sample_key(row): value for row, value in zip(batch, values)})
+                processed += len(batch)
+                report_progress()
     finally:
         del model
         if device_object.type == "cuda":
             torch.cuda.empty_cache()
         elif device_object.type == "npu":
             torch.npu.empty_cache()
+        _progress(f"[Reward worker] done name={reward_name} device={device}")
     return results
 
 

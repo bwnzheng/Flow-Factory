@@ -438,11 +438,13 @@ class EvaluationRunner:
             base_seed,
         )
         if not missing:
-            print(f"      All {len(paths)} images already generated - skipping.")
+            print(f"      All {len(paths)} images already generated - skipping.", flush=True)
             return paths
 
         print(
-            f"      Generating {len(missing)}/{len(paths)} images " f"(batch size={batch_size}) ..."
+            f"      Generating {len(missing)}/{len(paths)} images "
+            f"(batch size={batch_size}) ...",
+            flush=True,
         )
         apply_lora(self.pipeline, checkpoint_path, self.dtype)
         try:
@@ -577,7 +579,7 @@ class ParallelEvaluationRunner:
             base_seed,
         )
         if not missing:
-            print(f"      All {len(paths)} images already generated - skipping.")
+            print(f"      All {len(paths)} images already generated - skipping.", flush=True)
             return paths
 
         chunk_size = (len(missing) + self._num_processes - 1) // self._num_processes
@@ -591,7 +593,8 @@ class ParallelEvaluationRunner:
         chunks = [(process_index, chunk) for process_index, chunk in chunks if chunk]
         print(
             f"      Generating {len(missing)}/{len(paths)} images "
-            f"({self._num_processes} processes, batch size={batch_size}) ..."
+            f"({self._num_processes} processes, batch size={batch_size}) ...",
+            flush=True,
         )
 
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
@@ -722,7 +725,10 @@ def run_evaluation_set(
     os.makedirs(output_dir, exist_ok=True)
     generated: Dict[int, List[str]] = {}
     for step, checkpoint_path in checkpoints:
-        print(f"[Inference] checkpoint_step={step}, checkpoint_path={checkpoint_path}")
+        print(
+            f"[Inference] checkpoint_step={step}, checkpoint_path={checkpoint_path}",
+            flush=True,
+        )
         generated[step] = runner.generate_for_checkpoint(
             checkpoint_path=checkpoint_path,
             prompts=prompts,

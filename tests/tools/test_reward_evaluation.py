@@ -142,7 +142,7 @@ def test_unireward_device_map_pins_model_to_worker_device() -> None:
 
 
 def test_reward_cache_keeps_previous_checkpoint_scopes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def fake_score_chunk(
         reward_config, rows, all_rows, image_root, prompt_records, device, dtype, batch_size
@@ -194,6 +194,9 @@ def test_reward_cache_keeps_previous_checkpoint_scopes(
     assert first == {"c1_p0_s0": 1.0}
     assert second == {"c2_p0_s0": 2.0}
     assert len(cache_path.read_text(encoding="utf-8").splitlines()) == 2
+    output = capsys.readouterr().out
+    assert "[Reward] start name=fake" in output
+    assert "[Reward] complete name=fake" in output
 
 
 def test_write_artifacts_reports_all_reward_statistics(tmp_path: Path) -> None:

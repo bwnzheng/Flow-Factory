@@ -37,6 +37,11 @@ from tools.reward_covariance_eval_analysis.analyze import PromptRecord, load_pro
 from tools.reward_evaluation.scoring import score_reward
 
 
+def _progress(message: str) -> None:
+    """Emit evaluator progress immediately when stdout is redirected."""
+    print(message, flush=True)
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     """Configure base-model loading and local accelerator workers."""
@@ -180,17 +185,34 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
     output_root = Path(config.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     resolved_device = resolve_device(config.model.device)
+    _progress(
+        f"[Reward evaluation] start output={output_root.resolve()} device={resolved_device} "
+        f"num_processes={config.model.num_processes}"
+    )
     summaries: List[Dict[str, Any]] = []
 
     for run in config.runs:
         checkpoints = _resolve_run_checkpoints(run)
+        _progress(
+            f"[Reward evaluation] run={run.name} checkpoints={len(checkpoints)} "
+            f"checkpoint_paths={[path for _, path in checkpoints]}"
+        )
         for source in config.sources:
             prompt_records = load_prompt_records(
                 _resolve_prompt_file(source), source.prompt_key, source.max_prompts
             )
             experiment_dir = output_root / run.name / source.name
+            _progress(
+                f"[Reward evaluation] source={source.name} prompts={len(prompt_records)} "
+                f"experiment_dir={experiment_dir.resolve()}"
+            )
             image_root = experiment_dir / "images"
+            _progress(f"[Reward evaluation] generating source={source.name}")
             manifest_rows = _generate_images(config, checkpoints, prompt_records, image_root)
+            _progress(
+                f"[Reward evaluation] images ready source={source.name} "
+                f"samples={len(manifest_rows)} manifest={image_root / 'manifest.jsonl'}"
+            )
             for step, checkpoint_path in checkpoints:
                 checkpoint_rows = [
                     row for row in manifest_rows if int(row["checkpoint_step"]) == step
@@ -203,6 +225,10 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
                 reward_values: Dict[str, Dict[str, float]] = {}
                 for reward in source.rewards:
                     reward_name = str(reward["name"])
+                    _progress(
+                        f"[Reward evaluation] scoring source={source.name} "
+                        f"checkpoint={step} reward={reward_name} samples={len(checkpoint_rows)}"
+                    )
                     reward_values[reward_name] = score_reward(
                         reward_config=reward,
                         manifest_rows=checkpoint_rows,
@@ -213,6 +239,10 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
                         dtype=config.model.dtype,
                         num_processes=config.model.num_processes,
                         batch_size=config.evaluation.reward_batch_size,
+                    )
+                    _progress(
+                        f"[Reward evaluation] scored source={source.name} "
+                        f"checkpoint={step} reward={reward_name}"
                     )
                 summary = _write_artifacts(
                     config,
@@ -226,6 +256,10 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
                     experiment_dir,
                 )
                 summaries.append(summary)
+                _progress(
+                    f"[Reward evaluation] checkpoint complete source={source.name} "
+                    f"checkpoint={step} results={experiment_dir / 'checkpoint_results' / f'checkpoint-{step}.jsonl'}"
+                )
 
     result = {
         "schema_version": 1,
@@ -234,6 +268,7 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
         "experiments": summaries,
     }
     _write_json(output_root / "summary.json", result)
+    _progress(f"[Reward evaluation] complete summary={output_root / 'summary.json'}")
     return result
 
 
@@ -531,7 +566,8 @@ def main() -> None:
     result = run_evaluation(config)
     print(
         "[Reward evaluation] "
-        f"experiments={len(result['experiments'])} output={config.output_dir}"
+        f"experiments={len(result['experiments'])} output={config.output_dir}",
+        flush=True,
     )
 
 

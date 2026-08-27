@@ -102,3 +102,9 @@ is written atomically at the end of each completed checkpoint, and
 Each result row joins the generated image with its checkpoint, prompt, seed,
 metadata, and complete reward vector. `summary.json` reports the statistics for
 each processed checkpoint.
+
+The command prints flushed stage, reward, and worker progress to stdout. Reward
+scores are written after each completed worker, so a long-running evaluation
+leaves a resumable `reward_scores/<reward>.jsonl` file before the full reward
+finishes. The final checkpoint and summary artifacts are still written only
+after all configured rewards for that checkpoint complete.
