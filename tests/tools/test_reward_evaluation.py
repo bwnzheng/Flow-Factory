@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
@@ -33,7 +34,11 @@ from tools.reward_evaluation.evaluate import (
     _write_artifacts,
     load_config,
 )
-from tools.reward_evaluation.scoring import _groups_for_rows, _partition_by_prompt
+from tools.reward_evaluation.scoring import (
+    _AcceleratorView,
+    _groups_for_rows,
+    _partition_by_prompt,
+)
 
 
 def test_default_config_contains_ascend_reward_suite() -> None:
@@ -123,6 +128,11 @@ def test_groupwise_helpers_keep_complete_prompt_groups() -> None:
     assert all(len(worker_ids) == 1 for worker_ids in owners.values())
     groups = _groups_for_rows(rows[:6], rows)
     assert [[row["prompt_index"] for row in group] for group in groups] == [[0] * 3, [1] * 3]
+
+
+def test_offline_accelerator_view_provides_noop_barrier() -> None:
+    view = _AcceleratorView(device=torch.device("cpu"), local_process_index=0)
+    assert view.wait_for_everyone() is None
 
 
 def test_reward_cache_keeps_previous_checkpoint_scopes(

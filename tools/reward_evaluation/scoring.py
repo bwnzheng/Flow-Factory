@@ -41,6 +41,10 @@ class _AcceleratorView:
     device: torch.device
     local_process_index: int
 
+    def wait_for_everyone(self) -> None:
+        """Provide a no-op barrier for an independent offline worker."""
+        return None
+
 
 def score_reward(
     reward_config: Mapping[str, Any],

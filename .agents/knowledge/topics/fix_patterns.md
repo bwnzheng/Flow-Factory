@@ -190,6 +190,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: A sample-weighting method must distinguish the distribution used to rank or weight samples from the baseline used to define their reward direction. If the latter is intentionally changed, expose it as a separate objective mode rather than silently changing per-sample supervision.
 - **Related Constraint**: N/A
 
+### Offline reward worker lacked the accelerator barrier contract
+- **Date**: 2026-08-27
+- **Symptom**: Standalone `tools.reward_evaluation` crashed while constructing UniReward with `AttributeError: '_AcceleratorView' object has no attribute 'wait_for_everyone'`.
+- **Root Cause**: The offline reward worker passed a minimal accelerator facade to reward models, but several model constructors unconditionally call `wait_for_everyone()` after loading their weights.
+- **Fix**: `tools/reward_evaluation/scoring.py:_AcceleratorView` now exposes a no-op `wait_for_everyone()` method because spawned offline workers are independent processes rather than members of one Accelerate process group. A regression test covers the compatibility contract.
+- **Lesson**: An offline model worker should expose every lifecycle method used by registered reward constructors, while collectives must remain explicit no-ops unless the workers share a real distributed process group.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
