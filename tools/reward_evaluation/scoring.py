@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -220,15 +221,37 @@ def _score_chunk(
             # A cache may contain some samples from a group. Re-score the full
             # group so ranks are always computed against the same candidate set.
             groups = _groups_for_rows(rows, all_manifest_rows)
-            for group_rows in groups:
+            for group_index, group_rows in enumerate(groups, start=1):
+                started = time.perf_counter()
+                _progress(
+                    f"[Reward worker] batch start name={reward_name} device={device} "
+                    f"group={group_index}/{len(groups)} items={len(group_rows)}"
+                )
                 values = _call_model(model, group_rows, image_root, prompt_records)
+                _progress(
+                    f"[Reward worker] batch done name={reward_name} device={device} "
+                    f"group={group_index}/{len(groups)} items={len(group_rows)} "
+                    f"elapsed={time.perf_counter() - started:.1f}s"
+                )
                 results.update({_sample_key(row): value for row, value in zip(group_rows, values)})
                 processed += len(group_rows)
                 report_progress()
         else:
             for start in range(0, len(rows), batch_size):
                 batch = rows[start : start + batch_size]
+                batch_index = start // batch_size + 1
+                batch_count = (len(rows) + batch_size - 1) // batch_size
+                started = time.perf_counter()
+                _progress(
+                    f"[Reward worker] batch start name={reward_name} device={device} "
+                    f"batch={batch_index}/{batch_count} items={len(batch)}"
+                )
                 values = _call_model(model, batch, image_root, prompt_records)
+                _progress(
+                    f"[Reward worker] batch done name={reward_name} device={device} "
+                    f"batch={batch_index}/{batch_count} items={len(batch)} "
+                    f"elapsed={time.perf_counter() - started:.1f}s"
+                )
                 results.update({_sample_key(row): value for row, value in zip(batch, values)})
                 processed += len(batch)
                 report_progress()

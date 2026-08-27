@@ -214,6 +214,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Long-running evaluators need observable boundaries before and during expensive model calls, plus durable partial artifacts at safe completion boundaries. Low accelerator utilization alone does not distinguish model loading, CPU/PIL preprocessing, sequential autoregressive scoring, and a deadlock.
 - **Related Constraint**: N/A
 
+### Reward worker progress was delayed until the first batch finished
+- **Date**: 2026-08-27
+- **Symptom**: After `[Reward worker] model ready`, no progress was visible while the first reward batch was being scored, making a slow VLM generation look like a deadlock.
+- **Root Cause**: Worker progress was reported only after `_call_model()` returned. UniReward and VisionReward process each image with autoregressive generation, so one outer batch can contain several long serial calls.
+- **Fix**: `tools/reward_evaluation/scoring.py` now logs batch/group start and completion with item counts and elapsed seconds around `_call_model()`.
+- **Lesson**: For synchronous model calls, emit a start event before entering the call and a completion event after it; completion-only progress cannot distinguish slow inference from a blocked worker.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
