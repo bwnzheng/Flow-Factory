@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from accelerate import Accelerator
@@ -76,7 +76,21 @@ Style: X.X/5"""
 # ---------------------------------------------------------------------------
 
 
-def _load_v20(model_path: str, device, dtype) -> Tuple[object, object]:
+def _single_device_map(
+    device: torch.device,
+) -> Dict[str, Union[int, str, torch.device]]:
+    """Map the complete UniReward model to one worker device."""
+    if device.type == "cuda":
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        return {"": index}
+    if device.type == "cpu":
+        return {"": "cpu"}
+    return {"": device}
+
+
+def _load_v20(model_path: str, device: torch.device, dtype) -> Tuple[object, object, object]:
     """Load UniReward v2.0 via Qwen2.5-VL transformers API."""
     from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -84,7 +98,7 @@ def _load_v20(model_path: str, device, dtype) -> Tuple[object, object]:
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=dtype,
-        device_map="auto",
+        device_map=_single_device_map(device),
     ).eval()
     processor = AutoProcessor.from_pretrained(model_path)
 
@@ -96,7 +110,7 @@ def _load_v20(model_path: str, device, dtype) -> Tuple[object, object]:
 # ---------------------------------------------------------------------------
 
 
-def _load_v15(model_path: str) -> Tuple[object, object, object]:
+def _load_v15(model_path: str, device: torch.device) -> Tuple[object, object, object]:
     """Load UniReward v1.5 via LLaVA-NeXT."""
     try:
         from llava.constants import DEFAULT_IMAGE_TOKEN
@@ -109,7 +123,7 @@ def _load_v15(model_path: str) -> Tuple[object, object, object]:
         ) from e
 
     tokenizer, model, image_processor, max_length = load_pretrained_model(
-        model_path, None, "llava_qwen", device_map="auto"
+        model_path, None, "llava_qwen", device_map=_single_device_map(device)
     )
     model.eval()
 
@@ -187,7 +201,9 @@ class UniRewardModel(PointwiseRewardModel):
                 self._model_path, self.device, self.dtype
             )
         elif self._backend_name == "v1.5":
-            self._model, self._processor, self._image_processor = _load_v15(self._model_path)
+            self._model, self._processor, self._image_processor = _load_v15(
+                self._model_path, self.device
+            )
         else:
             raise ValueError(
                 f"Unknown UniReward backend: {self._backend_name!r}. " "Expected 'v2.0' or 'v1.5'."

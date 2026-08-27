@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from flow_factory.rewards.unireward import _single_device_map
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
 from tools.reward_evaluation.evaluate import (
@@ -133,6 +134,11 @@ def test_groupwise_helpers_keep_complete_prompt_groups() -> None:
 def test_offline_accelerator_view_provides_noop_barrier() -> None:
     view = _AcceleratorView(device=torch.device("cpu"), local_process_index=0)
     assert view.wait_for_everyone() is None
+
+
+def test_unireward_device_map_pins_model_to_worker_device() -> None:
+    assert _single_device_map(torch.device("cuda:3")) == {"": 3}
+    assert _single_device_map(torch.device("cpu")) == {"": "cpu"}
 
 
 def test_reward_cache_keeps_previous_checkpoint_scopes(

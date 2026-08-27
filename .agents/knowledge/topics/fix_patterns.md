@@ -198,6 +198,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: An offline model worker should expose every lifecycle method used by registered reward constructors, while collectives must remain explicit no-ops unless the workers share a real distributed process group.
 - **Related Constraint**: N/A
 
+### Offline reward workers allowed automatic cross-device model placement
+- **Date**: 2026-08-27
+- **Symptom**: Multi-device reward workers could load a UniReward model onto an unintended device or shard it across visible devices despite each worker selecting its assigned accelerator.
+- **Root Cause**: UniReward passed `device_map="auto"` to third-party model loaders, so the worker's current device did not constrain Hugging Face placement.
+- **Fix**: `src/flow_factory/rewards/unireward.py` now constructs an explicit single-device map for CUDA, CPU, and other accelerator devices and uses it for both UniReward backends; regression tests cover the map contract.
+- **Lesson**: Setting the current accelerator is not a placement guarantee when a loader performs automatic device mapping. Parallel one-model-per-worker evaluators must pass an explicit full-model device map.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

@@ -47,7 +47,9 @@ therefore to the selected reward model.
 `model.num_processes` is the number of local inference/reward workers. Use an
 accelerator type (`npu` or `cuda`) when it is greater than one. The evaluator
 uses spawned reward processes and the same deterministic seed/path convention
-as `tools.model_inference`.
+as `tools.model_inference`. The built-in UniReward backends pin their complete
+model to the worker's assigned accelerator rather than using automatic
+cross-device model sharding.
 
 Each `runs` entry can select one checkpoint or an entire checkpoint directory:
 
