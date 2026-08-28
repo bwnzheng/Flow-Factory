@@ -39,7 +39,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -79,6 +79,11 @@ _TOKENIZER_ARTIFACTS = (
 _DEFAULT_QUESTION_FILE = "VisionReward_Image/VisionReward_image_qa_select.txt"
 _DEFAULT_WEIGHT_FILE = "VisionReward_Image/weight_select.json"
 _DEFAULT_ALIGNMENT_MODEL = "clip-flant5-xxl"
+_EVALUATION_STAGE_KEY = "_evaluation_stage"
+_FULL_STAGE = "full"
+_ALIGNMENT_STAGE = "alignment"
+_VQA_FEATURES_STAGE = "vqa_features"
+_VALID_STAGES = {_FULL_STAGE, _ALIGNMENT_STAGE, _VQA_FEATURES_STAGE}
 
 # The first three questions are mask features in the official image scorer.
 # Their values gate the remaining question features before the linear head.
@@ -428,11 +433,60 @@ def _load_image_score_head(
             f"{len(_MASK_INDICES)} mask questions produce {expected_features} features, "
             f"but {weight_file} contains {coefficients.size} coefficients."
         )
+    if not np.isfinite(coefficients).all() or not np.isfinite(intercept):
+        raise ValueError(f"VisionReward weight file {weight_file} contains non-finite values.")
     return questions, coefficients, intercept
 
 
-def _import_visionreward(extras: dict):
-    """Import VisionReward inference utilities from the cloned repo."""
+def load_vision_reward_score_head(extras: dict) -> Tuple[np.ndarray, float]:
+    """Resolve and load the official CPU linear scoring head.
+
+    Args:
+        extras: VisionReward paths and model-specific configuration.
+
+    Returns:
+        The float64 coefficient vector and scalar intercept.
+    """
+    repo = _resolve_repo_path(extras)
+    question_file = _resolve_repo_file(repo, extras.get("question_file"), _DEFAULT_QUESTION_FILE)
+    weight_file = _resolve_repo_file(repo, extras.get("weight_file"), _DEFAULT_WEIGHT_FILE)
+    _, coefficients, intercept = _load_image_score_head(question_file, weight_file)
+    return coefficients, intercept
+
+
+def compose_vision_reward_score(
+    alignment: float,
+    vqa_features: Sequence[float],
+    coefficients: Sequence[float],
+    intercept: float,
+) -> float:
+    """Apply the official linear head to alignment followed by VQA features.
+
+    Args:
+        alignment: Prompt-image alignment feature.
+        vqa_features: Selected and mask-adjusted VQA features.
+        coefficients: Official linear-head coefficients.
+        intercept: Official linear-head intercept.
+
+    Returns:
+        The composed scalar VisionReward score.
+    """
+    coefficient_array = np.asarray(coefficients, dtype=np.float64).reshape(-1)
+    feature_array = np.asarray([alignment, *vqa_features], dtype=np.float64)
+    if feature_array.shape != coefficient_array.shape:
+        raise ValueError(
+            "VisionReward feature/head mismatch: "
+            f"features={feature_array.size}, coefficients={coefficient_array.size}."
+        )
+    if not np.isfinite(feature_array).all() or not np.isfinite(coefficient_array).all():
+        raise ValueError("VisionReward features and coefficients must be finite.")
+    if not np.isfinite(intercept):
+        raise ValueError("VisionReward intercept must be finite.")
+    return float(np.dot(feature_array, coefficient_array) + float(intercept))
+
+
+def _import_visionreward_main(extras: dict):
+    """Import only the SAT VisionReward inference stack."""
     repo = _resolve_repo_path(extras)
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
@@ -446,10 +500,9 @@ def _import_visionreward(extras: dict):
             llama2_text_processor_inference,
             llama3_tokenizer,
         )
-        from VisionReward_Image.t2v_metrics.vqascore import VQAScore
     except ImportError as e:
         raise ImportError(
-            f"Failed to import VisionReward modules from {repo}. "
+            f"Failed to import VisionReward SAT modules from {repo}. "
             "Ensure dependencies are installed:\n"
             f"  cd {repo} && pip install -r requirements.txt\n"
             f"Original error: {e}"
@@ -462,8 +515,25 @@ def _import_visionreward(extras: dict):
         get_image_processor,
         llama2_text_processor_inference,
         llama3_tokenizer,
-        VQAScore,
     )
+
+
+def _import_visionreward_alignment(extras: dict):
+    """Import only the CLIP-FlanT5 alignment stack."""
+    repo = _resolve_repo_path(extras)
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    try:
+        from VisionReward_Image.t2v_metrics.vqascore import VQAScore
+    except ImportError as e:
+        raise ImportError(
+            f"Failed to import VisionReward alignment modules from {repo}. "
+            "Ensure dependencies are installed:\n"
+            f"  cd {repo} && pip install -r requirements.txt\n"
+            f"Original error: {e}"
+        ) from e
+    return VQAScore
 
 
 # ---------------------------------------------------------------------------
@@ -515,23 +585,55 @@ class VisionRewardModel(PointwiseRewardModel):
             config: Reward configuration containing VisionReward paths.
         """
         extras = config.extra_kwargs or {}
+        stage = str(extras.get(_EVALUATION_STAGE_KEY, _FULL_STAGE))
+        if stage not in _VALID_STAGES:
+            raise ValueError(
+                f"Invalid VisionReward evaluation stage {stage!r}; "
+                f"expected one of {sorted(_VALID_STAGES)}."
+            )
         repo = _resolve_repo_path(extras)
-        _resolve_model_path(extras)
-        _resolve_tokenizer_path(extras)
-        question_file = _resolve_repo_file(
-            repo, extras.get("question_file"), _DEFAULT_QUESTION_FILE
-        )
-        weight_file = _resolve_repo_file(repo, extras.get("weight_file"), _DEFAULT_WEIGHT_FILE)
-        _load_image_score_head(question_file, weight_file)
+        if stage in {_FULL_STAGE, _VQA_FEATURES_STAGE}:
+            _resolve_model_path(extras)
+            _resolve_tokenizer_path(extras)
+            question_file = _resolve_repo_file(
+                repo, extras.get("question_file"), _DEFAULT_QUESTION_FILE
+            )
+            weight_file = _resolve_repo_file(repo, extras.get("weight_file"), _DEFAULT_WEIGHT_FILE)
+            _load_image_score_head(question_file, weight_file)
 
     def __init__(self, config: RewardArguments, accelerator: Accelerator):
         super().__init__(config, accelerator)
 
         extras = config.extra_kwargs or {}
+        self._evaluation_stage = str(extras.get(_EVALUATION_STAGE_KEY, _FULL_STAGE))
+        if self._evaluation_stage not in _VALID_STAGES:
+            raise ValueError(
+                f"Invalid VisionReward evaluation stage {self._evaluation_stage!r}; "
+                f"expected one of {sorted(_VALID_STAGES)}."
+            )
 
-        # Resolve all local artifacts before importing the optional upstream
-        # stack.  This keeps a bad path from producing a secondary dependency
-        # error and avoids initializing SAT when the checkpoint is absent.
+        loaded_components: List[str] = []
+        if self._evaluation_stage in {_FULL_STAGE, _VQA_FEATURES_STAGE}:
+            self._load_vqa_component(extras)
+            loaded_components.append("vision_reward")
+
+        if self._evaluation_stage in {_FULL_STAGE, _ALIGNMENT_STAGE}:
+            VQAScore = _import_visionreward_alignment(extras)
+            alignment_model = str(extras.get("alignment_model", _DEFAULT_ALIGNMENT_MODEL))
+            alignment_device = str(extras.get("alignment_device", self.device))
+            self._vqa_scorer = VQAScore(model=alignment_model, device=alignment_device)
+            loaded_components.append(alignment_model)
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        logger.info(
+            f"VisionReward loaded: stage={self._evaluation_stage}, device={self.device}, "
+            f"components={loaded_components}"
+        )
+
+    def _load_vqa_component(self, extras: dict) -> None:
+        """Load the SAT model and processors without the alignment model."""
         model_path = _resolve_model_path(extras)
         tokenizer_path = _resolve_tokenizer_path(extras)
         repo = _resolve_repo_path(extras)
@@ -545,7 +647,6 @@ class VisionRewardModel(PointwiseRewardModel):
             self._score_intercept,
         ) = _load_image_score_head(question_file, weight_file)
 
-        # Import VisionReward modules
         (
             VisualLlamaEVA,
             CachedAutoregressiveMixin,
@@ -553,8 +654,7 @@ class VisionRewardModel(PointwiseRewardModel):
             get_image_processor,
             llama2_text_processor_inference,
             llama3_tokenizer,
-            VQAScore,
-        ) = _import_visionreward(extras)
+        ) = _import_visionreward_main(extras)
 
         self._max_length = int(extras.get("max_length", 3328))
         self._top_p = float(extras.get("top_p", 0.4))
@@ -571,10 +671,6 @@ class VisionRewardModel(PointwiseRewardModel):
             chinese=False,
         )
 
-        # VisualLlamaEVA is the concrete class used by the upstream image
-        # inference script.  AutoModel is intentionally not used: the released
-        # checkpoint's model_config.json contains a registry name that is not
-        # provided by the cloned VisionReward checkout.
         model_args = argparse.Namespace(
             deepspeed=None,
             local_rank=0,
@@ -599,7 +695,6 @@ class VisionRewardModel(PointwiseRewardModel):
         self._model = self._model.eval()
         self._model.add_mixin("auto-regressive", CachedAutoregressiveMixin())
 
-        # Tokenizer & processors
         self._tokenizer = llama3_tokenizer(model_args.tokenizer_path, signal_type=self._version)
         image_size = loaded_args.eva_args["image_size"]
         if isinstance(image_size, (list, tuple)):
@@ -607,20 +702,6 @@ class VisionRewardModel(PointwiseRewardModel):
         self._image_processor = get_image_processor(image_size)
         self._text_processor = llama2_text_processor_inference(
             self._tokenizer, self._max_length, self._model.image_length
-        )
-
-        # The alignment model is part of the official linear-head feature
-        # vector.  It is loaded once per worker, alongside VisionReward.
-        alignment_model = str(extras.get("alignment_model", _DEFAULT_ALIGNMENT_MODEL))
-        alignment_device = str(extras.get("alignment_device", self.device))
-        self._vqa_scorer = VQAScore(model=alignment_model, device=alignment_device)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
-        logger.info(
-            f"VisionReward loaded: model={model_path}, device={self.device}, "
-            f"questions={len(self._questions)}, alignment={alignment_model}"
         )
 
     # ------------------------------------------------------------------
@@ -631,6 +712,111 @@ class VisionRewardModel(PointwiseRewardModel):
         if self.device.type == "cuda" and self.dtype in (torch.float16, torch.bfloat16):
             return torch.autocast(device_type="cuda", dtype=self.dtype)
         return contextlib.nullcontext()
+
+    def _alignment_from_path(self, prompt: str, image_path: str) -> float:
+        """Compute the CLIP-FlanT5 alignment feature for one saved image."""
+        with self._autocast():
+            alignment_value = self._vqa_scorer(images=[image_path], texts=[prompt])[0][0]
+        if isinstance(alignment_value, torch.Tensor):
+            return float(alignment_value.detach().float().cpu().item())
+        return float(alignment_value)
+
+    def _vqa_features_from_path(self, image_path: str) -> List[float]:
+        """Compute the 27 selected and mask-adjusted VQA features."""
+        answers: List[str] = []
+        with self._autocast():
+            for question in self._questions:
+                response_result = self._chat_fn(
+                    image_path=image_path,
+                    image=None,
+                    model=self._model,
+                    text_processor=self._text_processor,
+                    img_processor=self._image_processor,
+                    query=question,
+                    max_length=self._max_length,
+                    top_p=self._top_p,
+                    temperature=self._temperature,
+                    top_k=self._top_k,
+                    invalid_slices=self._text_processor.invalid_slices,
+                    args=self._chat_args,
+                )
+                response = (
+                    response_result[0] if isinstance(response_result, tuple) else response_result
+                )
+                answers.append(str(response).strip().lower())
+
+        reward = np.asarray(
+            [1.0 if answer.startswith("yes") else -1.0 for answer in answers],
+            dtype=np.float64,
+        )
+        for mask_index, feature_indices in _MASK_FEATURE_MAP.items():
+            for feature_index in feature_indices:
+                reward[feature_index] *= float(reward[mask_index] > 0)
+        return [float(value) for index, value in enumerate(reward) if index not in _MASK_INDICES]
+
+    @torch.no_grad()
+    def score_alignment_features(self, prompt: List[str], image: List[Image.Image]) -> List[float]:
+        """Compute alignment-only features for the staged evaluator.
+
+        Args:
+            prompt: Text prompts aligned with the image list.
+            image: Generated images.
+
+        Returns:
+            One prompt-image alignment value per input pair.
+        """
+        if self._evaluation_stage not in {_FULL_STAGE, _ALIGNMENT_STAGE}:
+            raise RuntimeError(
+                f"VisionReward stage {self._evaluation_stage!r} has no alignment component."
+            )
+        if len(prompt) != len(image):
+            raise ValueError(f"prompt/image length mismatch: {len(prompt)} vs {len(image)}")
+
+        values: List[float] = []
+        for text, sample_image in zip(prompt, image):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                sample_image.save(tmp.name)
+                tmp_path = tmp.name
+            try:
+                values.append(self._alignment_from_path(text, tmp_path))
+            finally:
+                os.unlink(tmp_path)
+        return values
+
+    @torch.no_grad()
+    def score_vqa_features(self, image: List[Image.Image]) -> List[List[float]]:
+        """Compute VQA-only features for the staged evaluator.
+
+        Args:
+            image: Generated images.
+
+        Returns:
+            One selected VQA feature vector per image.
+        """
+        if self._evaluation_stage not in {_FULL_STAGE, _VQA_FEATURES_STAGE}:
+            raise RuntimeError(
+                f"VisionReward stage {self._evaluation_stage!r} has no VQA component."
+            )
+
+        values: List[List[float]] = []
+        for sample_image in image:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                sample_image.save(tmp.name)
+                tmp_path = tmp.name
+            try:
+                values.append(self._vqa_features_from_path(tmp_path))
+            finally:
+                os.unlink(tmp_path)
+        return values
+
+    @property
+    def vqa_feature_count(self) -> int:
+        """Return the VQA feature width expected by the official score head.
+
+        Returns:
+            The number of selected VQA features per image.
+        """
+        return int(len(self._score_coefficients) - 1)
 
     @torch.no_grad()
     def _score_single(self, prompt: str, image: Image.Image) -> Dict[str, float]:
@@ -644,49 +830,14 @@ class VisionRewardModel(PointwiseRewardModel):
             tmp_path = tmp.name
 
         try:
-            with self._autocast():
-                alignment_value = self._vqa_scorer(images=[tmp_path], texts=[prompt])[0][0]
-                if isinstance(alignment_value, torch.Tensor):
-                    alignment = alignment_value.detach().float().cpu().item()
-                else:
-                    alignment = float(alignment_value)
-                answers: List[str] = []
-                for question in self._questions:
-                    response_result = self._chat_fn(
-                        image_path=tmp_path,
-                        image=None,
-                        model=self._model,
-                        text_processor=self._text_processor,
-                        img_processor=self._image_processor,
-                        query=question,
-                        max_length=self._max_length,
-                        top_p=self._top_p,
-                        temperature=self._temperature,
-                        top_k=self._top_k,
-                        invalid_slices=self._text_processor.invalid_slices,
-                        args=self._chat_args,
-                    )
-                    response = (
-                        response_result[0]
-                        if isinstance(response_result, tuple)
-                        else response_result
-                    )
-                    answers.append(str(response).strip().lower())
-
-            reward = np.asarray(
-                [1.0 if answer.startswith("yes") else -1.0 for answer in answers],
-                dtype=np.float64,
-            )
-            for mask_index, feature_indices in _MASK_FEATURE_MAP.items():
-                for feature_index in feature_indices:
-                    reward[feature_index] *= float(reward[mask_index] > 0)
-            reward_filtered = [
-                value for index, value in enumerate(reward) if index not in _MASK_INDICES
-            ]
-            features = np.asarray([alignment, *reward_filtered], dtype=np.float64)
+            alignment = self._alignment_from_path(prompt, tmp_path)
+            vqa_features = self._vqa_features_from_path(tmp_path)
             return {
-                "overall": float(
-                    np.dot(features, self._score_coefficients) + self._score_intercept
+                "overall": compose_vision_reward_score(
+                    alignment,
+                    vqa_features,
+                    self._score_coefficients,
+                    self._score_intercept,
                 ),
                 "alignment": float(alignment),
             }
@@ -718,6 +869,12 @@ class VisionRewardModel(PointwiseRewardModel):
             raise ValueError("VisionReward requires either 'image' or 'video' input.")
         if len(prompt) != len(image):
             raise ValueError(f"prompt/image length mismatch: {len(prompt)} vs {len(image)}")
+        if self._evaluation_stage != _FULL_STAGE:
+            raise RuntimeError(
+                "VisionReward staged instances are evaluator-internal. Use "
+                "score_alignment_features() or score_vqa_features() for their "
+                "configured component."
+            )
 
         all_overall: List[float] = []
         alignments: List[float] = []

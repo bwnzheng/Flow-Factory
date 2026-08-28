@@ -47,6 +47,7 @@ sources:
       - name: "vision_reward"
         reward_model: "vision_reward"
         batch_size: 1
+        staged_evaluation: true  # Options: true (lower memory), false (legacy combined load).
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
@@ -77,6 +78,7 @@ sources:
       - name: "vision_reward"
         reward_model: "vision_reward"
         batch_size: 1
+        staged_evaluation: true  # Options: true (lower memory), false (legacy combined load).
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
@@ -108,6 +110,7 @@ sources:
       - name: "vision_reward"
         reward_model: "vision_reward"
         batch_size: 1
+        staged_evaluation: true  # Options: true (lower memory), false (legacy combined load).
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"

@@ -246,6 +246,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: A repository that is technically loadable is not automatically an equivalent or legally interchangeable model. Keep the checkpoint/tokenizer contract explicit, validate vocabulary compatibility before worker startup, and never present a mirror's license tag as legal clearance.
 - **Related Constraint**: #26
 
+### VisionReward evaluator loaded both heavyweight components concurrently
+- **Date**: 2026-08-28
+- **Symptom**: Multi-NPU VisionReward evaluation ran out of device memory while each worker constructed the reward model.
+- **Root Cause**: Every worker kept the SAT VisionReward checkpoint and the independent CLIP-FlanT5-XXL alignment stack resident at the same time, although the final score only combines their separately computable features with a CPU linear head.
+- **Fix**: `vision_reward.py` now supports evaluator-internal alignment-only and VQA-only component lifetimes. `tools/reward_evaluation/scoring.py` runs them in two distinct spawned process pools, atomically caches both feature families, shuts down the first pool before starting the second, and composes the unchanged scalar score in NumPy float64 on CPU. Regression tests cover component isolation, feature order, final-score parity, and independent cache resume.
+- **Lesson**: When a reward is a late fusion of independent heavyweight features, separate their process lifetimes rather than relying on allocator cache cleanup inside one process. Persist feature-boundary artifacts so an expensive completed pass survives later failures.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

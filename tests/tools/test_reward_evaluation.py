@@ -24,12 +24,14 @@ import torch
 from PIL import Image
 
 import flow_factory.rewards.vision_reward as vision_reward_module
+from flow_factory.hparams import RewardArguments
 from flow_factory.rewards.unireward import _single_device_map
 from flow_factory.rewards.vision_reward import (
     VisionRewardModel,
     _load_image_score_head,
     _resolve_model_path,
     _resolve_tokenizer_path,
+    compose_vision_reward_score,
 )
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
@@ -47,6 +49,7 @@ from tools.reward_evaluation.scoring import (
     _AcceleratorView,
     _groups_for_rows,
     _partition_by_prompt,
+    _partition_pointwise_rows,
 )
 
 
@@ -81,6 +84,13 @@ def test_default_config_contains_ascend_reward_suite() -> None:
         "vision_reward",
         "ocr",
     ]
+    assert all(
+        next(reward for reward in source.rewards if reward["reward_model"] == "vision_reward")[
+            "staged_evaluation"
+        ]
+        is True
+        for source in config.sources
+    )
 
 
 def test_reward_options_are_preserved_for_external_models(tmp_path: Path) -> None:
@@ -137,6 +147,15 @@ def test_groupwise_helpers_keep_complete_prompt_groups() -> None:
     assert all(len(worker_ids) == 1 for worker_ids in owners.values())
     groups = _groups_for_rows(rows[:6], rows)
     assert [[row["prompt_index"] for row in group] for group in groups] == [[0] * 3, [1] * 3]
+
+
+def test_pointwise_partition_uses_all_workers_for_one_prompt() -> None:
+    rows = [{"prompt_index": 0, "sample_index": sample_index} for sample_index in range(16)]
+
+    chunks = _partition_pointwise_rows(rows, num_processes=8)
+
+    assert len(chunks) == 8
+    assert [len(chunk) for chunk in chunks] == [2] * 8
 
 
 def test_offline_accelerator_view_provides_noop_barrier() -> None:
@@ -357,6 +376,257 @@ def test_vision_reward_score_uses_official_feature_order() -> None:
     assert result == {"overall": 27.25, "alignment": 0.25}
     assert len(calls) == 30
     assert all("img_processor" in call and "image_processor" not in call for call in calls)
+
+
+def test_vision_reward_cpu_composition_uses_alignment_then_vqa_features() -> None:
+    coefficients = torch.arange(1, 29, dtype=torch.float64).numpy()
+    vqa_features = [-1.0 if index % 2 else 1.0 for index in range(27)]
+
+    score = compose_vision_reward_score(
+        alignment=0.25,
+        vqa_features=vqa_features,
+        coefficients=coefficients,
+        intercept=-0.5,
+    )
+
+    expected = torch.tensor([0.25, *vqa_features], dtype=torch.float64).numpy()
+    assert score == float(expected @ coefficients - 0.5)
+
+
+def test_vision_reward_alignment_stage_does_not_load_sat_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    class Alignment:
+        def __init__(self, *, model, device):
+            calls.append((model, device))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("SAT component must not be touched in the alignment pass")
+
+    monkeypatch.setattr(vision_reward_module, "_resolve_repo_path", lambda extras: tmp_path)
+    monkeypatch.setattr(
+        vision_reward_module, "_import_visionreward_alignment", lambda extras: Alignment
+    )
+    monkeypatch.setattr(vision_reward_module, "_resolve_model_path", fail)
+    monkeypatch.setattr(vision_reward_module, "_resolve_tokenizer_path", fail)
+    monkeypatch.setattr(vision_reward_module, "_import_visionreward_main", fail)
+    config = RewardArguments.from_dict(
+        {
+            "name": "vision_reward",
+            "reward_model": "vision_reward",
+            "device": "cpu",
+            "dtype": "float32",
+            "extra_kwargs": {"_evaluation_stage": "alignment"},
+        }
+    )
+
+    model = VisionRewardModel(
+        config,
+        _AcceleratorView(device=torch.device("cpu"), local_process_index=0),
+    )
+
+    assert calls == [("clip-flant5-xxl", "cpu")]
+    assert not hasattr(model, "_model")
+
+
+def test_vision_reward_vqa_stage_does_not_load_alignment_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    class LoadedModel:
+        image_length = 16
+
+        def eval(self):
+            return self
+
+        def add_mixin(self, name, mixin):
+            calls.append((name, type(mixin).__name__))
+
+    class VisualLlamaEVA:
+        @classmethod
+        def from_pretrained(cls, path, args):
+            calls.append((path, args.device))
+            loaded_args = type("LoadedArgs", (), {"eva_args": {"image_size": 224}})()
+            return LoadedModel(), loaded_args
+
+    class CachedAutoregressiveMixin:
+        pass
+
+    def fail(*args, **kwargs):
+        raise AssertionError("alignment component must not be touched in the VQA pass")
+
+    monkeypatch.setattr(vision_reward_module, "_resolve_model_path", lambda extras: tmp_path)
+    monkeypatch.setattr(vision_reward_module, "_resolve_tokenizer_path", lambda extras: tmp_path)
+    monkeypatch.setattr(vision_reward_module, "_resolve_repo_path", lambda extras: tmp_path)
+    monkeypatch.setattr(
+        vision_reward_module,
+        "_resolve_repo_file",
+        lambda repo, configured, default_relative: tmp_path / default_relative,
+    )
+    monkeypatch.setattr(
+        vision_reward_module,
+        "_load_image_score_head",
+        lambda question_file, weight_file: (
+            [f"question-{index}" for index in range(30)],
+            torch.ones(28, dtype=torch.float64).numpy(),
+            0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        vision_reward_module,
+        "_import_visionreward_main",
+        lambda extras: (
+            VisualLlamaEVA,
+            CachedAutoregressiveMixin,
+            lambda **kwargs: "yes",
+            lambda image_size: object(),
+            lambda tokenizer, max_length, image_length: type(
+                "TextProcessor", (), {"invalid_slices": []}
+            )(),
+            lambda tokenizer_path, signal_type: object(),
+        ),
+    )
+    monkeypatch.setattr(vision_reward_module, "_import_visionreward_alignment", fail)
+    config = RewardArguments.from_dict(
+        {
+            "name": "vision_reward",
+            "reward_model": "vision_reward",
+            "device": "cpu",
+            "dtype": "float32",
+            "extra_kwargs": {"_evaluation_stage": "vqa_features"},
+        }
+    )
+
+    model = VisionRewardModel(
+        config,
+        _AcceleratorView(device=torch.device("cpu"), local_process_index=0),
+    )
+
+    assert calls == [(str(tmp_path), "cpu"), ("auto-regressive", "CachedAutoregressiveMixin")]
+    assert not hasattr(model, "_vqa_scorer")
+
+
+def test_vision_reward_staged_evaluation_runs_two_passes_and_composes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        {
+            "prompt_index": 0,
+            "sample_index": index,
+            "prompt": f"prompt-{index}",
+            "image_path": f"p0_s{index}.png",
+        }
+        for index in range(2)
+    ]
+    stages = []
+
+    monkeypatch.setattr(scoring_module, "_validate_reward_config", lambda *args: None)
+    monkeypatch.setattr(
+        scoring_module,
+        "_vision_reward_score_head",
+        lambda *args: (torch.ones(28, dtype=torch.float64).numpy(), 0.5),
+    )
+
+    def fake_stage_chunk(
+        stage,
+        reward_config,
+        stage_rows,
+        image_root,
+        device,
+        dtype,
+        batch_size,
+    ):
+        stages.append(stage)
+        if stage == "alignment":
+            return {
+                scoring_module._sample_key(row): float(row["sample_index"]) + 0.25
+                for row in stage_rows
+            }
+        return {scoring_module._sample_key(row): [1.0] * 27 for row in stage_rows}
+
+    monkeypatch.setattr(scoring_module, "_score_vision_reward_stage_chunk", fake_stage_chunk)
+
+    output_path = tmp_path / "reward_scores" / "vision_reward.jsonl"
+    result = scoring_module.score_reward(
+        {"name": "vision_reward", "reward_model": "vision_reward"},
+        rows,
+        tmp_path,
+        [],
+        output_path,
+        "cpu",
+        "float32",
+        1,
+        1,
+    )
+
+    assert stages == ["alignment", "vqa_features"]
+    assert result == {"p0_s0": 27.75, "p0_s1": 28.75}
+    assert (output_path.parent / "vision_reward.alignment.jsonl").is_file()
+    assert (output_path.parent / "vision_reward.vqa_features.jsonl").is_file()
+    assert output_path.is_file()
+
+
+def test_vision_reward_staged_evaluation_resumes_each_pass_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        {
+            "prompt_index": 0,
+            "sample_index": index,
+            "prompt": f"prompt-{index}",
+            "image_path": f"p0_s{index}.png",
+        }
+        for index in range(2)
+    ]
+    output_path = tmp_path / "vision_reward.jsonl"
+    scoring_module._write_scores(
+        tmp_path / "vision_reward.alignment.jsonl",
+        {"p0_s0": 0.25, "p0_s1": 1.25},
+    )
+    scoring_module._write_feature_vectors(
+        tmp_path / "vision_reward.vqa_features.jsonl", {"p0_s0": [1.0] * 27}
+    )
+    calls = []
+
+    monkeypatch.setattr(scoring_module, "_validate_reward_config", lambda *args: None)
+    monkeypatch.setattr(
+        scoring_module,
+        "_vision_reward_score_head",
+        lambda *args: (torch.ones(28, dtype=torch.float64).numpy(), 0.0),
+    )
+
+    def fake_stage_chunk(
+        stage,
+        reward_config,
+        stage_rows,
+        image_root,
+        device,
+        dtype,
+        batch_size,
+    ):
+        calls.append((stage, [scoring_module._sample_key(row) for row in stage_rows]))
+        assert stage == "vqa_features"
+        return {"p0_s1": [-1.0] * 27}
+
+    monkeypatch.setattr(scoring_module, "_score_vision_reward_stage_chunk", fake_stage_chunk)
+
+    result = scoring_module.score_reward(
+        {"name": "vision_reward", "reward_model": "vision_reward"},
+        rows,
+        tmp_path,
+        [],
+        output_path,
+        "cpu",
+        "float32",
+        1,
+        1,
+    )
+
+    assert calls == [("vqa_features", ["p0_s1"])]
+    assert result == {"p0_s0": 27.25, "p0_s1": -25.75}
 
 
 def test_unireward_device_map_pins_model_to_worker_device() -> None:

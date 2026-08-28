@@ -84,6 +84,34 @@ image field; registry import failures are reported directly by the command.
 
 ### VisionReward
 
+The standalone evaluator runs VisionReward in two passes by default to avoid
+keeping both heavyweight feature extractors in NPU memory:
+
+1. `alignment` starts one worker per assigned device and loads only
+   `clip-flant5-xxl` (including its CLIP vision tower). It writes
+   `reward_scores/<reward>.alignment.jsonl`.
+2. The alignment process pool shuts down completely. `vqa_features` then
+   starts a new worker pool and loads only the SAT VisionReward checkpoint,
+   its Llama-3 tokenizer, and its image/text processors. It writes the 27
+   selected features to
+   `reward_scores/<reward>.vqa_features.jsonl`.
+3. The parent process computes `[alignment, *vqa_features] @ coef + intercept`
+   in NumPy float64 on CPU and writes the normal final cache at
+   `reward_scores/<reward>.jsonl`.
+
+Both intermediate files are atomic, resumable caches. If the second pass is
+interrupted, the next run reuses the completed alignment pass and only fills
+missing VQA rows. The final score file and all downstream result formats are
+unchanged. Set `staged_evaluation: false` on a VisionReward entry only when the
+legacy single-worker-lifetime behavior is explicitly required; that mode loads
+both components together and needs enough memory for their combined footprint.
+
+`model.num_processes: 8` creates up to eight workers for each pass and assigns
+them to `npu:0` through `npu:7`. `evaluation.reward_batch_size` controls the
+number of image records handed to each adapter call, but the upstream
+VisionReward implementation still performs its selected QA generations
+sequentially within that call.
+
 The VisionReward model checkpoint is not loaded directly from its Hugging Face
 repository ID. The upstream SAT loader accepts a local directory containing
 `model_config.json`; the released checkpoint is split into archive parts. In
@@ -198,6 +226,8 @@ For each `(run, source)` pair, the output directory contains:
 images/manifest.jsonl
 images/checkpoint_<step>/*.png
 reward_scores/<reward>.jsonl
+reward_scores/<vision_reward>.alignment.jsonl
+reward_scores/<vision_reward>.vqa_features.jsonl
 checkpoint_results/checkpoint-<step>.jsonl
 results.jsonl
 summary.json
@@ -209,7 +239,10 @@ is written atomically at the end of each completed checkpoint, and
 `results.jsonl` is rebuilt from those completed files after every checkpoint.
 Each result row joins the generated image with its checkpoint, prompt, seed,
 metadata, and complete reward vector. `summary.json` reports the statistics for
-each processed checkpoint.
+each processed checkpoint. VisionReward's alignment cache stores one scalar
+`value` per sample; its VQA cache stores a 27-element `features` list per
+sample. These two files are evaluator internals and the final scalar cache
+remains identical to every other reward cache.
 
 The command prints flushed stage, reward, and worker progress to stdout. Reward
 scores are written after each completed worker, so a long-running evaluation
