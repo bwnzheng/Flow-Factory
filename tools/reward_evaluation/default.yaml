@@ -50,6 +50,7 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
+          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
 
   - name: "geneval"
     dataset_dir: "dataset/geneval"
@@ -76,6 +77,7 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
+          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
       - name: "geneval"
         reward_model: "geneval_ascend"
 
@@ -104,6 +106,7 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
+          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
       - name: "ocr"
         reward_model: "ocr"
 

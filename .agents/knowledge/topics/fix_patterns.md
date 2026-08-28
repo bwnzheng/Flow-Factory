@@ -230,6 +230,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Third-party model identifiers are not interchangeable across loaders. Validate the artifact format and dependency boundary in the parent process, then construct heavyweight models only after the contract is known to be satisfiable.
 - **Related Constraint**: N/A
 
+### VisionReward tokenizer was resolved after checkpoint loading
+- **Date**: 2026-08-28
+- **Symptom**: VisionReward workers spent several minutes loading the checkpoint and then all failed in `AutoTokenizer.from_pretrained` because the Meta-Llama-3 tokenizer was not available in the offline cache.
+- **Root Cause**: The adapter validated the extracted SAT checkpoint but left the upstream tokenizer repository ID unresolved until each worker constructed the model.
+- **Fix**: `vision_reward.py` now resolves `extra_kwargs.tokenizer_path` or `VISIONREWARD_TOKENIZER` to a local tokenizer directory and validates its files in the parent preflight; the evaluator README documents copying a Hugging Face snapshot and the regression tests cover local paths, missing IDs, and environment overrides.
+- **Lesson**: Validate every external artifact required after heavyweight model construction, not just the primary checkpoint. Offline evaluators should make local dependency paths explicit and fail before spawning workers.
+- **Related Constraint**: #26
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

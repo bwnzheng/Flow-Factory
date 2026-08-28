@@ -105,6 +105,39 @@ variable overrides the template's placeholder ID. The evaluator performs this ch
 spawning workers, so a missing/incomplete checkpoint is reported once rather
 than independently by every device process.
 
+The checkpoint does not contain the Llama-3 tokenizer used by the upstream
+image inference script. In an offline environment, copy the tokenizer from an
+existing Hugging Face cache snapshot (use `-L` so cache symlinks become real
+files), or download these small files on a networked host and transfer them:
+
+```bash
+TOKENIZER_SNAPSHOT=/home/ma-user/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/<revision>
+TOKENIZER_DIR=/data/models/Meta-Llama-3-8B-Instruct
+mkdir -p "$TOKENIZER_DIR"
+for file in config.json tokenizer.json tokenizer_config.json special_tokens_map.json; do
+  cp -aL "$TOKENIZER_SNAPSHOT/$file" "$TOKENIZER_DIR/"
+done
+
+# If the tokenizer is not cached yet, run this where the gated model is available:
+huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct \
+  --include config.json tokenizer.json tokenizer_config.json special_tokens_map.json \
+  --local-dir "$TOKENIZER_DIR"
+```
+
+Point the reward at that directory (not at an individual `tokenizer.json`):
+
+```yaml
+extra_kwargs:
+  repo_path: /path/to/Flow-Factory/VisionReward
+  model_path: /data/models/VisionReward-Image-bf16
+  tokenizer_path: /data/models/Meta-Llama-3-8B-Instruct
+```
+
+For the template configs, `VISIONREWARD_TOKENIZER=/data/models/Meta-Llama-3-8B-Instruct`
+is equivalent. The evaluator validates this directory before loading the
+large checkpoint, so a missing tokenizer no longer causes every worker to
+load weights and then fail at `AutoTokenizer.from_pretrained`.
+
 The official VisionReward stack pins older PyTorch/Transformers versions than
 Flow-Factory. If those packages cannot coexist, run VisionReward in its own
 environment behind the HTTP reward-server contract described in

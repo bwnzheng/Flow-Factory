@@ -28,6 +28,7 @@ from flow_factory.rewards.vision_reward import (
     VisionRewardModel,
     _load_image_score_head,
     _resolve_model_path,
+    _resolve_tokenizer_path,
 )
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
@@ -171,6 +172,35 @@ def test_vision_reward_model_environment_overrides_template_id(
 
     assert (
         _resolve_model_path({"model_path": "THUDM/VisionReward-Image-bf16"}) == checkpoint.resolve()
+    )
+
+
+def test_vision_reward_resolves_local_tokenizer_directory(tmp_path: Path) -> None:
+    tokenizer = tmp_path / "Meta-Llama-3-8B-Instruct"
+    tokenizer.mkdir()
+    (tokenizer / "config.json").write_text('{"model_type": "llama"}', encoding="utf-8")
+    (tokenizer / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    assert _resolve_tokenizer_path({"tokenizer_path": str(tokenizer)}) == tokenizer.resolve()
+
+
+def test_vision_reward_rejects_unavailable_tokenizer_id() -> None:
+    with pytest.raises(FileNotFoundError, match="local Llama-3 tokenizer"):
+        _resolve_tokenizer_path({"tokenizer_path": "meta-llama/Meta-Llama-3-8B-Instruct"})
+
+
+def test_vision_reward_tokenizer_environment_overrides_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (tokenizer / "tokenizer.model").write_bytes(b"placeholder")
+    monkeypatch.setenv("VISIONREWARD_TOKENIZER", str(tokenizer))
+
+    assert (
+        _resolve_tokenizer_path({"tokenizer_path": "meta-llama/Meta-Llama-3-8B-Instruct"})
+        == tokenizer.resolve()
     )
 
 

@@ -54,6 +54,7 @@ logger = setup_logger(__name__, rank_zero_only=True)
 
 _DEFAULT_MODEL_PATH = "THUDM/VisionReward-Image-bf16"
 _DEFAULT_TOKENIZER_PATH = "meta-llama/Meta-Llama-3-8B-Instruct"
+_TOKENIZER_ENV = "VISIONREWARD_TOKENIZER"
 _DEFAULT_QUESTION_FILE = "VisionReward_Image/VisionReward_image_qa_select.txt"
 _DEFAULT_WEIGHT_FILE = "VisionReward_Image/weight_select.json"
 _DEFAULT_ALIGNMENT_MODEL = "clip-flant5-xxl"
@@ -159,6 +160,53 @@ def _resolve_model_path(extras: dict) -> Path:
     return model_path
 
 
+def _resolve_tokenizer_path(extras: dict) -> Path:
+    """Resolve a local Llama-3 tokenizer directory.
+
+    VisionReward's upstream helper delegates to ``AutoTokenizer``.  In an
+    offline evaluator, leaving the default Hugging Face repository ID in place
+    causes every worker to attempt the same network lookup after loading the
+    expensive VisionReward checkpoint.  Resolve the path before workers start
+    and require the small set of files needed by ``AutoTokenizer`` instead.
+    A Hugging Face cache snapshot is valid as-is; users can also copy it to a
+    stable directory and set ``VISIONREWARD_TOKENIZER``.
+    """
+    configured = extras.get("tokenizer_path")
+    env_tokenizer = os.environ.get(_TOKENIZER_ENV)
+    if not configured or (configured == _DEFAULT_TOKENIZER_PATH and env_tokenizer):
+        configured = env_tokenizer or _DEFAULT_TOKENIZER_PATH
+
+    tokenizer_path = Path(str(configured)).expanduser()
+    if not tokenizer_path.is_dir():
+        raise FileNotFoundError(
+            "VisionReward requires a local Llama-3 tokenizer directory, but "
+            f"tokenizer_path={configured!r} is not a directory. The default "
+            f"{_DEFAULT_TOKENIZER_PATH!r} is a Hugging Face repository ID and "
+            "cannot be resolved while outbound traffic is disabled. Download "
+            "or copy the tokenizer snapshot locally, then set "
+            f"`extra_kwargs.tokenizer_path` or `{_TOKENIZER_ENV}` to that "
+            "directory. It must contain tokenizer.json (or tokenizer.model) "
+            "and tokenizer_config.json/config.json."
+        )
+
+    tokenizer_path = tokenizer_path.resolve()
+    tokenizer_files = ("tokenizer.json", "tokenizer.model", "spiece.model")
+    if not any((tokenizer_path / filename).is_file() for filename in tokenizer_files):
+        raise FileNotFoundError(
+            "VisionReward tokenizer directory is incomplete: expected one of "
+            f"{', '.join(tokenizer_files)} under {tokenizer_path}. Copy the "
+            "complete Meta-Llama-3 tokenizer snapshot rather than only the "
+            "model checkpoint."
+        )
+    config_files = ("tokenizer_config.json", "config.json")
+    if not any((tokenizer_path / filename).is_file() for filename in config_files):
+        raise FileNotFoundError(
+            "VisionReward tokenizer directory is incomplete: expected one of "
+            f"{', '.join(config_files)} under {tokenizer_path}."
+        )
+    return tokenizer_path
+
+
 def _resolve_repo_file(repo: Path, configured: Any, default_relative: str) -> Path:
     """Resolve a question/weight file relative to the VisionReward checkout."""
     path = Path(str(configured)).expanduser() if configured else repo / default_relative
@@ -258,7 +306,10 @@ class VisionRewardModel(PointwiseRewardModel):
         repo_path: Cloned VisionReward checkout (or ``VISIONREWARD_REPO``).
         model_path: Extracted checkpoint directory containing
             ``model_config.json`` (or ``VISIONREWARD_MODEL``).
-        tokenizer_path: Llama-3 tokenizer path (default is the upstream ID).
+        tokenizer_path: Local Llama-3 tokenizer directory (or
+            ``VISIONREWARD_TOKENIZER``). The directory must contain the
+            tokenizer files; the upstream repository ID is not downloaded by
+            the offline evaluator.
         question_file: Selected image QA file (defaults to the upstream file).
         weight_file: Selected linear head (defaults to the upstream file).
         alignment_model: VQAScore model used for prompt-image alignment.
@@ -284,6 +335,7 @@ class VisionRewardModel(PointwiseRewardModel):
         extras = config.extra_kwargs or {}
         repo = _resolve_repo_path(extras)
         _resolve_model_path(extras)
+        _resolve_tokenizer_path(extras)
         question_file = _resolve_repo_file(
             repo, extras.get("question_file"), _DEFAULT_QUESTION_FILE
         )
@@ -299,6 +351,7 @@ class VisionRewardModel(PointwiseRewardModel):
         # stack.  This keeps a bad path from producing a secondary dependency
         # error and avoids initializing SAT when the checkpoint is absent.
         model_path = _resolve_model_path(extras)
+        tokenizer_path = _resolve_tokenizer_path(extras)
         repo = _resolve_repo_path(extras)
         question_file = _resolve_repo_file(
             repo, extras.get("question_file"), _DEFAULT_QUESTION_FILE
@@ -355,7 +408,7 @@ class VisionRewardModel(PointwiseRewardModel):
             top_k=self._top_k,
             temperature=self._temperature,
             version=self._version,
-            tokenizer_path=str(extras.get("tokenizer_path", _DEFAULT_TOKENIZER_PATH)),
+            tokenizer_path=str(tokenizer_path),
             bf16=self._bf16,
             fp16=self._fp16,
             stream_chat=self._stream_chat,
