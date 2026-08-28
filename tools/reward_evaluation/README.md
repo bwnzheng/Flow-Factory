@@ -84,9 +84,10 @@ image field; registry import failures are reported directly by the command.
 
 ### VisionReward
 
-VisionReward is not loaded from its Hugging Face repository ID. The upstream
-SAT loader accepts a local directory containing `model_config.json`; the
-released checkpoint is split into archive parts. In the VisionReward checkout,
+The VisionReward model checkpoint is not loaded directly from its Hugging Face
+repository ID. The upstream SAT loader accepts a local directory containing
+`model_config.json`; the released checkpoint is split into archive parts. In
+the VisionReward checkout,
 download the model and extract it once:
 
 ```bash
@@ -106,20 +107,32 @@ spawning workers, so a missing/incomplete checkpoint is reported once rather
 than independently by every device process.
 
 The checkpoint does not contain the Llama-3 tokenizer used by the upstream
-image inference script. In an offline environment, copy the tokenizer from an
-existing Hugging Face cache snapshot (use `-L` so cache symlinks become real
-files), or download these small files on a networked host and transfer them:
+image inference script. VisionReward's language checkpoint expects the
+Llama-3 vocabulary (128,256 entries); a tokenizer from Qwen, Mistral, Llama-2,
+or another family is not a drop-in replacement even if `AutoTokenizer` can
+load it.
+
+If access to the gated Meta repository is unavailable, a public technical
+alternative is
+[`hfl/llama-3-chinese-8b-instruct-v3`](https://huggingface.co/hfl/llama-3-chinese-8b-instruct-v3).
+It exposes the standard Llama-3 tokenizer files and the expected vocabulary
+metadata. [`NousResearch/Meta-Llama-3-8B-Instruct`](https://huggingface.co/NousResearch/Meta-Llama-3-8B-Instruct)
+is another technical mirror, but its repository is explicitly marked with the
+Llama-3 license. The HFL card is marked Apache-2.0, while its discussion also
+documents the upstream Meta-Llama-3 lineage and license notice. Check the
+repository terms, the [Meta Llama 3 Community
+License](https://www.llama.com/llama3/license/), and your organization's policy
+before using or redistributing either artifact; a Hugging Face license tag is
+not a legal clearance.
+
+Only the tokenizer/config files are needed (not the alternative model's
+16-GB language-model weights). Download them on a networked host and transfer
+the resulting directory when the evaluator host is offline:
 
 ```bash
-TOKENIZER_SNAPSHOT=/home/ma-user/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/<revision>
-TOKENIZER_DIR=/data/models/Meta-Llama-3-8B-Instruct
+TOKENIZER_DIR=/data/models/llama3-compatible-tokenizer
 mkdir -p "$TOKENIZER_DIR"
-for file in config.json tokenizer.json tokenizer_config.json special_tokens_map.json; do
-  cp -aL "$TOKENIZER_SNAPSHOT/$file" "$TOKENIZER_DIR/"
-done
-
-# If the tokenizer is not cached yet, run this where the gated model is available:
-huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct \
+huggingface-cli download hfl/llama-3-chinese-8b-instruct-v3 \
   --include config.json tokenizer.json tokenizer_config.json special_tokens_map.json \
   --local-dir "$TOKENIZER_DIR"
 ```
@@ -130,13 +143,34 @@ Point the reward at that directory (not at an individual `tokenizer.json`):
 extra_kwargs:
   repo_path: /path/to/Flow-Factory/VisionReward
   model_path: /data/models/VisionReward-Image-bf16
-  tokenizer_path: /data/models/Meta-Llama-3-8B-Instruct
+  tokenizer_path: /data/models/llama3-compatible-tokenizer
 ```
 
-For the template configs, `VISIONREWARD_TOKENIZER=/data/models/Meta-Llama-3-8B-Instruct`
-is equivalent. The evaluator validates this directory before loading the
-large checkpoint, so a missing tokenizer no longer causes every worker to
-load weights and then fail at `AutoTokenizer.from_pretrained`.
+For the template configs,
+`VISIONREWARD_TOKENIZER=/data/models/llama3-compatible-tokenizer` is
+equivalent. The evaluator also accepts a public repository ID and downloads
+only the tokenizer files during preflight:
+
+```yaml
+extra_kwargs:
+  repo_path: /path/to/Flow-Factory/VisionReward
+  model_path: /data/models/VisionReward-Image-bf16
+  tokenizer_repo: hfl/llama-3-chinese-8b-instruct-v3
+  # Use false on a networked host; set true when the repo is already cached.
+  tokenizer_local_files_only: false
+```
+
+`tokenizer_path: hfl/llama-3-chinese-8b-instruct-v3` is accepted as a shorter
+equivalent. Set `tokenizer_revision` to pin a revision and
+`tokenizer_cache_dir` to select the HF cache root. On an offline host, either
+copy a complete local directory as shown above or set
+`tokenizer_local_files_only: true` and make sure that cache snapshot is
+already available. The evaluator validates the directory and rejects a
+metadata `vocab_size` other than 128,256 before loading the large checkpoint,
+so a missing or incompatible tokenizer does not make every worker load the
+weights and fail later at `AutoTokenizer.from_pretrained`.
+`VISIONREWARD_TOKENIZER_REPO=hfl/llama-3-chinese-8b-instruct-v3` is the
+environment-variable equivalent of `tokenizer_repo`.
 
 The official VisionReward stack pins older PyTorch/Transformers versions than
 Flow-Factory. If those packages cannot coexist, run VisionReward in its own

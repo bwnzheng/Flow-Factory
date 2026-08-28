@@ -238,6 +238,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Validate every external artifact required after heavyweight model construction, not just the primary checkpoint. Offline evaluators should make local dependency paths explicit and fail before spawning workers.
 - **Related Constraint**: #26
 
+### VisionReward tokenizer access without the gated Meta repository
+- **Date**: 2026-08-28
+- **Symptom**: The required Meta-Llama-3 tokenizer could not be downloaded because the evaluation account had no access to the gated Hugging Face repository.
+- **Root Cause**: The adapter treated the official repository ID as the only valid tokenizer source even though VisionReward only needs a compatible tokenizer artifact, not the separate language-model weights.
+- **Fix**: `vision_reward.py` now accepts an explicitly selected public Hugging Face tokenizer repository (or `tokenizer_path` repository ID), downloads only tokenizer/config files, and rejects metadata whose vocabulary is not the Llama-3 128,256-token layout. The evaluator docs and template expose `hfl/llama-3-chinese-8b-instruct-v3` as a technical candidate while documenting upstream-license caveats.
+- **Lesson**: A repository that is technically loadable is not automatically an equivalent or legally interchangeable model. Keep the checkpoint/tokenizer contract explicit, validate vocabulary compatibility before worker startup, and never present a mirror's license tag as legal clearance.
+- **Related Constraint**: #26
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

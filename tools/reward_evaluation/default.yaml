@@ -50,7 +50,10 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
-          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
+          # Use a local snapshot, or select a public Llama-3-compatible repo:
+          # tokenizer_path: "/path/to/llama3-compatible-tokenizer"
+          # tokenizer_repo: "hfl/llama-3-chinese-8b-instruct-v3"
+          # tokenizer_local_files_only: false
 
   - name: "geneval"
     dataset_dir: "dataset/geneval"
@@ -77,7 +80,9 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
-          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
+          # tokenizer_path: "/path/to/llama3-compatible-tokenizer"
+          # tokenizer_repo: "hfl/llama-3-chinese-8b-instruct-v3"
+          # tokenizer_local_files_only: false
       - name: "geneval"
         reward_model: "geneval_ascend"
 
@@ -106,7 +111,9 @@ sources:
         extra_kwargs:
           repo_path: "VisionReward"
           model_path: "THUDM/VisionReward-Image-bf16"
-          # tokenizer_path: "/path/to/Meta-Llama-3-8B-Instruct"
+          # tokenizer_path: "/path/to/llama3-compatible-tokenizer"
+          # tokenizer_repo: "hfl/llama-3-chinese-8b-instruct-v3"
+          # tokenizer_local_files_only: false
       - name: "ocr"
         reward_model: "ocr"
 

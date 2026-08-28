@@ -44,6 +44,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from accelerate import Accelerator
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    RepositoryNotFoundError,
+)
 from PIL import Image
 
 from ..hparams import RewardArguments
@@ -55,6 +62,20 @@ logger = setup_logger(__name__, rank_zero_only=True)
 _DEFAULT_MODEL_PATH = "THUDM/VisionReward-Image-bf16"
 _DEFAULT_TOKENIZER_PATH = "meta-llama/Meta-Llama-3-8B-Instruct"
 _TOKENIZER_ENV = "VISIONREWARD_TOKENIZER"
+_TOKENIZER_REPO_ENV = "VISIONREWARD_TOKENIZER_REPO"
+_TOKENIZER_VOCAB_SIZE = 128256
+_TOKENIZER_ARTIFACTS = (
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "tokenizer.model",
+    "spiece.model",
+    "sentencepiece.bpe.model",
+    "vocab.json",
+    "merges.txt",
+)
 _DEFAULT_QUESTION_FILE = "VisionReward_Image/VisionReward_image_qa_select.txt"
 _DEFAULT_WEIGHT_FILE = "VisionReward_Image/weight_select.json"
 _DEFAULT_ALIGNMENT_MODEL = "clip-flant5-xxl"
@@ -160,43 +181,49 @@ def _resolve_model_path(extras: dict) -> Path:
     return model_path
 
 
-def _resolve_tokenizer_path(extras: dict) -> Path:
-    """Resolve a local Llama-3 tokenizer directory.
+def _is_hf_repo_id(value: Any) -> bool:
+    """Return whether *value* is an unambiguous Hugging Face repo ID."""
+    if not isinstance(value, str):
+        return False
+    spec = value.strip()
+    if spec.startswith("hf://"):
+        spec = spec[len("hf://") :]
+    parts = spec.split("/")
+    return len(parts) == 2 and all(
+        part and part not in {".", ".."} and "\\" not in part for part in parts
+    )
 
-    VisionReward's upstream helper delegates to ``AutoTokenizer``.  In an
-    offline evaluator, leaving the default Hugging Face repository ID in place
-    causes every worker to attempt the same network lookup after loading the
-    expensive VisionReward checkpoint.  Resolve the path before workers start
-    and require the small set of files needed by ``AutoTokenizer`` instead.
-    A Hugging Face cache snapshot is valid as-is; users can also copy it to a
-    stable directory and set ``VISIONREWARD_TOKENIZER``.
-    """
-    configured = extras.get("tokenizer_path")
-    env_tokenizer = os.environ.get(_TOKENIZER_ENV)
-    if not configured or (configured == _DEFAULT_TOKENIZER_PATH and env_tokenizer):
-        configured = env_tokenizer or _DEFAULT_TOKENIZER_PATH
 
-    tokenizer_path = Path(str(configured)).expanduser()
+def _normalise_hf_repo_id(value: Any) -> str:
+    """Validate and normalize a Hugging Face ``owner/repository`` ID."""
+    if not isinstance(value, str):
+        raise TypeError(f"VisionReward tokenizer repository must be a string, got {value!r}.")
+    repo_id = value.strip()
+    if repo_id.startswith("hf://"):
+        repo_id = repo_id[len("hf://") :]
+    if not _is_hf_repo_id(repo_id):
+        raise ValueError(
+            "VisionReward tokenizer repository must use the Hugging Face "
+            f"'owner/repository' form, got {value!r}."
+        )
+    return repo_id
+
+
+def _validate_tokenizer_directory(tokenizer_path: Path, source: str) -> Path:
+    """Validate tokenizer files and the Llama-3 vocabulary size."""
+    tokenizer_path = tokenizer_path.expanduser().resolve()
     if not tokenizer_path.is_dir():
         raise FileNotFoundError(
-            "VisionReward requires a local Llama-3 tokenizer directory, but "
-            f"tokenizer_path={configured!r} is not a directory. The default "
-            f"{_DEFAULT_TOKENIZER_PATH!r} is a Hugging Face repository ID and "
-            "cannot be resolved while outbound traffic is disabled. Download "
-            "or copy the tokenizer snapshot locally, then set "
-            f"`extra_kwargs.tokenizer_path` or `{_TOKENIZER_ENV}` to that "
-            "directory. It must contain tokenizer.json (or tokenizer.model) "
-            "and tokenizer_config.json/config.json."
+            f"VisionReward tokenizer source {source!r} resolved to {tokenizer_path}, "
+            "but that directory does not exist."
         )
 
-    tokenizer_path = tokenizer_path.resolve()
     tokenizer_files = ("tokenizer.json", "tokenizer.model", "spiece.model")
     if not any((tokenizer_path / filename).is_file() for filename in tokenizer_files):
         raise FileNotFoundError(
             "VisionReward tokenizer directory is incomplete: expected one of "
             f"{', '.join(tokenizer_files)} under {tokenizer_path}. Copy the "
-            "complete Meta-Llama-3 tokenizer snapshot rather than only the "
-            "model checkpoint."
+            "complete Llama-3 tokenizer snapshot rather than only model weights."
         )
     config_files = ("tokenizer_config.json", "config.json")
     if not any((tokenizer_path / filename).is_file() for filename in config_files):
@@ -204,7 +231,157 @@ def _resolve_tokenizer_path(extras: dict) -> Path:
             "VisionReward tokenizer directory is incomplete: expected one of "
             f"{', '.join(config_files)} under {tokenizer_path}."
         )
+
+    # Llama 3's embedding/output matrices use 128,256 token IDs.  A tokenizer
+    # from another family can load successfully but silently produce invalid
+    # IDs, so reject an explicitly incompatible metadata value before workers
+    # construct the heavyweight VisionReward checkpoint.  Prefer config.json;
+    # tokenizer-only repositories may omit it, in which case infer the size
+    # from tokenizer.json's base and added-token IDs.
+    metadata_path = tokenizer_path / "config.json"
+    vocab_size = None
+    if metadata_path.is_file():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not parse tokenizer metadata at {metadata_path} for {source!r}."
+            ) from exc
+        vocab_size = metadata.get("vocab_size") if isinstance(metadata, dict) else None
+        if vocab_size is not None:
+            try:
+                vocab_size = int(vocab_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid tokenizer vocab_size={vocab_size!r} in {metadata_path}."
+                ) from exc
+    if vocab_size is None and (tokenizer_path / "tokenizer.json").is_file():
+        tokenizer_json = tokenizer_path / "tokenizer.json"
+        try:
+            tokenizer_payload = json.loads(tokenizer_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not parse tokenizer data at {tokenizer_json} for {source!r}."
+            ) from exc
+        token_ids: List[int] = []
+        model_vocab = (
+            tokenizer_payload.get("model", {}).get("vocab", {})
+            if isinstance(tokenizer_payload, dict)
+            else {}
+        )
+        if isinstance(model_vocab, dict):
+            token_ids.extend(
+                int(token_id) for token_id in model_vocab.values() if isinstance(token_id, int)
+            )
+        added_tokens = (
+            tokenizer_payload.get("added_tokens", []) if isinstance(tokenizer_payload, dict) else []
+        )
+        if isinstance(added_tokens, list):
+            token_ids.extend(
+                int(token.get("id"))
+                for token in added_tokens
+                if isinstance(token, dict) and isinstance(token.get("id"), int)
+            )
+        if token_ids:
+            vocab_size = max(token_ids) + 1
+
+    if vocab_size is not None and vocab_size != _TOKENIZER_VOCAB_SIZE:
+        raise ValueError(
+            "VisionReward requires a Llama-3-compatible tokenizer with "
+            f"vocab_size={_TOKENIZER_VOCAB_SIZE}, but {source!r} declares or "
+            f"implies vocab_size={vocab_size}. A Qwen/Mistral/Llama-2 tokenizer "
+            "cannot be substituted for this checkpoint."
+        )
     return tokenizer_path
+
+
+def _download_tokenizer_snapshot(repo_id: Any, extras: dict) -> Path:
+    """Download or resolve only tokenizer files from a Hugging Face repo."""
+    repo_id = _normalise_hf_repo_id(repo_id)
+    local_files_only = extras.get("tokenizer_local_files_only", False)
+    if not isinstance(local_files_only, bool):
+        raise TypeError(
+            "VisionReward `tokenizer_local_files_only` must be a boolean, "
+            f"got {local_files_only!r}."
+        )
+
+    revision = extras.get("tokenizer_revision")
+    cache_dir = extras.get("tokenizer_cache_dir")
+    try:
+        snapshot = snapshot_download(
+            repo_id=repo_id,
+            revision=str(revision) if revision else None,
+            cache_dir=str(cache_dir) if cache_dir else None,
+            local_files_only=local_files_only,
+            allow_patterns=list(_TOKENIZER_ARTIFACTS),
+        )
+    except (
+        EntryNotFoundError,
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        RepositoryNotFoundError,
+        OSError,
+    ) as exc:
+        mode = "the local Hugging Face cache" if local_files_only else "the Hugging Face Hub"
+        raise FileNotFoundError(
+            f"Could not resolve VisionReward tokenizer repository {repo_id!r} from {mode}. "
+            "If this repository is public, download only its tokenizer files on a "
+            "networked host and set `tokenizer_path` to the copied directory. "
+            "For an offline cache lookup, set `tokenizer_local_files_only: true`. "
+            f"Original error: {exc}"
+        ) from exc
+    return _validate_tokenizer_directory(Path(str(snapshot)), f"HF repo {repo_id!r}")
+
+
+def _resolve_tokenizer_path(extras: dict) -> Path:
+    """Resolve a local path or an explicitly selected Hugging Face tokenizer repo.
+
+    ``tokenizer_path`` remains compatible with the existing local-directory
+    contract.  A public repository can be selected with ``tokenizer_repo`` (or
+    by putting an unambiguous ``owner/repository`` ID in ``tokenizer_path``);
+    only tokenizer/config files are downloaded.  The gated Meta default is
+    never replaced implicitly, preserving the official checkpoint behavior.
+    """
+    configured = extras.get("tokenizer_path")
+    env_tokenizer = os.environ.get(_TOKENIZER_ENV)
+    configured_text = str(configured).strip() if configured else ""
+
+    # A concrete local path or VISIONREWARD_TOKENIZER always wins over a repo
+    # alias.  The template's gated ID is a placeholder and can be replaced by
+    # either environment variable without editing every source entry.
+    if configured_text and configured_text != _DEFAULT_TOKENIZER_PATH:
+        candidate: Any = configured
+    elif env_tokenizer:
+        candidate = env_tokenizer
+    else:
+        candidate = None
+
+    if candidate is None:
+        candidate = extras.get("tokenizer_repo") or os.environ.get(_TOKENIZER_REPO_ENV)
+        if candidate:
+            return _download_tokenizer_snapshot(candidate, extras)
+        candidate = _DEFAULT_TOKENIZER_PATH
+
+    tokenizer_path = Path(str(candidate)).expanduser()
+    if tokenizer_path.is_dir():
+        return _validate_tokenizer_directory(tokenizer_path, f"local path {candidate!r}")
+
+    # Explicitly selecting a public repo through tokenizer_path is convenient,
+    # while the gated Meta placeholder still fails fast with an actionable
+    # offline message instead of attempting an unauthorized download.
+    if candidate != _DEFAULT_TOKENIZER_PATH and _is_hf_repo_id(candidate):
+        return _download_tokenizer_snapshot(candidate, extras)
+
+    raise FileNotFoundError(
+        "VisionReward requires a local Llama-3 tokenizer directory, but "
+        f"tokenizer_path={candidate!r} is not a directory. The default "
+        f"{_DEFAULT_TOKENIZER_PATH!r} is a gated Hugging Face repository ID. "
+        "Set `extra_kwargs.tokenizer_path` or `VISIONREWARD_TOKENIZER` to a "
+        "local snapshot, or select a public compatible repository with "
+        "`extra_kwargs.tokenizer_repo` / `VISIONREWARD_TOKENIZER_REPO`. The "
+        "snapshot must contain tokenizer.json (or tokenizer.model) and "
+        "tokenizer_config.json/config.json."
+    )
 
 
 def _resolve_repo_file(repo: Path, configured: Any, default_relative: str) -> Path:
@@ -307,9 +484,14 @@ class VisionRewardModel(PointwiseRewardModel):
         model_path: Extracted checkpoint directory containing
             ``model_config.json`` (or ``VISIONREWARD_MODEL``).
         tokenizer_path: Local Llama-3 tokenizer directory (or
-            ``VISIONREWARD_TOKENIZER``). The directory must contain the
-            tokenizer files; the upstream repository ID is not downloaded by
-            the offline evaluator.
+            ``VISIONREWARD_TOKENIZER``). An unambiguous public Hugging Face
+            ``owner/repository`` ID is also accepted and downloads only the
+            tokenizer/config files during preflight.
+        tokenizer_repo: Optional public Hugging Face tokenizer repository (or
+            ``VISIONREWARD_TOKENIZER_REPO``). This is useful when keeping
+            ``tokenizer_path`` as the template placeholder.
+        tokenizer_revision, tokenizer_cache_dir, tokenizer_local_files_only:
+            Optional Hugging Face snapshot controls.
         question_file: Selected image QA file (defaults to the upstream file).
         weight_file: Selected linear head (defaults to the upstream file).
         alignment_model: VQAScore model used for prompt-image alignment.
@@ -550,12 +732,14 @@ class VisionRewardModel(PointwiseRewardModel):
 
 
 def download_model() -> None:
-    """Validate the configured local checkpoint without loading model weights."""
+    """Validate the configured checkpoint and tokenizer without loading weights."""
     config = RewardArguments(
         device="cpu",
         extra_kwargs={
             "repo_path": os.environ.get("VISIONREWARD_REPO", "VisionReward"),
             "model_path": os.environ.get("VISIONREWARD_MODEL", _DEFAULT_MODEL_PATH),
+            "tokenizer_path": os.environ.get(_TOKENIZER_ENV),
+            "tokenizer_repo": os.environ.get(_TOKENIZER_REPO_ENV),
         },
     )
     VisionRewardModel.validate_config(config)

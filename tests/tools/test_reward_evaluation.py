@@ -23,6 +23,7 @@ import pytest
 import torch
 from PIL import Image
 
+import flow_factory.rewards.vision_reward as vision_reward_module
 from flow_factory.rewards.unireward import _single_device_map
 from flow_factory.rewards.vision_reward import (
     VisionRewardModel,
@@ -202,6 +203,114 @@ def test_vision_reward_tokenizer_environment_overrides_default(
         _resolve_tokenizer_path({"tokenizer_path": "meta-llama/Meta-Llama-3-8B-Instruct"})
         == tokenizer.resolve()
     )
+
+
+def test_vision_reward_resolves_public_tokenizer_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text(
+        '{"model_type": "llama", "vocab_size": 128256}', encoding="utf-8"
+    )
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    calls = {}
+
+    def fake_snapshot_download(**kwargs):
+        calls.update(kwargs)
+        return str(snapshot)
+
+    monkeypatch.setattr(vision_reward_module, "snapshot_download", fake_snapshot_download)
+
+    resolved = _resolve_tokenizer_path(
+        {
+            "tokenizer_repo": "hfl/llama-3-chinese-8b-instruct-v3",
+            "tokenizer_local_files_only": True,
+            "tokenizer_revision": "test-revision",
+            "tokenizer_cache_dir": tmp_path / "cache",
+        }
+    )
+
+    assert resolved == snapshot.resolve()
+    assert calls["repo_id"] == "hfl/llama-3-chinese-8b-instruct-v3"
+    assert calls["revision"] == "test-revision"
+    assert calls["local_files_only"] is True
+    assert "tokenizer.json" in calls["allow_patterns"]
+    assert "*.safetensors" not in calls["allow_patterns"]
+
+
+def test_vision_reward_accepts_public_repo_id_in_tokenizer_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text(
+        '{"model_type": "llama", "vocab_size": 128256}', encoding="utf-8"
+    )
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(vision_reward_module, "snapshot_download", lambda **_: str(snapshot))
+
+    assert (
+        _resolve_tokenizer_path(
+            {
+                "tokenizer_path": "hf://hfl/llama-3-chinese-8b-instruct-v3",
+                "tokenizer_local_files_only": True,
+            }
+        )
+        == snapshot.resolve()
+    )
+
+
+def test_vision_reward_tokenizer_repo_environment_overrides_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text(
+        '{"model_type": "llama", "vocab_size": 128256}', encoding="utf-8"
+    )
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VISIONREWARD_TOKENIZER_REPO", "hfl/llama-3-chinese-8b-instruct-v3")
+    monkeypatch.setattr(vision_reward_module, "snapshot_download", lambda **_: str(snapshot))
+
+    assert (
+        _resolve_tokenizer_path({"tokenizer_path": "meta-llama/Meta-Llama-3-8B-Instruct"})
+        == snapshot.resolve()
+    )
+
+
+def test_vision_reward_rejects_incompatible_tokenizer_vocab(tmp_path: Path) -> None:
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "config.json").write_text(
+        '{"model_type": "llama", "vocab_size": 32000}', encoding="utf-8"
+    )
+    (tokenizer / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="vocab_size=128256"):
+        _resolve_tokenizer_path({"tokenizer_path": str(tokenizer)})
+
+
+def test_vision_reward_infers_tokenizer_vocab_from_tokenizer_json(tmp_path: Path) -> None:
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (tokenizer / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "model": {"vocab": {"token": 0}},
+                "added_tokens": [{"id": 128255, "content": "<|eot_id|>"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _resolve_tokenizer_path({"tokenizer_path": str(tokenizer)}) == tokenizer.resolve()
+
+
+def test_vision_reward_rejects_invalid_tokenizer_repo_id() -> None:
+    with pytest.raises(ValueError, match="owner/repository"):
+        _resolve_tokenizer_path({"tokenizer_repo": "qwen"})
 
 
 def test_vision_reward_selected_head_matches_upstream_files() -> None:
