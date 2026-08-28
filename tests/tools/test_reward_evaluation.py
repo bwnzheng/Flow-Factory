@@ -29,8 +29,10 @@ from flow_factory.rewards.unireward import _single_device_map
 from flow_factory.rewards.vision_reward import (
     VisionRewardModel,
     _load_image_score_head,
+    _replace_non_cuda_rotary_embedding,
     _resolve_model_path,
     _resolve_tokenizer_path,
+    _TorchRotaryEmbedding,
     compose_vision_reward_score,
 )
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord
@@ -439,11 +441,22 @@ def test_vision_reward_vqa_stage_does_not_load_alignment_component(
     class LoadedModel:
         image_length = 16
 
+        def __init__(self):
+            self._rotary_mixin = type(
+                "RotaryMixin",
+                (),
+                {"rotary_emb": type("FastRotary", (), {"dim": 4, "base": 500000})()},
+            )()
+
         def eval(self):
             return self
 
         def add_mixin(self, name, mixin):
             calls.append((name, type(mixin).__name__))
+
+        def get_mixin(self, name):
+            assert name == "rotary"
+            return self._rotary_mixin
 
     class VisualLlamaEVA:
         @classmethod
@@ -507,6 +520,48 @@ def test_vision_reward_vqa_stage_does_not_load_alignment_component(
 
     assert calls == [(str(tmp_path), "cpu"), ("auto-regressive", "CachedAutoregressiveMixin")]
     assert not hasattr(model, "_vqa_scorer")
+
+
+def test_non_cuda_rotary_fallback_matches_first_half_sat_convention() -> None:
+    mixin = type(
+        "Mixin",
+        (),
+        {"rotary_emb": type("FastRotary", (), {"dim": 4, "base": 10000})()},
+    )()
+    model = type("Model", (), {"get_mixin": lambda self, name: mixin})()
+
+    assert _replace_non_cuda_rotary_embedding(model, torch.device("cpu")) is True
+    assert isinstance(model.get_mixin("rotary").rotary_emb, _TorchRotaryEmbedding)
+
+    q = torch.tensor([[[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]]])
+    k = q.clone()
+    position_ids = torch.tensor([[0, 2]])
+    rotated_q, rotated_k = model.get_mixin("rotary").rotary_emb(
+        q, k, position_ids, max_seqlen=torch.tensor(3)
+    )
+    theta_first = 2.0
+    theta_second = 2.0 * (10000.0 ** (-0.5))
+    expected_second = torch.tensor(
+        [
+            5.0 * torch.cos(torch.tensor(theta_first)) - 7.0 * torch.sin(torch.tensor(theta_first)),
+            6.0 * torch.cos(torch.tensor(theta_second))
+            - 8.0 * torch.sin(torch.tensor(theta_second)),
+            5.0 * torch.sin(torch.tensor(theta_first)) + 7.0 * torch.cos(torch.tensor(theta_first)),
+            6.0 * torch.sin(torch.tensor(theta_second))
+            + 8.0 * torch.cos(torch.tensor(theta_second)),
+        ]
+    )
+    assert torch.allclose(rotated_q[0, 0, 1], expected_second, atol=1e-6)
+    assert torch.equal(rotated_q, rotated_k)
+
+
+def test_cuda_rotary_keeps_sat_fast_implementation() -> None:
+    fast = type("FastRotary", (), {"dim": 4, "base": 10000})()
+    mixin = type("Mixin", (), {"rotary_emb": fast})()
+    model = type("Model", (), {"get_mixin": lambda self, name: mixin})()
+
+    assert _replace_non_cuda_rotary_embedding(model, torch.device("cuda")) is False
+    assert model.get_mixin("rotary").rotary_emb is fast
 
 
 def test_vision_reward_staged_evaluation_runs_two_passes_and_composes(

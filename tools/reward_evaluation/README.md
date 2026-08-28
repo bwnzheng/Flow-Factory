@@ -99,6 +99,10 @@ keeping both heavyweight feature extractors in NPU memory:
    in NumPy float64 on CPU and writes the normal final cache at
    `reward_scores/<reward>.jsonl`.
 
+On non-CUDA devices such as Ascend NPU, the adapter replaces SAT's
+CUDA-only Triton rotary kernel with an equivalent device-native PyTorch rotary
+implementation. CUDA keeps the upstream fast kernel.
+
 Both intermediate files are atomic, resumable caches. If the second pass is
 interrupted, the next run reuses the completed alignment pass and only fills
 missing VQA rows. The final score file and all downstream result formats are

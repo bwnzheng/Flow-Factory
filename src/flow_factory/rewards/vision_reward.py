@@ -85,6 +85,108 @@ _ALIGNMENT_STAGE = "alignment"
 _VQA_FEATURES_STAGE = "vqa_features"
 _VALID_STAGES = {_FULL_STAGE, _ALIGNMENT_STAGE, _VQA_FEATURES_STAGE}
 
+
+class _TorchRotaryEmbedding(torch.nn.Module):
+    """Apply the SAT rotary convention with device-native PyTorch operators."""
+
+    def __init__(self, dim: int, base: float = 500000):
+        super().__init__()
+        if dim <= 0 or dim % 2:
+            raise ValueError(
+                f"Rotary embedding dimension must be a positive even number, got {dim}."
+            )
+        self.dim = int(dim)
+        self.base = float(base)
+        inv_freq = 1.0 / (
+            self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim)
+        )
+        # Keep the tiny frequency table on CPU and move it with the query/key
+        # tensors at call time; this also avoids requiring NPU allocation while
+        # the SAT checkpoint is still being assembled.
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self._cache_length = 0
+        self._cache_device: Optional[torch.device] = None
+        self._cache_dtype: Optional[torch.dtype] = None
+        self._cos_cached: Optional[torch.Tensor] = None
+        self._sin_cached: Optional[torch.Tensor] = None
+
+    def _get_cos_sin(
+        self, sequence_length: int, device: torch.device, dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self._cos_cached is None
+            or self._sin_cached is None
+            or self._cache_length < sequence_length
+            or self._cache_device != device
+            or self._cache_dtype != dtype
+        ):
+            positions = torch.arange(sequence_length, device=device, dtype=torch.float32)
+            inv_freq = self.inv_freq.to(device=device)
+            frequencies = torch.einsum("s,d->sd", positions, inv_freq)
+            self._cos_cached = torch.cos(frequencies).to(dtype=dtype)
+            self._sin_cached = torch.sin(frequencies).to(dtype=dtype)
+            self._cache_length = sequence_length
+            self._cache_device = device
+            self._cache_dtype = dtype
+        return self._cos_cached, self._sin_cached
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_id: torch.Tensor,
+        max_seqlen: Any,
+        layer_id: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Rotate query and key tensors without invoking CUDA-only Triton code."""
+        del layer_id
+        if q.ndim != 4 or k.ndim != 4:
+            raise ValueError(
+                f"Expected query/key tensors with four dimensions, got {q.shape} and {k.shape}."
+            )
+        if q.shape[0] != k.shape[0] or q.shape[2] != k.shape[2]:
+            raise ValueError(f"Query/key batch or sequence mismatch: {q.shape} vs {k.shape}.")
+        if q.shape[-1] < self.dim or k.shape[-1] < self.dim:
+            raise ValueError(
+                f"Rotary dimension {self.dim} exceeds query/key head dimensions: "
+                f"{q.shape[-1]} and {k.shape[-1]}."
+            )
+        if position_id.ndim != 2 or position_id.shape[1] != q.shape[2]:
+            raise ValueError(
+                f"Position IDs must have shape (batch, {q.shape[2]}), got {position_id.shape}."
+            )
+        if position_id.shape[0] not in {1, q.shape[0]}:
+            raise ValueError(
+                f"Position-ID batch dimension {position_id.shape[0]} does not match query "
+                f"batch dimension {q.shape[0]}."
+            )
+
+        if isinstance(max_seqlen, torch.Tensor):
+            max_seqlen = int(max_seqlen.detach().cpu().item())
+        else:
+            max_seqlen = int(max_seqlen)
+        positions = position_id.to(device=q.device, dtype=torch.long)
+        if positions.shape[0] == 1 and q.shape[0] != 1:
+            positions = positions.expand(q.shape[0], -1)
+        sequence_length = max(max_seqlen, int(positions.max().detach().cpu().item()) + 1)
+        cos_table, sin_table = self._get_cos_sin(sequence_length, q.device, q.dtype)
+        cos = cos_table[positions].unsqueeze(1)
+        sin = sin_table[positions].unsqueeze(1)
+
+        def apply_rotary(x: torch.Tensor) -> torch.Tensor:
+            first_half = x[..., : self.dim // 2]
+            second_half = x[..., self.dim // 2 : self.dim]
+            rotated = torch.cat(
+                (first_half * cos - second_half * sin, first_half * sin + second_half * cos),
+                dim=-1,
+            )
+            if x.shape[-1] == self.dim:
+                return rotated
+            return torch.cat((rotated, x[..., self.dim :]), dim=-1)
+
+        return apply_rotary(q), apply_rotary(k)
+
+
 # The first three questions are mask features in the official image scorer.
 # Their values gate the remaining question features before the linear head.
 _MASK_FEATURE_MAP = {
@@ -536,6 +638,24 @@ def _import_visionreward_alignment(extras: dict):
     return VQAScore
 
 
+def _replace_non_cuda_rotary_embedding(model: Any, device: torch.device) -> bool:
+    """Replace SAT's CUDA-only Triton rotary module on non-CUDA devices."""
+    if device.type == "cuda":
+        return False
+    try:
+        rotary_mixin = model.get_mixin("rotary")
+        fast_rotary = rotary_mixin.rotary_emb
+        rotary_dim = int(fast_rotary.dim)
+        rotary_base = float(fast_rotary.base)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "VisionReward could not locate the SAT rotary embedding needed for "
+            f"the non-CUDA device {device}."
+        ) from exc
+    rotary_mixin.rotary_emb = _TorchRotaryEmbedding(rotary_dim, base=rotary_base)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Reward model
 # ---------------------------------------------------------------------------
@@ -694,6 +814,11 @@ class VisionRewardModel(PointwiseRewardModel):
         self._model, loaded_args = VisualLlamaEVA.from_pretrained(str(model_path), args=model_args)
         self._model = self._model.eval()
         self._model.add_mixin("auto-regressive", CachedAutoregressiveMixin())
+        if _replace_non_cuda_rotary_embedding(self._model, self.device):
+            logger.info(
+                "VisionReward replaced SAT Triton rotary embedding with the "
+                f"PyTorch fallback for device={self.device}."
+            )
 
         self._tokenizer = llama3_tokenizer(model_args.tokenizer_path, signal_type=self._version)
         image_size = loaded_args.eva_args["image_size"]

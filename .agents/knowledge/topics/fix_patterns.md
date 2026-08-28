@@ -254,6 +254,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: When a reward is a late fusion of independent heavyweight features, separate their process lifetimes rather than relying on allocator cache cleanup inside one process. Persist feature-boundary artifacts so an expensive completed pass survives later failures.
 - **Related Constraint**: N/A
 
+### VisionReward SAT rotary kernel assumed CUDA on Ascend NPU
+- **Date**: 2026-08-28
+- **Symptom**: The staged VisionReward VQA pass loaded the checkpoint successfully but failed on the first transformer forward with `RuntimeError: PyTorch was compiled without CUDA support` inside SAT's Triton rotary kernel.
+- **Root Cause**: The upstream `FastRotaryEmbedding` unconditionally enters `torch.cuda.device(...)`, while the evaluation worker uses an NPU device and a PyTorch build without CUDA.
+- **Fix**: `vision_reward.py` now replaces the loaded SAT rotary module with a device-native PyTorch implementation for non-CUDA devices, preserving the upstream first-half rotary convention and retaining Triton on CUDA. Regression tests cover the numerical convention and the CUDA/non-CUDA selection.
+- **Lesson**: NPU compatibility cannot be inferred from successful checkpoint loading; audit every custom kernel on the actual forward path and provide a numerically equivalent backend-specific fallback before invoking it.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
