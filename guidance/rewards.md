@@ -45,6 +45,7 @@ Flow-Factory supports two paradigms for computing rewards:
 | `geneval2_soft_tifa` | Pointwise | GenEval2 Soft-TIFA: per-atom VQA soft-match via local Qwen3-VL, AM/GM aggregation; `vqa_list` from dataset `metadata` or a `data_path` JSONL. Needs `pip install -e ".[geneval2]"` for exact GM parity | [GenEval2](https://github.com/facebookresearch/GenEval2) |
 | `hpsv2` | Pointwise | Human Preference Score v2 (OpenCLIP ViT-H-14 + HPS checkpoint). Install with `uv pip install hpsv2 --no-deps` | [HPSv2](https://github.com/tgxs002/HPSv2) |
 | `imagereward` | Pointwise | ImageReward-v1.0 BLIP-based human preference score for text-to-image pairs. Install with `pip install -e ".[image-reward]"` | [ImageReward](https://github.com/zai-org/ImageReward) |
+| `cycle_reward` | Pointwise | CycleReward BLIP-based image-text alignment score trained on cycle-consistency preferences. Install with `pip install -e ".[cycle-reward]"` | [CycleReward](https://github.com/hjbahng/cyclereward) |
 | `vision_reward` | Pointwise | VisionReward image preference score via the upstream SAT/CogVLM2 stack; requires an extracted local checkpoint, a Llama-3-compatible tokenizer (`tokenizer_path` or `tokenizer_repo`), or an isolated reward server | [VisionReward](https://github.com/THUDM/VisionReward) |
 | `vllm_evaluate` | Pointwise | VLM with a binary Yes/No question; reward from logprobs via OpenAI-compatible API | [VLM-as-Judge](#vlm-as-judge) |
 | `rational_rewards_t2i` | Pointwise | T2I rubric judge (remote VLM); see [VLM-as-Judge](#vlm-as-judge) and [Example: Rational Rewards](#example-rational-rewards) | [Rational Rewards](https://github.com/TIGER-AI-Lab/RationalRewards) |
@@ -166,6 +167,30 @@ ImageReward follows the upstream scorer's normalized, approximately standard-
 normal score convention (higher is preferred). The adapter calls the official
 scorer once per prompt-image pair; Flow-Factory still controls outer reward
 batching and routing.
+
+For CycleReward, install the optional dependency and choose one of the
+released checkpoints:
+
+```bash
+pip install -e ".[cycle-reward]"
+```
+
+```yaml
+rewards:
+  - name: "cycle"
+    reward_model: "cycle_reward"
+    model_type: "CycleReward-Combo"  # Options: CycleReward-Combo, CycleReward-I2T, CycleReward-T2I
+    cache_dir: "./checkpoints"
+    batch_size: 8
+```
+
+`CycleReward-Combo` is the recommended checkpoint. The upstream loader stores
+the selected CycleReward checkpoint and `med_config.json` in `cache_dir` on
+first use. The BLIP base checkpoint is downloaded through timm/torch hub into
+its separate `TORCH_HOME/checkpoints` cache; set `TORCH_HOME` if that large
+base model must live elsewhere. Scores are returned unchanged; Flow-Factory's
+shared advantage processor handles reward normalization. For video samples,
+the first frame is scored.
 
 For single reward, you can also use the shorthand format:
 

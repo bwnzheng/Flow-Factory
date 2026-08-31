@@ -98,6 +98,11 @@ image-reward = [
     "image-reward>=1.5",
 ]
 
+# CycleReward BLIP-based image-text alignment scorer.
+cycle-reward = [
+    "cyclereward>=0.1.7",
+]
+
 # HPS v2 reward is NOT an optional extra: the PyPI `hpsv2` package pins protobuf<4, which
 # conflicts with flow-factory's protobuf>=6. Install it without its dependencies after
 # flow-factory:  uv pip install hpsv2 --no-deps  (runtime works with protobuf 6+).

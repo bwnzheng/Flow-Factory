@@ -45,6 +45,8 @@ _REWARD_MODEL_REGISTRY: Dict[str, str] = {
     'imagereward': 'flow_factory.rewards.image_reward.ImageRewardModel',
     'vision_reward': 'flow_factory.rewards.vision_reward.VisionRewardModel',
     'unireward': 'flow_factory.rewards.unireward.UniRewardModel',
+    'cycle_reward': 'flow_factory.rewards.cycle_reward.CycleRewardModel',
+    'cyclereward': 'flow_factory.rewards.cycle_reward.CycleRewardModel',
 }
 _REWARD_MODEL_REGISTRY = {k.lower(): v for k, v in _REWARD_MODEL_REGISTRY.items()}
 
