@@ -28,6 +28,7 @@ pyproject.toml
 │   ├── bagel           flash-attn, opencv-python
 │   ├── geneval         mmcv, mmengine, mmdet, open_clip_torch
 │   ├── geneval2        scipy (exact GenEval2 GM parity)
+│   ├── image-reward    upstream ImageReward BLIP scorer and loader
 │   └── all             deepspeed + quantization
 └── [tool.*]            black, isort config
 ```
@@ -72,6 +73,15 @@ The authoritative list is `pyproject.toml` `[project.dependencies]` (20+ package
 
 ### HPSv2 reward
 - The PyPI `hpsv2` package pins `protobuf<4`, conflicting with Flow-Factory's `protobuf>=6`. It is **not** an optional extra. Install it without dependencies after Flow-Factory: `uv pip install hpsv2 --no-deps` (runtime works with protobuf 6+).
+
+### ImageReward reward
+- The `imagereward` reward is optional because the upstream `image-reward` package
+  adds an auxiliary BLIP/timm/fairscale stack. Install it with
+  `pip install -e ".[image-reward]"` before selecting the reward.
+- The adapter delegates checkpoint loading and preprocessing to the upstream
+  `ImageReward.load`/`ImageReward.score` implementation. The default model name
+  is `ImageReward-v1.0`; `model_path`, `download_root`, and `med_config` are
+  forwarded through `RewardArguments` extra keys.
 
 ### accelerate
 - Primary distributed backend. `accelerator.prepare()` is used for trainable modules and optimizer only (constraint #9).

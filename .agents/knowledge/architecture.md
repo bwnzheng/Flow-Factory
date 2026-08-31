@@ -150,6 +150,7 @@ their base optimization algorithms.
 | `geneval` | `GenEvalRewardModel` | Pointwise |
 | `geneval2_soft_tifa` | `GenEval2SoftTIFARewardModel` | Pointwise |
 | `hpsv2` | `HPSv2RewardModel` | Pointwise |
+| `imagereward` | `ImageRewardModel` | Pointwise |
 | `qwen_image_bench` | `QwenImageBenchRewardModel` | Pointwise |
 
 ---

@@ -44,6 +44,7 @@ Flow-Factory supports two paradigms for computing rewards:
 | `GenEval` | Pointwise | Compositional T2I evaluation (object count, color, position) via Mask2Former + CLIP | [GenEval](https://github.com/djghosh13/geneval) |
 | `geneval2_soft_tifa` | Pointwise | GenEval2 Soft-TIFA: per-atom VQA soft-match via local Qwen3-VL, AM/GM aggregation; `vqa_list` from dataset `metadata` or a `data_path` JSONL. Needs `pip install -e ".[geneval2]"` for exact GM parity | [GenEval2](https://github.com/facebookresearch/GenEval2) |
 | `hpsv2` | Pointwise | Human Preference Score v2 (OpenCLIP ViT-H-14 + HPS checkpoint). Install with `uv pip install hpsv2 --no-deps` | [HPSv2](https://github.com/tgxs002/HPSv2) |
+| `imagereward` | Pointwise | ImageReward-v1.0 BLIP-based human preference score for text-to-image pairs. Install with `pip install -e ".[image-reward]"` | [ImageReward](https://github.com/zai-org/ImageReward) |
 | `vision_reward` | Pointwise | VisionReward image preference score via the upstream SAT/CogVLM2 stack; requires an extracted local checkpoint, a Llama-3-compatible tokenizer (`tokenizer_path` or `tokenizer_repo`), or an isolated reward server | [VisionReward](https://github.com/THUDM/VisionReward) |
 | `vllm_evaluate` | Pointwise | VLM with a binary Yes/No question; reward from logprobs via OpenAI-compatible API | [VLM-as-Judge](#vlm-as-judge) |
 | `rational_rewards_t2i` | Pointwise | T2I rubric judge (remote VLM); see [VLM-as-Judge](#vlm-as-judge) and [Example: Rational Rewards](#example-rational-rewards) | [Rational Rewards](https://github.com/TIGER-AI-Lab/RationalRewards) |
@@ -142,6 +143,29 @@ rewards:
     device: "cuda"
     batch_size: 16
 ```
+
+For ImageReward, install the optional dependency and configure the upstream
+checkpoint name (or a local checkpoint path):
+
+```bash
+pip install -e ".[image-reward]"
+```
+
+```yaml
+rewards:
+  - name: "image_reward"
+    reward_model: "imagereward"
+    model_path: "ImageReward-v1.0"  # or a local ImageReward checkpoint
+    download_root: "/path/to/cache"  # optional; omit to use the upstream default
+    dtype: "bfloat16"
+    device: "cuda"
+    batch_size: 8
+```
+
+ImageReward follows the upstream scorer's normalized, approximately standard-
+normal score convention (higher is preferred). The adapter calls the official
+scorer once per prompt-image pair; Flow-Factory still controls outer reward
+batching and routing.
 
 For single reward, you can also use the shorthand format:
 
