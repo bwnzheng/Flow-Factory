@@ -14,3 +14,4 @@ plot:
 
 output:
   dir: "analysis_output/train_reward_analysis/nft_20260807_202455"
+  plot_format: "png"  # Matplotlib output format: png or pdf.

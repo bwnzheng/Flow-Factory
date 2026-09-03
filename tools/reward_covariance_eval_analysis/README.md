@@ -31,10 +31,17 @@ images/checkpoint_<step>/*.png
 reward_scores/<reward>.jsonl
 samples.jsonl
 prompt_metrics.jsonl
+plots/covariance_matrix.<plot_format>
 summary.json
 ```
 
 `samples.jsonl` records every image path, prompt, seed, sample index, and reward
 vector. `prompt_metrics.jsonl` records the full reward matrix, unbiased sample
 covariance, Pearson correlation, negative-pair ratio, and mean negative
-correlation for every prompt. No scalarization weights are used.
+correlation, and standardized covariance for every prompt. Standardized
+covariance is computed after z-scoring each reward within each prompt, so it is
+numerically equivalent to the prompt-local Pearson correlation matrix. The
+`plots/covariance_matrix.<plot_format>` heatmap uses the prompt-macro-averaged
+standardized covariance matrix; raw covariance remains available in the JSONL
+artifacts. Set `output.plot_format` to `png` (default) or `pdf` to choose the
+output format. No scalarization weights are used.

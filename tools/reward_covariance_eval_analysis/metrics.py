@@ -38,10 +38,14 @@ def compute_group_metrics(rewards: np.ndarray) -> Dict[str, Union[np.ndarray, fl
     covariance = np.cov(rewards, rowvar=False, ddof=1)
     scale = np.sqrt(np.outer(np.diag(covariance), np.diag(covariance)))
     correlation = np.divide(covariance, scale, out=np.eye(rewards.shape[1]), where=scale > 0)
+    # With nonzero variance this is exactly covariance after per-reward z-scoring.
+    # Keep the existing finite convention (diag=1, zero-variance cross terms=0).
+    standardized_covariance = correlation.copy()
     upper = correlation[np.triu_indices(rewards.shape[1], k=1)]
     return {
         "mean": rewards.mean(0),
         "covariance": covariance,
+        "standardized_covariance": standardized_covariance,
         "correlation": correlation,
         "negative_pairwise_correlation_ratio": float((upper < 0).mean()),
         "mean_negative_pairwise_correlation": (
@@ -66,6 +70,7 @@ def aggregate_group_metrics(
     keys = (
         "mean",
         "covariance",
+        "standardized_covariance",
         "correlation",
         "negative_pairwise_correlation_ratio",
         "mean_negative_pairwise_correlation",

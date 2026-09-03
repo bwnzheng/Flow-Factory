@@ -63,3 +63,4 @@ runs:
 
 output:
   dir: "analysis_output/reward_covariance_eval_analysis"
+  plot_format: "png"  # Covariance heatmap format: png or pdf.

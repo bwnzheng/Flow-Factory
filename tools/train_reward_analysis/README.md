@@ -48,6 +48,7 @@ plot:
 
 output:
   dir: "analysis_output/train_reward_analysis"
+  plot_format: "png"  # Matplotlib output format: png or pdf.
 ```
 
 Then run:
@@ -98,7 +99,9 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 The output directory also contains `metadata.json`,
 `per_reward_conflict_score/<reward>.png` for every active reward combination,
 `per_reward_disagreement/<reward>.png` for every active reward combination,
-and `reward_concordance_lower_bound.png` for the overall lower-bound curve.
+and `reward_concordance_lower_bound.<plot_format>` for the overall lower-bound
+curve. Set `output.plot_format` to `png` (default) or `pdf` to choose the
+format for all generated figures.
 When multiple runs are configured, every figure overlays their `run_label`
 trajectories. All runs use exactly the same raw-reward calculation.
 Every plotted curve is smoothed independently with the centered moving-average

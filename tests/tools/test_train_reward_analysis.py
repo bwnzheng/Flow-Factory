@@ -204,6 +204,22 @@ def test_plot_smoothing_window_is_configurable_and_requires_an_odd_integer(tmp_p
         _parse_config(config_path)
 
 
+def test_plot_format_accepts_pdf_and_rejects_unknown_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        "runs:\n  - name: run\noutput:\n  plot_format: pdf\n",
+        encoding="utf-8",
+    )
+    assert _parse_config(config_path).plot_format == "pdf"
+
+    config_path.write_text(
+        "runs:\n  - name: run\noutput:\n  plot_format: svg\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="png.*pdf"):
+        _parse_config(config_path)
+
+
 def test_centered_smoothing_uses_available_edge_points() -> None:
     rows = [{"step": step, "value": value} for step, value in enumerate((0.0, 3.0, 6.0, 9.0, 12.0))]
 

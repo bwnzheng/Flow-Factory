@@ -43,6 +43,7 @@ def test_default_config_is_weight_free_and_uses_fresh_rollouts() -> None:
     assert config.evaluation.num_samples_per_prompt == 16
     assert config.model.num_processes == 1
     assert config.model.device is None
+    assert config.plot_format == "png"
     assert [source.name for source in config.sources] == ["pickscore", "ocr"]
     assert [source.max_prompts for source in config.sources] == [100, 100]
 
@@ -99,6 +100,30 @@ output: {dir: output}
     config = load_config(config_path)
     assert config.model.device == "npu"
     assert config.model.num_processes == 2
+
+
+def test_plot_format_accepts_pdf_and_rejects_unknown_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        """
+model: {base_model: model}
+evaluation: {num_samples_per_prompt: 2}
+sources:
+  - name: test
+    prompts_file: prompts.txt
+    rewards:
+      - {name: a, reward_model: A}
+      - {name: b, reward_model: B}
+runs:
+  - {name: run, checkpoint: saves/run/checkpoint-1}
+output: {dir: output, plot_format: pdf}
+""",
+        encoding="utf-8",
+    )
+    assert load_config(config_path).plot_format == "pdf"
+    config_path.write_text(config_path.read_text().replace("plot_format: pdf", "plot_format: svg"))
+    with pytest.raises(ValueError, match="png.*pdf"):
+        load_config(config_path)
 
 
 def test_partition_keeps_prompt_groups_on_one_worker() -> None:
@@ -226,4 +251,6 @@ def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) ->
     assert len(sample_rows) == 4
     assert len(metric_rows) == 2
     np.testing.assert_allclose(metric_rows[0]["covariance"], [[0.5, 1.0], [1.0, 2.0]])
+    np.testing.assert_allclose(metric_rows[0]["standardized_covariance"], [[1.0, 1.0], [1.0, 1.0]])
     assert summary["n_prompts"] == 2
+    assert (tmp_path / summary["covariance_plot"]).is_file()

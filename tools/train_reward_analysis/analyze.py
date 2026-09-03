@@ -67,6 +67,7 @@ class AnalysisConfig:
     runs: list[RunSpec] = field(default_factory=list)
     smoothing_window: int = 5
     output_dir: str = "analysis_output/train_reward_analysis"
+    plot_format: str = "png"
 
 
 def main() -> None:
@@ -88,16 +89,19 @@ def main() -> None:
         rows,
         output_dir,
         smoothing_window=config.smoothing_window,
+        plot_format=config.plot_format,
     )
     plot_per_reward_disagreement_trajectories(
         rows,
         output_dir,
         smoothing_window=config.smoothing_window,
+        plot_format=config.plot_format,
     )
     plot_reward_concordance_lower_bound_trajectories(
         rows,
         output_dir,
         smoothing_window=config.smoothing_window,
+        plot_format=config.plot_format,
     )
     print(
         "[Reward concordance] "
@@ -154,6 +158,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
         "plot_smoothing_window": config.smoothing_window,
+        "plot_format": config.plot_format,
         "metrics": {
             "per_reward_conflict_score": "mean_standardized_weighted_reward_contribution",
             "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
@@ -216,6 +221,7 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
             "plot.smoothing_window",
         ),
         output_dir=str(output.get("dir", "analysis_output/train_reward_analysis")),
+        plot_format=_parse_plot_format(output.get("plot_format", "png")),
     )
 
 
@@ -227,6 +233,13 @@ def _validate_config(config: AnalysisConfig) -> None:
         raise ValueError(f"Run names must be unique, got {names}.")
     if not config.output_dir:
         raise ValueError("output.dir must be non-empty.")
+
+
+def _parse_plot_format(value: Any) -> str:
+    """Validate the configured matplotlib output format."""
+    if not isinstance(value, str) or value.lower() not in {"png", "pdf"}:
+        raise ValueError("output.plot_format must be either 'png' or 'pdf'.")
+    return value.lower()
 
 
 def _parse_weight_mapping(value: Any, field_name: str) -> dict[str, float]:

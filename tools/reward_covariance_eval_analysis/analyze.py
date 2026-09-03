@@ -36,6 +36,7 @@ from tools.reward_covariance_eval_analysis.metrics import (
     aggregate_group_metrics,
     compute_group_metrics,
 )
+from tools.reward_covariance_eval_analysis.plots import plot_covariance_matrix
 from tools.reward_covariance_eval_analysis.reward_scoring import score_reward
 
 
@@ -89,6 +90,7 @@ class AnalysisConfig:
     sources: List[SourceConfig]
     runs: List[RunConfig]
     output_dir: str
+    plot_format: str = "png"
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
     model = _mapping(raw, "model")
     evaluation = _mapping(raw, "evaluation")
     output = _mapping(raw, "output")
+    _reject_unknown(output, {"dir", "plot_format"}, "output")
     _reject_unknown(model, {"base_model", "dtype", "device", "num_processes"}, "model")
     _reject_unknown(
         evaluation,
@@ -191,6 +194,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         sources=sources,
         runs=runs,
         output_dir=_nonempty_string(output.get("dir"), "output.dir"),
+        plot_format=_plot_format(output.get("plot_format", "png")),
     )
 
 
@@ -392,6 +396,13 @@ def _write_analysis_artifacts(
         )
     _write_jsonl(experiment_dir / "prompt_metrics.jsonl", prompt_metrics)
     aggregate = aggregate_group_metrics(group_metrics)
+    covariance_plot_path = experiment_dir / "plots" / f"covariance_matrix.{config.plot_format}"
+    plot_covariance_matrix(
+        covariance=np.asarray(aggregate["standardized_covariance"]),
+        reward_names=reward_names,
+        output_path=covariance_plot_path,
+        title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
+    )
     summary = {
         "run_name": run.name,
         "run_label": run.label,
@@ -400,6 +411,7 @@ def _write_analysis_artifacts(
         "reward_names": reward_names,
         "n_prompts": len(prompt_metrics),
         "samples_per_prompt": config.evaluation.num_samples_per_prompt,
+        "covariance_plot": str(covariance_plot_path.relative_to(experiment_dir)),
         **_json_metrics(aggregate),
     }
     _write_json(experiment_dir / "summary.json", summary)
@@ -466,6 +478,7 @@ def _json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "reward_mean": np.asarray(metrics["mean"]).tolist(),
         "covariance": np.asarray(metrics["covariance"]).tolist(),
+        "standardized_covariance": np.asarray(metrics["standardized_covariance"]).tolist(),
         "correlation": np.asarray(metrics["correlation"]).tolist(),
         "negative_pairwise_correlation_ratio": float(
             metrics["negative_pairwise_correlation_ratio"]
@@ -528,6 +541,13 @@ def _minimum_int(value: Any, minimum: int, field: str) -> int:
 def _require_unique(values: List[str], field: str) -> None:
     if len(values) != len(set(values)):
         raise ValueError(f"{field} must be unique, got {values}.")
+
+
+def _plot_format(value: Any) -> str:
+    """Validate the configured covariance plot format."""
+    if not isinstance(value, str) or value.lower() not in {"png", "pdf"}:
+        raise ValueError("output.plot_format must be either 'png' or 'pdf'.")
+    return value.lower()
 
 
 def main() -> None:
