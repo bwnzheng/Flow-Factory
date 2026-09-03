@@ -23,4 +23,4 @@ plot:
   smoothing_window: 5
 
 output:
-  dir: "analysis_output/reward_disagreement_analysis/nft_20260808_215750"
+  dir: "analysis_output/train_reward_analysis/nft_20260808_215750"

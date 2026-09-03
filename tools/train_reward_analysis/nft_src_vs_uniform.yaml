@@ -14,4 +14,4 @@ plot:
   smoothing_window: 5
 
 output:
-  dir: "analysis_output/reward_disagreement_analysis/nft_src_vs_uniform"
+  dir: "analysis_output/train_reward_analysis/nft_src_vs_uniform"

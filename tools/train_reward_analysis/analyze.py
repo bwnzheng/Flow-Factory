@@ -17,8 +17,8 @@
 
 Usage::
 
-    python -m tools.reward_disagreement_analysis.analyze \\
-        -c tools/reward_disagreement_analysis/default.yaml
+    python -m tools.train_reward_analysis.analyze \\
+        -c tools/train_reward_analysis/default.yaml
 """
 
 from __future__ import annotations
@@ -33,15 +33,15 @@ from typing import Any
 import numpy as np
 import yaml
 
-from tools.reward_disagreement_analysis.metrics import (
+from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
 )
-from tools.reward_disagreement_analysis.plots import (
+from tools.train_reward_analysis.plots import (
     plot_per_reward_conflict_score_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
 )
-from tools.reward_disagreement_analysis.reward_logs import (
+from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
     SavedRewardWeightContext,
     load_saved_reward_weight_context,
@@ -65,7 +65,7 @@ class AnalysisConfig:
     save_dir: str = "saves"
     runs: list[RunSpec] = field(default_factory=list)
     smoothing_window: int = 5
-    output_dir: str = "analysis_output/reward_disagreement_analysis"
+    output_dir: str = "analysis_output/train_reward_analysis"
 
 
 def main() -> None:
@@ -208,7 +208,7 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
             plot.get("smoothing_window", 5),
             "plot.smoothing_window",
         ),
-        output_dir=str(output.get("dir", "analysis_output/reward_disagreement_analysis")),
+        output_dir=str(output.get("dir", "analysis_output/train_reward_analysis")),
     )
 
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Regression tests for offline prompt-local reward-concordance analysis."""
+"""Regression tests for offline train-reward analysis."""
 
 from __future__ import annotations
 
@@ -23,22 +23,22 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tools.reward_disagreement_analysis.analyze import (
+from tools.train_reward_analysis.analyze import (
     AnalysisConfig,
     RunSpec,
     _parse_config,
     run_analysis,
 )
-from tools.reward_disagreement_analysis.metrics import (
+from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
 )
-from tools.reward_disagreement_analysis.plots import (
+from tools.train_reward_analysis.plots import (
     _smoothed_series,
     plot_per_reward_conflict_score_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
 )
-from tools.reward_disagreement_analysis.reward_logs import load_train_reward_groups
+from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
 
 def test_group_metrics_report_raw_conflict_scores_and_lower_bound() -> None:

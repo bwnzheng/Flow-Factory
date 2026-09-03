@@ -285,10 +285,23 @@ def _expected_outputs(
         for sample_index_within_prompt in range(num_samples):
             relative_path = f"checkpoint_{step}/p{prompt_index}_s{sample_index_within_prompt}.png"
             paths.append(relative_path)
-            if not os.path.isfile(os.path.join(output_dir, relative_path)):
+            output_path = os.path.join(output_dir, relative_path)
+            if not _is_readable_image(output_path):
                 missing.append((prompt_index, sample_index_within_prompt, base_seed + sample_index))
             sample_index += 1
     return paths, missing
+
+
+def _is_readable_image(path: str) -> bool:
+    """Return whether an existing image can be opened and fully verified."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return True
 
 
 def _generate_batches(
@@ -329,7 +342,13 @@ def _generate_batches(
                 output_dir,
                 f"checkpoint_{step}/p{prompt_index}_s{sample_index}.png",
             )
-            image.save(path, "PNG")
+            temporary_path = f"{path}.tmp"
+            try:
+                image.save(temporary_path, "PNG")
+                os.replace(temporary_path, path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
 
 
 class EvaluationRunner:

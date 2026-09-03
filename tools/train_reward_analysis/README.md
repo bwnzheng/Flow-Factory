@@ -1,6 +1,6 @@
-# Reward Concordance Analysis
+# Train Reward Analysis
 
-This is an offline experiment for `notes/reward-disagreement.md`. It reads only
+This is an offline experiment for `notes/train-reward-analysis.md`. It reads only
 the saved train reward pickles at:
 
 ```text
@@ -45,22 +45,22 @@ plot:
   smoothing_window: 5
 
 output:
-  dir: "analysis_output/reward_disagreement_analysis"
+  dir: "analysis_output/train_reward_analysis"
 ```
 
 Then run:
 
 ```bash
-python -m tools.reward_disagreement_analysis.analyze \
-  -c tools/reward_disagreement_analysis/default.yaml
+python -m tools.train_reward_analysis.analyze \
+  -c tools/train_reward_analysis/default.yaml
 ```
 
 To compare the saved SRC-NFT run with its non-SRC NFT counterpart in the same
 figures, run:
 
 ```bash
-python -m tools.reward_disagreement_analysis.analyze \
-  -c tools/reward_disagreement_analysis/nft_src_vs_uniform.yaml
+python -m tools.train_reward_analysis.analyze \
+  -c tools/train_reward_analysis/nft_src_vs_uniform.yaml
 ```
 
 ## Metrics

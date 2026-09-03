@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 import pytest
 import torch
 import yaml
+from PIL import Image
 
 from tools.model_inference import (
     EvaluationRunner,
@@ -36,6 +37,7 @@ from tools.model_inference import (
     resolve_device,
     run_evaluation_set,
 )
+from tools.model_inference.runner import _expected_outputs
 
 
 class _FakeRunner:
@@ -154,7 +156,7 @@ def test_legacy_evaluation_runner_keywords_remain_supported(tmp_path: Path) -> N
     output_dir = tmp_path / "outputs"
     checkpoint_output = output_dir / "checkpoint_4"
     checkpoint_output.mkdir(parents=True)
-    (checkpoint_output / "p0_s0.png").write_bytes(b"cached")
+    Image.new("RGB", (1, 1), color="black").save(checkpoint_output / "p0_s0.png", "PNG")
     runner = EvaluationRunner("unused-base-model", "float32", device="cpu")
 
     paths = runner.generate_for_checkpoint(
@@ -168,6 +170,18 @@ def test_legacy_evaluation_runner_keywords_remain_supported(tmp_path: Path) -> N
     )
 
     assert paths == ["checkpoint_4/p0_s0.png"]
+
+
+def test_expected_outputs_marks_truncated_png_as_missing(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs"
+    image_dir = output_dir / "checkpoint_4"
+    image_dir.mkdir(parents=True)
+    (image_dir / "p0_s0.png").write_bytes(b"")
+
+    paths, missing = _expected_outputs(str(output_dir), 4, ["prompt"], 1, 42)
+
+    assert paths == ["checkpoint_4/p0_s0.png"]
+    assert missing == [(0, 0, 42)]
 
 
 def test_standalone_cli_resolves_evaluation_set_and_generation_args(
