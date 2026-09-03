@@ -172,6 +172,31 @@ def test_legacy_evaluation_runner_keywords_remain_supported(tmp_path: Path) -> N
     assert paths == ["checkpoint_4/p0_s0.png"]
 
 
+def test_base_model_only_generation_skips_lora_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tools.model_inference.runner as runner_module
+
+    runner = EvaluationRunner("unused-base-model", "float32", device="cpu")
+    runner._pipeline = object()
+    monkeypatch.setattr(
+        runner_module,
+        "apply_lora",
+        lambda *args, **kwargs: pytest.fail("base-model inference must not load LoRA"),
+    )
+    monkeypatch.setattr(runner_module, "_generate_batches", lambda *args, **kwargs: None)
+
+    paths = runner.generate_for_checkpoint(
+        checkpoint_path=None,
+        prompts=["base prompt"],
+        output_dir=str(tmp_path),
+        step=0,
+        num_samples=1,
+    )
+
+    assert paths == ["checkpoint_0/p0_s0.png"]
+
+
 def test_expected_outputs_marks_truncated_png_as_missing(tmp_path: Path) -> None:
     output_dir = tmp_path / "outputs"
     image_dir = output_dir / "checkpoint_4"
@@ -262,6 +287,7 @@ def test_default_yaml_uses_the_public_config_schema() -> None:
     config = load_inference_config(str(config_path))
 
     assert config.base_model == "stabilityai/stable-diffusion-3.5-medium"
+    assert config.model_type == "sd3-5"
     assert config.num_processes == 1
     assert config.generation_kwargs["num_inference_steps"] == 50
 
@@ -292,6 +318,64 @@ def test_inference_yaml_rejects_unknown_structural_fields(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError, match="Unknown fields in 'model'.*num_gpus"):
+        load_inference_config(str(config_path))
+
+
+@pytest.mark.parametrize("model_type", ["sdxl", "sd3-5", "flux1"])
+def test_inference_yaml_accepts_supported_model_types(tmp_path: Path, model_type: str) -> None:
+    config_path = tmp_path / "inference.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"model_type": model_type, "base_model": "base"},
+                "checkpoint": {"path": str(tmp_path / "checkpoint-1")},
+                "evaluation": {"dataset": str(tmp_path / "prompts.txt")},
+                "generation": {},
+                "output": {"dir": str(tmp_path / "output")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "checkpoint-1").mkdir()
+    (tmp_path / "prompts.txt").write_text("prompt\n", encoding="utf-8")
+
+    assert load_inference_config(str(config_path)).model_type == model_type
+
+
+def test_inference_yaml_normalizes_model_type_alias(tmp_path: Path) -> None:
+    config_path = tmp_path / "inference.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"model_type": "SD3.5L", "base_model": "base"},
+                "checkpoint": {"path": str(tmp_path / "checkpoint-1")},
+                "evaluation": {"dataset": "prompts.txt"},
+                "generation": {},
+                "output": {"dir": "output"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_inference_config(str(config_path)).model_type == "sd3-5"
+
+
+def test_inference_yaml_rejects_unknown_model_type(tmp_path: Path) -> None:
+    config_path = tmp_path / "inference.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"model_type": "flux2", "base_model": "base"},
+                "checkpoint": {"path": str(tmp_path / "checkpoint-1")},
+                "evaluation": {"dataset": "prompts.txt"},
+                "generation": {},
+                "output": {"dir": "output"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported model_type"):
         load_inference_config(str(config_path))
 
 

@@ -1,0 +1,37 @@
+# SD-XL base-model reward evaluation preset.
+
+model:
+  model_type: "sdxl"
+  base_model: "stabilityai/stable-diffusion-xl-base-1.0"
+  dtype: "float16"
+  device: null
+  num_processes: 1
+
+evaluation:
+  num_samples_per_prompt: 4
+  generation_batch_size: 1
+  reward_batch_size: 4
+  seed: 42
+  num_inference_steps: 30
+  guidance_scale: 7.0
+  height: 1024
+  width: 1024
+
+sources:
+  - name: "pickscore"
+    dataset_dir: "dataset/pickscore"
+    split: "test"
+    prompt_key: "prompt"
+    max_prompts: 0
+    rewards:
+      - {name: "pick_score", reward_model: "pickscore"}
+      - {name: "hpsv2", reward_model: "hpsv2"}
+      - {name: "clip_score", reward_model: "clip"}
+
+runs:
+  - name: "sdxl_base"
+    label: "SD-XL Base"
+    base_model_only: true
+
+output:
+  dir: "analysis_output/reward_evaluation/sdxl_base"

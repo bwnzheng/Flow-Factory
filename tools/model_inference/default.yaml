@@ -1,6 +1,7 @@
-# Standalone SD3.5 checkpoint inference configuration
+# Standalone checkpoint inference configuration
 
 model:
+  model_type: "sd3-5"             # Options: sdxl, sd3-5, flux1
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"               # Options: bfloat16, float16, float32
   device: null                     # Options: null (auto), cuda, npu, cpu

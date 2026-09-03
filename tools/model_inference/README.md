@@ -1,6 +1,6 @@
 # Model Inference
 
-This module owns reusable SD3.5 LoRA checkpoint inference for offline analysis tools. It
+This module owns reusable LoRA checkpoint inference for offline analysis tools. It
 can be imported from Python or executed directly over a TXT/JSONL evaluation set. Outputs
 are resumable: existing image slots are skipped, and `manifest.jsonl` records each prompt,
 seed, checkpoint, and relative image path.
@@ -11,6 +11,7 @@ Copy and edit `default.yaml`. All inference settings live in YAML:
 
 ```yaml
 model:
+  model_type: "sd3-5"             # Options: sdxl, sd3-5, flux1
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
   device: "npu"                   # null auto-detects NPU, CUDA, then CPU
@@ -50,6 +51,18 @@ the diffusers pipeline, so model-specific pipeline options can be added without 
 CLI. For one checkpoint, set `checkpoint.path`; when its directory is not named
 `checkpoint-N`, also set `checkpoint.step`. Each parallel worker loads one base pipeline and
 receives a deterministic subset of missing image slots.
+
+Supported model families are:
+
+- `sdxl` — `StableDiffusionXLPipeline`, for example `stabilityai/stable-diffusion-xl-base-1.0`.
+- `sd3-5` — `StableDiffusion3Pipeline`, including SD3.5 Medium, Large, and Large Turbo. Set
+  `model.base_model` to the desired weights, such as `stabilityai/stable-diffusion-3.5-large`.
+- `flux1` — `FluxPipeline`, for example `black-forest-labs/FLUX.1-dev`.
+
+The checkpoint must be compatible with the selected base model. A checkpoint directory with
+`adapter_config.json` is loaded as a PEFT adapter on the model's trainable component (`unet` for
+SDXL and `transformer` for SD3.5/FLUX.1). Other LoRA layouts are delegated to the pipeline's
+`load_lora_weights` implementation.
 
 ## Python API
 

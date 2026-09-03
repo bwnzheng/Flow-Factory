@@ -33,6 +33,7 @@ from tools.model_inference import (
     resolve_device,
     run_evaluation_set,
 )
+from tools.model_inference.model_types import validate_model_type
 from tools.reward_covariance_eval_analysis.analyze import PromptRecord, load_prompt_records
 from tools.reward_evaluation.scoring import score_reward
 
@@ -50,6 +51,7 @@ class ModelConfig:
     dtype: str
     device: Optional[str]
     num_processes: int
+    model_type: str = "sd3-5"
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class RunConfig:
     label: str
     checkpoint: Optional[str]
     checkpoint_dir: Optional[str]
+    base_model_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,11 @@ def load_config(path: Union[str, Path]) -> EvaluationSuiteConfig:
     model = _mapping(raw, "model")
     evaluation = _mapping(raw, "evaluation")
     output = _mapping(raw, "output")
-    _reject_unknown(model, {"base_model", "dtype", "device", "num_processes"}, "model")
+    _reject_unknown(
+        model,
+        {"model_type", "base_model", "dtype", "device", "num_processes"},
+        "model",
+    )
     _reject_unknown(
         evaluation,
         {
@@ -153,6 +160,7 @@ def load_config(path: Union[str, Path]) -> EvaluationSuiteConfig:
             dtype=dtype,
             device=device,
             num_processes=num_processes,
+            model_type=validate_model_type(model.get("model_type", "sd3-5")),
         ),
         evaluation=EvaluationConfig(
             num_samples_per_prompt=_positive_int(
@@ -279,13 +287,19 @@ def _generate_images(
     image_root: Path,
 ) -> List[Dict[str, Any]]:
     if config.model.num_processes == 1:
-        runner = EvaluationRunner(config.model.base_model, config.model.dtype, config.model.device)
+        runner = EvaluationRunner(
+            config.model.base_model,
+            config.model.dtype,
+            config.model.device,
+            model_type=config.model.model_type,
+        )
     else:
         runner = ParallelEvaluationRunner(
             config.model.base_model,
             config.model.dtype,
             num_processes=config.model.num_processes,
             device=config.model.device,
+            model_type=config.model.model_type,
         )
     try:
         run_evaluation_set(
@@ -309,7 +323,7 @@ def _write_artifacts(
     run: RunConfig,
     source: SourceConfig,
     step: int,
-    checkpoint_path: str,
+    checkpoint_path: Optional[str],
     prompt_records: List[PromptRecord],
     manifest_rows: List[Dict[str, Any]],
     reward_values: Dict[str, Dict[str, float]],
@@ -324,8 +338,10 @@ def _write_artifacts(
             {
                 "run_name": run.name,
                 "run_label": run.label,
+                "model_type": config.model.model_type,
+                "base_model": config.model.base_model,
                 "checkpoint_step": step,
-                "checkpoint_path": checkpoint_path,
+                "checkpoint_path": checkpoint_path or "base_model",
                 "source": source.name,
                 "prompt_index": prompt_index,
                 "prompt": row["prompt"],
@@ -351,8 +367,10 @@ def _write_artifacts(
     summary = {
         "run_name": run.name,
         "run_label": run.label,
+        "model_type": config.model.model_type,
+        "base_model": config.model.base_model,
         "checkpoint_step": step,
-        "checkpoint_path": checkpoint_path,
+        "checkpoint_path": checkpoint_path or "base_model",
         "source": source.name,
         "reward_names": reward_names,
         "n_prompts": len(prompt_records),
@@ -460,12 +478,23 @@ def _resolve_prompt_file(source: SourceConfig) -> str:
 def _parse_run(value: Any, index: int) -> RunConfig:
     if not isinstance(value, dict):
         raise ValueError(f"runs[{index}] must be a mapping.")
-    _reject_unknown(value, {"name", "label", "checkpoint", "checkpoint_dir"}, f"runs[{index}]")
+    _reject_unknown(
+        value,
+        {"name", "label", "checkpoint", "checkpoint_dir", "base_model_only"},
+        f"runs[{index}]",
+    )
     name = _nonempty_string(value.get("name"), f"runs[{index}].name")
     checkpoint_value = value.get("checkpoint")
     checkpoint_dir_value = value.get("checkpoint_dir")
-    if bool(checkpoint_value) == bool(checkpoint_dir_value):
-        raise ValueError(f"runs[{index}] must specify exactly one of checkpoint or checkpoint_dir.")
+    base_model_only = value.get("base_model_only", False)
+    if not isinstance(base_model_only, bool):
+        raise ValueError(f"runs[{index}].base_model_only must be a boolean.")
+    selected = sum(bool(item) for item in (checkpoint_value, checkpoint_dir_value))
+    if selected + int(base_model_only) != 1:
+        raise ValueError(
+            f"runs[{index}] must specify exactly one of checkpoint, checkpoint_dir, "
+            "or base_model_only."
+        )
     return RunConfig(
         name=name,
         label=_nonempty_string(value.get("label", name), f"runs[{index}].label"),
@@ -479,11 +508,14 @@ def _parse_run(value: Any, index: int) -> RunConfig:
             if checkpoint_dir_value
             else None
         ),
+        base_model_only=base_model_only,
     )
 
 
-def _resolve_run_checkpoints(run: RunConfig) -> List[Tuple[int, str]]:
+def _resolve_run_checkpoints(run: RunConfig) -> List[Tuple[int, Optional[str]]]:
     """Resolve all checkpoints selected by one run configuration."""
+    if run.base_model_only:
+        return [(0, None)]
     if run.checkpoint_dir is not None:
         return resolve_checkpoints(checkpoint_dir=run.checkpoint_dir)
     assert run.checkpoint is not None

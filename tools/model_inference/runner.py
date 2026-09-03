@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Load SD3.5 checkpoints and run reusable evaluation-set inference."""
+"""Load supported image-model checkpoints for reusable evaluation inference."""
 
 from __future__ import annotations
 
@@ -21,20 +21,49 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from peft import PeftModel
 from PIL import Image
 
-from diffusers import StableDiffusion3Pipeline
+from diffusers import (
+    DiffusionPipeline,
+    FluxPipeline,
+    StableDiffusion3Pipeline,
+    StableDiffusionXLPipeline,
+)
 from flow_factory.scheduler import FlowMatchEulerDiscreteSDEScheduler
 
-Checkpoint = Tuple[int, str]
+from .model_types import validate_model_type
+
+Checkpoint = Tuple[int, Optional[str]]
 ManifestRow = Dict[str, Union[int, str]]
 
 _CHECKPOINT_PATTERN = re.compile(r"checkpoint-(\d+)")
 _PIPELINE_LOAD_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _ModelPipelineSpec:
+    """Describe one supported Diffusers inference backend."""
+
+    pipeline_class: Type[DiffusionPipeline]
+    lora_component: str
+    use_flow_factory_scheduler: bool
+
+
+_MODEL_PIPELINE_SPECS = {
+    "sdxl": _ModelPipelineSpec(StableDiffusionXLPipeline, "unet", False),
+    "sd3-5": _ModelPipelineSpec(StableDiffusion3Pipeline, "transformer", True),
+    "flux1": _ModelPipelineSpec(FluxPipeline, "transformer", True),
+}
+
+
+def _model_pipeline_spec(model_type: str) -> _ModelPipelineSpec:
+    """Return the validated inference backend specification."""
+    return _MODEL_PIPELINE_SPECS[validate_model_type(model_type)]
 
 
 def discover_checkpoints(checkpoint_dir: str) -> List[Checkpoint]:
@@ -217,57 +246,72 @@ def load_base_pipeline(
     base_model: str,
     dtype_str: str,
     device: Optional[str] = None,
-) -> StableDiffusion3Pipeline:
-    """Load an SD3.5 pipeline with the Flow-Factory ODE scheduler.
+    model_type: str = "sd3-5",
+) -> DiffusionPipeline:
+    """Load a supported text-to-image pipeline for checkpoint evaluation.
 
     Args:
         base_model: Hugging Face model identifier or local model path.
         dtype_str: One of ``bfloat16``, ``float16``, or ``float32``.
         device: Torch device receiving the pipeline. Auto-detected when omitted.
+        model_type: Model family identifier: ``sdxl``, ``sd3-5``, or ``flux1``.
 
     Returns:
-        Loaded SD3.5 pipeline in evaluation mode.
+        Loaded Diffusers pipeline in evaluation mode.
     """
     dtype = _resolve_dtype(dtype_str)
     resolved_device = resolve_device(device)
+    spec = _model_pipeline_spec(model_type)
     with _PIPELINE_LOAD_LOCK:
-        pipeline = StableDiffusion3Pipeline.from_pretrained(base_model, torch_dtype=dtype)
-        scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
-            pipeline.scheduler.config,
-            dynamics_type="ODE",
-        )
-        scheduler.eval()
-        pipeline.scheduler = scheduler
+        pipeline = spec.pipeline_class.from_pretrained(base_model, torch_dtype=dtype)
+        if spec.use_flow_factory_scheduler:
+            scheduler = FlowMatchEulerDiscreteSDEScheduler.from_config(
+                pipeline.scheduler.config,
+                dynamics_type="ODE",
+            )
+            scheduler.eval()
+            pipeline.scheduler = scheduler
         pipeline = pipeline.to(resolved_device)
     return pipeline
 
 
 def apply_lora(
-    pipeline: StableDiffusion3Pipeline,
+    pipeline: DiffusionPipeline,
     checkpoint_path: str,
     dtype: torch.dtype,
+    model_type: str = "sd3-5",
 ) -> None:
-    """Load one LoRA checkpoint onto an SD3.5 pipeline.
+    """Load one PEFT or Diffusers LoRA checkpoint onto a pipeline.
 
     Args:
         pipeline: Base pipeline to modify.
         checkpoint_path: PEFT checkpoint directory.
         dtype: Dtype used to load the adapter weights.
+        model_type: Model family identifier selecting the LoRA target component.
     """
-    pipeline.transformer = PeftModel.from_pretrained(
-        pipeline.transformer,
-        checkpoint_path,
-        torch_dtype=dtype,
-    )
+    spec = _model_pipeline_spec(model_type)
+    adapter_config = os.path.join(checkpoint_path, "adapter_config.json")
+    if os.path.isfile(adapter_config):
+        component = getattr(pipeline, spec.lora_component)
+        component = PeftModel.from_pretrained(component, checkpoint_path, torch_dtype=dtype)
+        setattr(pipeline, spec.lora_component, component)
+        return
+    pipeline.load_lora_weights(checkpoint_path, adapter_name="reward_evaluation")
 
 
-def unload_lora(pipeline: StableDiffusion3Pipeline) -> None:
-    """Unload the current LoRA adapter and restore the base transformer.
+def unload_lora(pipeline: DiffusionPipeline, model_type: str = "sd3-5") -> None:
+    """Unload the current LoRA adapter and restore the base component.
 
     Args:
-        pipeline: Pipeline whose transformer currently carries a PEFT adapter.
+        pipeline: Pipeline whose model component currently carries a LoRA adapter.
+        model_type: Model family identifier selecting the LoRA target component.
     """
-    pipeline.transformer = pipeline.transformer.unload()
+    spec = _model_pipeline_spec(model_type)
+    component = getattr(pipeline, spec.lora_component)
+    if isinstance(component, PeftModel):
+        setattr(pipeline, spec.lora_component, component.unload())
+        return
+    pipeline.unload_lora_weights()
 
 
 def _expected_outputs(
@@ -352,13 +396,14 @@ def _generate_batches(
 
 
 class EvaluationRunner:
-    """Generate SD3.5 images from a base model and LoRA checkpoints."""
+    """Generate images from a supported base model and LoRA checkpoints."""
 
     def __init__(
         self,
         base_model: str,
         dtype_str: str,
         device: Optional[str] = None,
+        model_type: str = "sd3-5",
     ) -> None:
         """Initialize a lazy-loading inference runner.
 
@@ -366,33 +411,36 @@ class EvaluationRunner:
             base_model: Hugging Face model identifier or local model path.
             dtype_str: One of ``bfloat16``, ``float16``, or ``float32``.
             device: Torch inference device. Auto-detects NPU, then CUDA, then CPU.
+            model_type: Model family identifier: ``sdxl``, ``sd3-5``, or ``flux1``.
         """
         self.device = resolve_device(device)
         self.dtype_str = dtype_str
         self.dtype = _resolve_dtype(dtype_str)
         self.base_model = base_model
-        self._pipeline: Optional[StableDiffusion3Pipeline] = None
+        self.model_type = validate_model_type(model_type)
+        self._pipeline: Optional[DiffusionPipeline] = None
 
     @property
-    def pipeline(self) -> StableDiffusion3Pipeline:
+    def pipeline(self) -> DiffusionPipeline:
         """Return the lazily loaded base pipeline."""
         if self._pipeline is None:
             self._pipeline = load_base_pipeline(
                 self.base_model,
                 self.dtype_str,
                 self.device,
+                self.model_type,
             )
         return self._pipeline
 
     @property
-    def pipe(self) -> StableDiffusion3Pipeline:
+    def pipe(self) -> DiffusionPipeline:
         """Return the pipeline using the legacy property name."""
         return self.pipeline
 
     @torch.no_grad()
     def generate_for_checkpoint(
         self,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str],
         prompts: List[str],
         output_dir: str,
         step: Optional[int] = None,
@@ -405,7 +453,7 @@ class EvaluationRunner:
         """Generate all missing evaluation images for one checkpoint.
 
         Args:
-            checkpoint_path: LoRA checkpoint directory.
+            checkpoint_path: LoRA checkpoint directory, or ``None`` for base-model-only inference.
             prompts: Evaluation prompts.
             output_dir: Root directory for generated images.
             step: Checkpoint step used in the output directory name. The legacy
@@ -465,7 +513,8 @@ class EvaluationRunner:
             f"(batch size={batch_size}) ...",
             flush=True,
         )
-        apply_lora(self.pipeline, checkpoint_path, self.dtype)
+        if checkpoint_path is not None:
+            apply_lora(self.pipeline, checkpoint_path, self.dtype, self.model_type)
         try:
             _generate_batches(
                 self,
@@ -477,14 +526,15 @@ class EvaluationRunner:
                 missing,
             )
         finally:
-            self.unload_lora()
+            if checkpoint_path is not None:
+                self.unload_lora()
         return paths
 
     def unload_lora(self) -> None:
         """Unload the active LoRA adapter while retaining the base pipeline."""
         if self._pipeline is None:
             return
-        unload_lora(self._pipeline)
+        unload_lora(self._pipeline, self.model_type)
         if self.device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
         elif self.device.startswith("npu") and hasattr(torch, "npu"):
@@ -508,6 +558,7 @@ class ParallelEvaluationRunner:
         dtype_str: str,
         num_processes: int,
         device: Optional[str] = None,
+        model_type: str = "sd3-5",
     ) -> None:
         """Initialize one lazy runner per accelerator device.
 
@@ -517,6 +568,7 @@ class ParallelEvaluationRunner:
             num_processes: Number of accelerator workers used concurrently.
             device: Accelerator type, currently ``cuda`` or ``npu``. Auto-detected
                 when omitted.
+            model_type: Model family identifier: ``sdxl``, ``sd3-5``, or ``flux1``.
 
         Raises:
             ValueError: If the device count or device type is invalid.
@@ -535,14 +587,20 @@ class ParallelEvaluationRunner:
                 f"devices({device_count})."
             )
         self._num_processes = num_processes
+        self.model_type = validate_model_type(model_type)
         self._runners = [
-            EvaluationRunner(base_model, dtype_str, device=f"{device_type}:{index}")
+            EvaluationRunner(
+                base_model,
+                dtype_str,
+                device=f"{device_type}:{index}",
+                model_type=self.model_type,
+            )
             for index in range(num_processes)
         ]
 
     def generate_for_checkpoint(
         self,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str],
         prompts: List[str],
         output_dir: str,
         step: Optional[int] = None,
@@ -555,7 +613,7 @@ class ParallelEvaluationRunner:
         """Generate one checkpoint's evaluation images across all devices.
 
         Args:
-            checkpoint_path: LoRA checkpoint directory.
+            checkpoint_path: LoRA checkpoint directory, or ``None`` for base-model-only inference.
             prompts: Evaluation prompts.
             output_dir: Root directory for generated images.
             step: Checkpoint step used in the output directory name. The legacy
@@ -640,7 +698,7 @@ class ParallelEvaluationRunner:
     def _generate_chunk(
         process_index: int,
         runner: EvaluationRunner,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str],
         prompts: List[str],
         output_dir: str,
         step: int,
@@ -654,7 +712,8 @@ class ParallelEvaluationRunner:
         elif runner.device.startswith("cuda"):
             torch.cuda.set_device(process_index)
 
-        apply_lora(runner.pipeline, checkpoint_path, runner.dtype)
+        if checkpoint_path is not None:
+            apply_lora(runner.pipeline, checkpoint_path, runner.dtype, runner.model_type)
         try:
             _generate_batches(
                 runner,
@@ -666,7 +725,8 @@ class ParallelEvaluationRunner:
                 chunk,
             )
         finally:
-            runner.unload_lora()
+            if checkpoint_path is not None:
+                runner.unload_lora()
 
     def close(self) -> None:
         """Release all loaded pipelines and cached accelerator memory."""
@@ -689,7 +749,7 @@ def _build_manifest_rows(
                 rows.append(
                     {
                         "checkpoint_step": step,
-                        "checkpoint_path": checkpoint_path,
+                        "checkpoint_path": checkpoint_path or "base_model",
                         "prompt_index": prompt_index,
                         "sample_index": sample_index,
                         "seed": base_seed + output_index,
@@ -719,7 +779,7 @@ def run_evaluation_set(
         prompts: Evaluation prompts in deterministic file order.
         output_dir: Root directory for images and ``manifest.jsonl``.
         num_samples: Number of images generated for each prompt and checkpoint.
-        generation_kwargs: Keyword arguments forwarded to the SD3.5 pipeline.
+        generation_kwargs: Keyword arguments forwarded to the selected Diffusers pipeline.
         batch_size: Maximum images generated per pipeline call and device.
         base_seed: Seed assigned to the first image slot of each checkpoint.
 

@@ -21,6 +21,8 @@ from typing import Any, Dict, Optional, Set
 
 import yaml
 
+from .model_types import validate_model_type
+
 
 @dataclass(frozen=True)
 class ModelInferenceConfig:
@@ -31,6 +33,7 @@ class ModelInferenceConfig:
     checkpoint_path: Optional[str]
     evaluation_set: str
     output_dir: str
+    model_type: str = "sd3-5"
     dtype: str = "bfloat16"
     device: Optional[str] = None
     num_processes: int = 1
@@ -118,7 +121,7 @@ def load_inference_config(path: str) -> ModelInferenceConfig:
     _reject_unknown_keys(
         "model",
         model,
-        {"base_model", "dtype", "device", "num_processes"},
+        {"model_type", "base_model", "dtype", "device", "num_processes"},
     )
     _reject_unknown_keys("checkpoint", checkpoint, {"dir", "path", "step"})
     _reject_unknown_keys(
@@ -129,6 +132,7 @@ def load_inference_config(path: str) -> ModelInferenceConfig:
     _reject_unknown_keys("output", output, {"dir"})
 
     base_model = _require_string("model", model, "base_model")
+    model_type = validate_model_type(model.get("model_type", "sd3-5"))
     dtype = model.get("dtype", "bfloat16")
     if dtype not in ("bfloat16", "float16", "float32"):
         raise ValueError("Config field 'model.dtype' must be one of: bfloat16, float16, float32.")
@@ -169,6 +173,7 @@ def load_inference_config(path: str) -> ModelInferenceConfig:
     output_dir = _require_string("output", output, "dir")
     return ModelInferenceConfig(
         base_model=base_model,
+        model_type=model_type,
         checkpoint_dir=checkpoint_dir,
         checkpoint_path=checkpoint_path,
         checkpoint_step=checkpoint_step,

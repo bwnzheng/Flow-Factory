@@ -1,0 +1,37 @@
+# SD3.5 Large base-model reward evaluation preset.
+
+model:
+  model_type: "sd3-5"
+  base_model: "stabilityai/stable-diffusion-3.5-large"
+  dtype: "bfloat16"
+  device: null
+  num_processes: 1
+
+evaluation:
+  num_samples_per_prompt: 4
+  generation_batch_size: 1
+  reward_batch_size: 4
+  seed: 42
+  num_inference_steps: 28
+  guidance_scale: 4.5
+  height: 1024
+  width: 1024
+
+sources:
+  - name: "pickscore"
+    dataset_dir: "dataset/pickscore"
+    split: "test"
+    prompt_key: "prompt"
+    max_prompts: 0
+    rewards:
+      - {name: "pick_score", reward_model: "pickscore"}
+      - {name: "hpsv2", reward_model: "hpsv2"}
+      - {name: "clip_score", reward_model: "clip"}
+
+runs:
+  - name: "sd3_5_large_base"
+    label: "SD3.5 Large Base"
+    base_model_only: true
+
+output:
+  dir: "analysis_output/reward_evaluation/sd3_5_large_base"

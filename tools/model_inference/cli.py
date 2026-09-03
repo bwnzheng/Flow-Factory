@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         Configured argument parser.
     """
-    parser = argparse.ArgumentParser(description="Run YAML-configured SD3.5 checkpoint inference.")
+    parser = argparse.ArgumentParser(description="Run YAML-configured checkpoint inference.")
     parser.add_argument(
         "-c",
         "--config",
@@ -69,15 +69,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         prompt_key=config.prompt_key,
         max_prompts=config.max_prompts,
     )
+    runner_kwargs = {} if config.model_type == "sd3-5" else {"model_type": config.model_type}
     if config.num_processes > 1:
         runner = ParallelEvaluationRunner(
             config.base_model,
             config.dtype,
             num_processes=config.num_processes,
             device=config.device,
+            **runner_kwargs,
         )
     else:
-        runner = EvaluationRunner(config.base_model, config.dtype, device=config.device)
+        runner = EvaluationRunner(
+            config.base_model,
+            config.dtype,
+            device=config.device,
+            **runner_kwargs,
+        )
 
     try:
         run_evaluation_set(

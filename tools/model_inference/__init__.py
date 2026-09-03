@@ -15,6 +15,7 @@
 """Reusable checkpoint inference utilities for offline analysis tools."""
 
 from .config import ModelInferenceConfig, load_inference_config
+from .model_types import SUPPORTED_MODEL_TYPES, validate_model_type
 from .runner import (
     EvaluationRunner,
     ParallelEvaluationRunner,
@@ -32,6 +33,7 @@ __all__ = [
     "EvaluationRunner",
     "ModelInferenceConfig",
     "ParallelEvaluationRunner",
+    "SUPPORTED_MODEL_TYPES",
     "apply_lora",
     "discover_checkpoints",
     "load_base_pipeline",
@@ -41,4 +43,5 @@ __all__ = [
     "resolve_device",
     "run_evaluation_set",
     "unload_lora",
+    "validate_model_type",
 ]

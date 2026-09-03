@@ -5,6 +5,7 @@
 # below before running this template.
 
 model:
+  model_type: "sd3-5"  # Options: sdxl, sd3-5, flux1
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
   device: null  # Auto-detect NPU, then CUDA, then CPU.
@@ -127,6 +128,7 @@ runs:
     label: "example"
     # Evaluate every checkpoint-N directory under this run.
     checkpoint_dir: "saves/example_run/checkpoints"
+    # For a pure base-model evaluation, use `base_model_only: true` instead of checkpoint_dir.
 
 output:
   dir: "analysis_output/reward_evaluation"

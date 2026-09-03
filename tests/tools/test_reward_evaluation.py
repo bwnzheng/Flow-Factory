@@ -63,6 +63,7 @@ def test_default_config_contains_ascend_reward_suite() -> None:
         ("geneval", "dataset/geneval", "test"),
         ("ocr", "dataset/ocr", "test"),
     ]
+    assert config.model.model_type == "sd3-5"
     assert [reward["reward_model"] for reward in config.sources[0].rewards] == [
         "pickscore",
         "hpsv2",
@@ -93,6 +94,53 @@ def test_default_config_contains_ascend_reward_suite() -> None:
         is True
         for source in config.sources
     )
+
+
+@pytest.mark.parametrize(
+    ("filename", "model_type", "base_model", "steps", "guidance"),
+    [
+        (
+            "default_sdxl.yaml",
+            "sdxl",
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            30,
+            7.0,
+        ),
+        (
+            "default_sd3_5_large.yaml",
+            "sd3-5",
+            "stabilityai/stable-diffusion-3.5-large",
+            28,
+            4.5,
+        ),
+        (
+            "default_flux1_dev.yaml",
+            "flux1",
+            "black-forest-labs/FLUX.1-dev",
+            28,
+            3.5,
+        ),
+    ],
+)
+def test_model_specific_base_presets(
+    filename: str,
+    model_type: str,
+    base_model: str,
+    steps: int,
+    guidance: float,
+) -> None:
+    root = Path(__file__).parents[2] / "tools/reward_evaluation"
+    config = load_config(root / filename)
+
+    assert config.model.model_type == model_type
+    assert config.model.base_model == base_model
+    assert config.evaluation.generation_kwargs == {
+        "num_inference_steps": steps,
+        "guidance_scale": guidance,
+        "height": 1024,
+        "width": 1024,
+    }
+    assert config.runs[0].base_model_only is True
 
 
 def test_reward_options_are_preserved_for_external_models(tmp_path: Path) -> None:
@@ -133,6 +181,45 @@ def test_checkpoint_dir_run_resolves_all_checkpoints(tmp_path: Path) -> None:
         (5, str(checkpoint_dir / "checkpoint-5")),
         (20, str(checkpoint_dir / "checkpoint-20")),
     ]
+
+
+def test_base_model_only_run_resolves_without_a_checkpoint(tmp_path: Path) -> None:
+    config_path = tmp_path / "base.yaml"
+    config_path.write_text(
+        """
+model: {model_type: sdxl, base_model: stabilityai/stable-diffusion-xl-base-1.0}
+evaluation: {num_samples_per_prompt: 1}
+sources:
+  - {name: test, prompts_file: prompts.txt, rewards: [{name: clip, reward_model: clip}]}
+runs:
+  - {name: base, label: Base, base_model_only: true}
+output: {dir: output}
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    assert config.runs[0].base_model_only is True
+    assert _resolve_run_checkpoints(config.runs[0]) == [(0, None)]
+
+
+def test_run_rejects_base_model_and_checkpoint_selection_together(tmp_path: Path) -> None:
+    config_path = tmp_path / "invalid.yaml"
+    config_path.write_text(
+        """
+model: {base_model: base}
+evaluation: {}
+sources:
+  - {name: test, prompts_file: prompts.txt, rewards: [{name: clip, reward_model: clip}]}
+runs:
+  - {name: invalid, checkpoint: checkpoint-1, base_model_only: true}
+output: {dir: output}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly one of checkpoint"):
+        load_config(config_path)
 
 
 def test_groupwise_helpers_keep_complete_prompt_groups() -> None:

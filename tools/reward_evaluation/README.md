@@ -12,6 +12,18 @@ python -m tools.reward_evaluation \
   --config tools/reward_evaluation/default.yaml
 ```
 
+Model-specific base-model presets are also provided:
+
+```bash
+python -m tools.reward_evaluation --config tools/reward_evaluation/default_sdxl.yaml
+python -m tools.reward_evaluation --config tools/reward_evaluation/default_sd3_5_large.yaml
+python -m tools.reward_evaluation --config tools/reward_evaluation/default_flux1_dev.yaml
+```
+
+These three presets evaluate the pure base model with PickScore, HPSv2, and CLIP on the
+PickScore test source. They use model-specific starting parameters and output directories. The
+full multi-source reward suite remains available in `default.yaml`.
+
 The template mirrors the three evaluation sources used by the Ascend training
 setup: `dataset/pickscore/test.txt`, `dataset/geneval/test.jsonl`, and
 `dataset/ocr/test.txt`. PickScore, HPSv2, CLIP, UniReward, and VisionReward are
@@ -39,6 +51,17 @@ boundaries aligned with the training `data.datasets` entries. An explicit
 `prompts_file` can still be used for a standalone prompt file, but it is
 mutually exclusive with `dataset_dir`.
 
+Set `model.model_type` to select the image-generation backend:
+
+- `sdxl` uses `StableDiffusionXLPipeline` (for example, SD-XL base 1.0).
+- `sd3-5` uses `StableDiffusion3Pipeline` and covers SD3.5 Medium, Large, and Large Turbo;
+  choose the exact variant with `model.base_model`.
+- `flux1` uses `FluxPipeline` for FLUX.1-dev.
+
+The selected checkpoint must match the selected base model. PEFT checkpoints are attached to
+`unet` for SDXL and `transformer` for SD3.5/FLUX.1; Diffusers-format LoRA checkpoints use the
+pipeline's native LoRA loader.
+
 For JSONL, `prompt_key` selects the generation prompt and all other fields are
 forwarded as the reward metadata. A reward entry requires only `name` and
 `reward_model`; arbitrary additional fields are passed to `RewardArguments` and
@@ -65,6 +88,20 @@ Use `checkpoint` instead when only one checkpoint is needed. A checkpoint is
 marked complete only after all configured rewards have been written to its
 JSONL result file, so rerunning the same command resumes generated images and
 reward caches without losing completed checkpoints.
+
+To evaluate the unmodified base model, use an explicit base-model-only run. This skips LoRA
+loading and writes `checkpoint_path: "base_model"` in the result provenance:
+
+```yaml
+runs:
+  - name: "sdxl_base"
+    label: "SDXL base"
+    base_model_only: true
+```
+
+The base-model run uses the same `model.model_type`, `model.base_model`, prompts, seeds, image
+manifest, reward caches, and summary format as checkpoint runs. Keep it under a distinct run name
+when comparing it with adapter checkpoints.
 
 `pickscore_rank` is also supported. It is a groupwise reward, so the evaluator
 calls it once for the complete set of samples belonging to each prompt rather
