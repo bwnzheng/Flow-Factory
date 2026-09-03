@@ -73,6 +73,7 @@ reward_advantage[i, k] = r[i, k] - mean_i(r[i, k])
 scalar_advantage[i] = sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))
 conflict_score[i, k] = w[k] * reward_advantage[i, k] * scalar_advantage[i]
 sample_lower_bound[i] = min_k(conflict_score[i, k])
+per_reward_disagreement[k] = mean_i(reward_advantage[i, k] * scalar_advantage[i] < 0)
 ```
 
 Positive conflict scores mean the named reward supports the scalar training
@@ -85,12 +86,16 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 
 - `per_reward_conflict_score` is the prompt-group mean raw conflict score for
   each active reward.
+- `per_reward_disagreement` is the prompt-group fraction of samples whose
+  centered reward direction opposes the weighted scalar direction for each
+  active reward. Exact zero products are treated as non-conflicting.
 - `reward_concordance_lower_bound` is the prompt-group mean of each sample's
   weakest raw conflict score. It is the sample-wise reward-concordance lower
   bound under the frozen uniform reference.
 
 The output directory also contains `metadata.json`,
 `per_reward_conflict_score/<reward>.png` for every active reward combination,
+`per_reward_disagreement/<reward>.png` for every active reward combination,
 and `reward_concordance_lower_bound.png` for the overall lower-bound curve.
 When multiple runs are configured, every figure overlays their `run_label`
 trajectories. All runs use exactly the same raw-reward calculation.

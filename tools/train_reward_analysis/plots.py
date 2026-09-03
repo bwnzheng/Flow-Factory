@@ -137,6 +137,58 @@ def plot_reward_concordance_lower_bound_trajectories(
         plt.close(figure)
 
 
+def plot_per_reward_disagreement_trajectories(
+    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
+) -> None:
+    """Write one per-reward disagreement-rate trajectory figure for each reward."""
+    by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["metric"] != "per_reward_disagreement":
+            continue
+        reward = str(row["reward"])
+        if reward:
+            by_combination_reward[(str(row["reward_combination"]), reward)].append(row)
+
+    for (combination, reward), reward_rows in by_combination_reward.items():
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+            raw_steps, raw_values = _series(line_rows)
+            raw_line = axis.plot(
+                raw_steps,
+                raw_values,
+                alpha=0.22,
+                linewidth=1.0,
+                label="_nolegend_",
+                zorder=1,
+            )[0]
+            steps, values = _smoothed_series(line_rows, smoothing_window)
+            axis.plot(
+                steps,
+                values,
+                color=raw_line.get_color(),
+                marker="o",
+                markersize=3,
+                label=label,
+                zorder=2,
+            )
+        axis.set_ylim(0.0, 1.0)
+        axis.set_title(f"{reward} disagreement: {combination.replace('__', ' + ')}")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Per-reward disagreement rate")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8, loc="upper right", bbox_to_anchor=(1.0, 0.90))
+        figure.tight_layout()
+        path = (
+            Path(output_dir)
+            / combination
+            / "per_reward_disagreement"
+            / f"{_filename_component(reward)}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
 def _group_by_run(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

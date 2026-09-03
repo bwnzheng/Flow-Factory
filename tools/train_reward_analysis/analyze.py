@@ -39,6 +39,7 @@ from tools.train_reward_analysis.metrics import (
 )
 from tools.train_reward_analysis.plots import (
     plot_per_reward_conflict_score_trajectories,
+    plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import (
@@ -84,6 +85,11 @@ def main() -> None:
         encoding="utf-8",
     )
     plot_per_reward_conflict_score_trajectories(
+        rows,
+        output_dir,
+        smoothing_window=config.smoothing_window,
+    )
+    plot_per_reward_disagreement_trajectories(
         rows,
         output_dir,
         smoothing_window=config.smoothing_window,
@@ -150,6 +156,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "plot_smoothing_window": config.smoothing_window,
         "metrics": {
             "per_reward_conflict_score": "mean_raw_weighted_reward_contribution",
+            "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
             "reward_concordance_lower_bound": (
                 "mean_over_samples_of_the_minimum_raw_reward_contribution"
             ),
@@ -340,6 +347,15 @@ def _metric_rows(
                 **common,
                 "reward": reward_name,
                 "metric": "per_reward_conflict_score",
+                "value": float(value),
+            }
+        )
+    for reward_name, value in zip(reward_names, metrics["per_reward_disagreement"]):
+        rows.append(
+            {
+                **common,
+                "reward": reward_name,
+                "metric": "per_reward_disagreement",
                 "value": float(value),
             }
         )

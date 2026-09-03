@@ -30,16 +30,15 @@ def compute_reward_concordance_metrics(
     rewards: np.ndarray,
     reward_weights: np.ndarray,
 ) -> dict[str, Any]:
-    """Compute raw reward conflict scores and their sample-wise lower bound.
+    """Compute conflict scores, disagreement rates, and their lower bound.
 
     Args:
         rewards: Finite raw rewards shaped ``(group_size, n_rewards)``.
         reward_weights: Positive scalarization weights shaped ``(n_rewards,)``.
 
     Returns:
-        The mean raw conflict score for every reward and the mean of each
-        sample's weakest reward score. The latter is the sample-wise reward-
-        concordance lower bound under the frozen uniform group reference.
+        The mean raw conflict score and disagreement rate for every reward,
+        plus the mean of each sample's weakest reward score.
     """
     matrix = _validate_rewards(rewards)
     group_size, n_rewards = matrix.shape
@@ -49,10 +48,12 @@ def compute_reward_concordance_metrics(
     scalar_rewards = matrix @ weights
     scalar_advantages = scalar_rewards - scalar_rewards.mean()
     conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
+    disagreement = (centered_rewards * scalar_advantages[:, None] < 0.0).mean(axis=0)
 
     return {
         "group_size": group_size,
         "per_reward_conflict_score": conflict_scores.mean(axis=0),
+        "per_reward_disagreement": disagreement,
         "reward_concordance_lower_bound": float(conflict_scores.min(axis=1).mean()),
     }
 
@@ -80,6 +81,9 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         "mean_group_size": float(np.mean([metrics["group_size"] for metrics in group_metrics])),
         "per_reward_conflict_score": np.mean(
             [metrics["per_reward_conflict_score"] for metrics in group_metrics], axis=0
+        ),
+        "per_reward_disagreement": np.mean(
+            [metrics["per_reward_disagreement"] for metrics in group_metrics], axis=0
         ),
         "reward_concordance_lower_bound": float(
             np.mean([metrics["reward_concordance_lower_bound"] for metrics in group_metrics])

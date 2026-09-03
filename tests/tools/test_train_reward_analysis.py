@@ -36,6 +36,7 @@ from tools.train_reward_analysis.metrics import (
 from tools.train_reward_analysis.plots import (
     _smoothed_series,
     plot_per_reward_conflict_score_trajectories,
+    plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
@@ -48,6 +49,7 @@ def test_group_metrics_report_raw_conflict_scores_and_lower_bound() -> None:
     )
 
     np.testing.assert_allclose(metrics["per_reward_conflict_score"], [0.5, -0.125])
+    np.testing.assert_allclose(metrics["per_reward_disagreement"], [0.0, 2.0 / 3.0])
     assert metrics["reward_concordance_lower_bound"] == pytest.approx(-0.125)
 
 
@@ -58,6 +60,7 @@ def test_lower_bound_uses_the_weakest_score_for_each_sample() -> None:
     )
 
     np.testing.assert_allclose(metrics["per_reward_conflict_score"], [0.0, 0.0])
+    np.testing.assert_allclose(metrics["per_reward_disagreement"], [0.0, 0.0])
     assert metrics["reward_concordance_lower_bound"] == pytest.approx(0.0)
 
 
@@ -119,6 +122,7 @@ def test_analysis_uses_only_saved_rewards_not_saved_src_probabilities(tmp_path: 
 
     assert {row["metric"] for row in rows} == {
         "per_reward_conflict_score",
+        "per_reward_disagreement",
         "reward_concordance_lower_bound",
     }
     assert "n_effective_groups" not in metadata["runs"][0]
@@ -233,11 +237,26 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
         }
         for step, value in enumerate((-0.3, -0.4))
     )
+    rows.extend(
+        {
+            "run_label": "SRC-NFT",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": reward,
+            "metric": "per_reward_disagreement",
+            "value": value,
+        }
+        for reward, values in {"clip_score": (0.2, 0.3), "pick_score": (0.7, 0.6)}.items()
+        for step, value in enumerate(values)
+    )
 
     plot_per_reward_conflict_score_trajectories(rows, tmp_path)
+    plot_per_reward_disagreement_trajectories(rows, tmp_path)
     plot_reward_concordance_lower_bound_trajectories(rows, tmp_path)
 
     output_dir = tmp_path / "clip_score__pick_score"
     assert (output_dir / "per_reward_conflict_score" / "clip_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_conflict_score" / "pick_score.png").stat().st_size > 0
+    assert (output_dir / "per_reward_disagreement" / "clip_score.png").stat().st_size > 0
+    assert (output_dir / "per_reward_disagreement" / "pick_score.png").stat().st_size > 0
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
