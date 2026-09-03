@@ -168,15 +168,15 @@ def compute_src_reweight(
         group_rewards = rewards[:, sample_indices]
         active_rewards = group_rewards[active]
         active_weights = reward_weights[active]
-        centered_rewards = active_rewards - active_rewards.mean(axis=1, keepdims=True)
+        centered_rewards = _standardize_centered(active_rewards, axis=1)
         scalar_rewards = active_weights @ active_rewards
-        scalar_centered = scalar_rewards - scalar_rewards.mean()
-        scalar_variance = float(np.mean(np.square(scalar_centered)))
-        scalar_rms = np.sqrt(scalar_variance)
+        scalar_centered_raw = scalar_rewards - scalar_rewards.mean()
+        scalar_variance = float(np.mean(np.square(scalar_centered_raw)))
+        scalar_centered = _standardize_centered(scalar_rewards, axis=0)
         group_raw_contributions = (
             active_weights[:, None] * centered_rewards * scalar_centered[None, :]
         )
-        saturation = scalar_centered / (np.abs(scalar_centered) + scalar_rms + epsilon)
+        saturation = scalar_centered / (np.abs(scalar_centered) + 1.0 + epsilon)
         group_saturated_contributions = (
             active_weights[:, None] * centered_rewards * saturation[None, :]
         )
@@ -202,9 +202,7 @@ def compute_src_reweight(
             group_probabilities = np.full(group_size, 1.0 / group_size, dtype=np.float64)
             group_normalized_scores = np.zeros(group_size, dtype=np.float64)
         else:
-            group_normalized_scores = (
-                group_scores / (scalar_variance + epsilon) if score_type == "raw" else group_scores
-            )
+            group_normalized_scores = group_scores
             logits = group_normalized_scores / temperature
             logits = logits - logits.max()
             concordant_probabilities = np.exp(logits)
@@ -216,7 +214,14 @@ def compute_src_reweight(
         weighted_mean = float(group_probabilities @ scalar_rewards)
         centered_weighted = scalar_rewards - weighted_mean
         weighted_reward_means = active_rewards @ group_probabilities
-        weighted_centered_rewards = active_rewards - weighted_reward_means[:, None]
+        weighted_centered_rewards = _standardize_centered(
+            active_rewards,
+            axis=1,
+            means=weighted_reward_means,
+            scales=np.sqrt(
+                group_probabilities @ np.square(active_rewards - weighted_reward_means[:, None]).T
+            ),
+        )
         weighted_scalar_directions = np.sign(centered_weighted)
         group_weighted_contributions = (
             active_weights[:, None]
@@ -268,3 +273,27 @@ def compute_src_reweight(
         lower_bound_reweighted=lower_bound_reweighted,
         degenerate_scalar_contrast=degenerate,
     )
+
+
+def _standardize_centered(
+    values: np.ndarray,
+    axis: int,
+    means: np.ndarray | None = None,
+    scales: np.ndarray | None = None,
+) -> np.ndarray:
+    """Center values and divide by their population standard deviation."""
+    array = np.asarray(values, dtype=np.float64)
+    if means is None:
+        means = np.mean(array, axis=axis, keepdims=True)
+    else:
+        means = np.asarray(means, dtype=np.float64)
+        if axis == 1:
+            means = means[:, None]
+    centered = array - means
+    if scales is None:
+        scales = np.sqrt(np.mean(np.square(centered), axis=axis, keepdims=True))
+    else:
+        scales = np.asarray(scales, dtype=np.float64)
+        if axis == 1:
+            scales = scales[:, None]
+    return np.divide(centered, scales, out=np.zeros_like(centered), where=scales > 0.0)

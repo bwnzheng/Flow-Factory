@@ -30,7 +30,7 @@ import numpy as np
 def plot_per_reward_conflict_score_trajectories(
     rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
 ) -> None:
-    """Write one raw conflict-score trajectory figure for each reward.
+    """Write one standardized conflict-score trajectory figure for each reward.
 
     Args:
         rows: Tidy metric rows produced by the offline analysis.
@@ -71,7 +71,7 @@ def plot_per_reward_conflict_score_trajectories(
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"{reward} conflict score: {combination.replace('__', ' + ')}")
         axis.set_xlabel("Training step")
-        axis.set_ylabel("Mean raw conflict score")
+        axis.set_ylabel("Mean standardized conflict score")
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8, loc="upper right", bbox_to_anchor=(1.0, 0.90))
         figure.tight_layout()
@@ -127,7 +127,7 @@ def plot_reward_concordance_lower_bound_trajectories(
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"Reward-concordance lower bound: {combination.replace('__', ' + ')}")
         axis.set_xlabel("Training step")
-        axis.set_ylabel("Mean weakest raw conflict score")
+        axis.set_ylabel("Mean weakest standardized conflict score")
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8)
         figure.tight_layout()

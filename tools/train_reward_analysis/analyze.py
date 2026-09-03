@@ -155,10 +155,10 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "natural_aggregation": "macro_average_over_prompt_groups",
         "plot_smoothing_window": config.smoothing_window,
         "metrics": {
-            "per_reward_conflict_score": "mean_raw_weighted_reward_contribution",
+            "per_reward_conflict_score": "mean_standardized_weighted_reward_contribution",
             "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
             "reward_concordance_lower_bound": (
-                "mean_over_samples_of_the_minimum_raw_reward_contribution"
+                "mean_over_samples_of_the_minimum_standardized_reward_contribution"
             ),
         },
         "runs": run_metadata,

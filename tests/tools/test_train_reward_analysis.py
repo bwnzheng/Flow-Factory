@@ -48,9 +48,9 @@ def test_group_metrics_report_raw_conflict_scores_and_lower_bound() -> None:
         reward_weights=np.asarray([1.0, 0.25]),
     )
 
-    np.testing.assert_allclose(metrics["per_reward_conflict_score"], [0.5, -0.125])
+    np.testing.assert_allclose(metrics["per_reward_conflict_score"], [1.0, -0.25])
     np.testing.assert_allclose(metrics["per_reward_disagreement"], [0.0, 2.0 / 3.0])
-    assert metrics["reward_concordance_lower_bound"] == pytest.approx(-0.125)
+    assert metrics["reward_concordance_lower_bound"] == pytest.approx(-0.25)
 
 
 def test_lower_bound_uses_the_weakest_score_for_each_sample() -> None:
@@ -79,9 +79,9 @@ def test_aggregate_group_metrics_macro_averages_prompt_groups() -> None:
     assert aggregate["n_groups"] == 2
     np.testing.assert_allclose(
         aggregate["per_reward_conflict_score"],
-        [0.2265625, 0.03125],
+        [0.375, 0.375],
     )
-    assert aggregate["reward_concordance_lower_bound"] == pytest.approx(-0.0859375)
+    assert aggregate["reward_concordance_lower_bound"] == pytest.approx(-0.25)
 
 
 def _write_train_pickle(path: Path, step: int) -> None:

@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prompt-local raw sample-wise reward-concordance metrics.
+"""Prompt-local standardized sample-wise reward-concordance metrics.
 
 Every call operates on one frozen rollout group. It uses only raw saved rewards
 and the historical scalarization weights, with the original uniform group mean
-as the reference. No SRC probability or reweighted statistic is used.
+and population standard deviation as the reference. No SRC probability or
+reweighted statistic is used.
 """
 
 from __future__ import annotations
@@ -30,23 +31,23 @@ def compute_reward_concordance_metrics(
     rewards: np.ndarray,
     reward_weights: np.ndarray,
 ) -> dict[str, Any]:
-    """Compute conflict scores, disagreement rates, and their lower bound.
+    """Compute standardized conflict scores, disagreement rates, and lower bound.
 
     Args:
         rewards: Finite raw rewards shaped ``(group_size, n_rewards)``.
         reward_weights: Positive scalarization weights shaped ``(n_rewards,)``.
 
     Returns:
-        The mean raw conflict score and disagreement rate for every reward,
-        plus the mean of each sample's weakest reward score.
+        The mean standardized conflict score and disagreement rate for every
+        reward, plus the mean of each sample's weakest reward score.
     """
     matrix = _validate_rewards(rewards)
     group_size, n_rewards = matrix.shape
     weights = _validate_reward_weights(reward_weights, n_rewards)
 
-    centered_rewards = matrix - matrix.mean(axis=0, keepdims=True)
+    centered_rewards = _standardize_centered(matrix, axis=0)
     scalar_rewards = matrix @ weights
-    scalar_advantages = scalar_rewards - scalar_rewards.mean()
+    scalar_advantages = _standardize_centered(scalar_rewards, axis=0)
     conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
     disagreement = (centered_rewards * scalar_advantages[:, None] < 0.0).mean(axis=0)
 
@@ -100,6 +101,13 @@ def _validate_rewards(rewards: np.ndarray) -> np.ndarray:
     if not np.isfinite(matrix).all():
         raise ValueError("rewards must contain only finite values.")
     return matrix
+
+
+def _standardize_centered(values: np.ndarray, axis: int) -> np.ndarray:
+    """Center values and divide by their population standard deviation."""
+    centered = values - np.mean(values, axis=axis, keepdims=True)
+    scale = np.std(values, axis=axis, keepdims=True, ddof=0)
+    return np.divide(centered, scale, out=np.zeros_like(centered), where=scale > 0.0)
 
 
 def _validate_reward_weights(reward_weights: np.ndarray, n_rewards: int) -> np.ndarray:

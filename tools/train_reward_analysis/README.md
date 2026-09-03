@@ -10,8 +10,10 @@ saves/<run_name>/logs/rewards/train_step_*.pkl
 It does not load reward models, checkpoints, or a training configuration from
 outside the saved run. It reads raw rewards from the PKLs and, when present, the
 `run_context` already saved in `logs/media.jsonl`. Each prompt's rollout group
-is centered independently with the uniform mean of its original raw rewards.
-The analysis does not use SRC probabilities or any reweighted statistic.
+is standardized independently: every reward and the weighted scalar reward are
+centered with their prompt-local mean and divided by their prompt-local
+population standard deviation. Zero-variance quantities are represented by
+zero. The analysis does not use SRC probabilities or any reweighted statistic.
 
 ## Required provenance
 
@@ -69,8 +71,8 @@ For each prompt-local frozen reward matrix `r` and positive scalarization
 weights `w`, the tool computes:
 
 ```text
-reward_advantage[i, k] = r[i, k] - mean_i(r[i, k])
-scalar_advantage[i] = sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))
+reward_advantage[i, k] = (r[i, k] - mean_i(r[i, k])) / std_i(r[i, k])
+scalar_advantage[i] = (sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))) / std_i(sum_k(w[k] * r[i, k]))
 conflict_score[i, k] = w[k] * reward_advantage[i, k] * scalar_advantage[i]
 sample_lower_bound[i] = min_k(conflict_score[i, k])
 per_reward_disagreement[k] = mean_i(reward_advantage[i, k] * scalar_advantage[i] < 0)
@@ -84,13 +86,13 @@ reward cannot hide opposition on another.
 Each step reports a macro-average over prompt groups, never a recentered pool
 of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 
-- `per_reward_conflict_score` is the prompt-group mean raw conflict score for
+- `per_reward_conflict_score` is the prompt-group mean standardized conflict score for
   each active reward.
 - `per_reward_disagreement` is the prompt-group fraction of samples whose
   centered reward direction opposes the weighted scalar direction for each
   active reward. Exact zero products are treated as non-conflicting.
 - `reward_concordance_lower_bound` is the prompt-group mean of each sample's
-  weakest raw conflict score. It is the sample-wise reward-concordance lower
+  weakest standardized conflict score. It is the sample-wise reward-concordance lower
   bound under the frozen uniform reference.
 
 The output directory also contains `metadata.json`,

@@ -128,18 +128,19 @@ eval:
 weighting without adding a new trainer. For ordinary trainers, the shared
 `AdvantageProcessor` applies it to the rollout group; for GA trainers, it applies
 to the fixed `group_size` survivor population returned by genetic evolution.
-In both cases, the processor freezes the unweighted
-reward means and scalar advantages `A_i = R_i - mean_R`. The default
-`src_score_type: saturated` computes the frozen-group RMS scale
-`sigma_A = sqrt(mean_i(A_i^2))`, then uses
-`c_ik = w_k (r_ik - mean_k) A_i / (|A_i| + sigma_A + epsilon)` and
+In both cases, the processor freezes prompt-local reward and scalar statistics.
+Each reward contrast is standardized as
+`z_ik = (r_ik - mean_k) / std_k`, and the scalar contrast is standardized as
+`Z_i = (R_i - mean_R) / std_R`, with zero-variance contrasts represented by zero.
+The default `src_score_type: saturated` then uses
+`c_ik = w_k z_ik Z_i / (|Z_i| + 1 + epsilon)` and
 `s_i = min_{k:w_k>0} c_ik`. This keeps the score continuous near zero, suppresses
-samples with `|A_i| << sigma_A`, and approaches the sign-only profile
-`w_k (r_ik - mean_k) sign(A_i)` when `|A_i| >> sigma_A`.
+samples with small `|Z_i|`, and approaches the sign-only profile
+`w_k z_ik sign(Z_i)` when `|Z_i|` is large.
 
-`src_score_type: raw` preserves the historical covariance contribution
-`c_ik = w_k (r_ik - mean_k) A_i` and its variance calibration
-`s_i / (mean_i(A_i^2) + epsilon)`. Saturated scores are passed directly to the
+`src_score_type: raw` uses the standardized contribution
+`c_ik = w_k z_ik Z_i`; its score is passed directly to the
+same existing temperature mapping. Saturated scores are passed directly to the
 same existing temperature mapping; they are not divided by scalar variance a
 second time. In either mode, the selected score is mapped to a bounded probability
 
@@ -268,10 +269,10 @@ must be trimmed or filled. `abs_advantage` also preserves strongly negative
 samples for contrastive training. `src` is the scalar-elitist Sample-wise Reward
 Concordance selector. It merges
 parents and offspring, freezes the merged pool's reward and scalar-reward
-means, and computes each candidate's weakest active reward contribution
-`min_k w_k (r_ik - mean_k) sign(R_i - mean_R)` exactly once. This is equivalent
-to dividing the previous contribution by `abs(R_i - mean_R)` for nonzero scalar
-contrast, while defining zero contrast to contribute zero. The highest scalar
+means and population standard deviations, and computes each candidate's weakest
+active standardized reward contribution
+`min_k w_k z_ik sign(Z_i)` exactly once. Zero scalar contrast contributes zero
+through its zero standardized direction. The highest scalar
 reward candidate is always retained; the remaining `group_size - 1` slots are
 filled by descending contribution fitness, then scalar reward, then stable
 candidate ID. This path does not apply Pareto filtering or recompute covariance
@@ -323,17 +324,13 @@ parent IDs, and the complete group selection event. These files provide a
 human-viewable counterpart to the compact aggregate metrics and raw selection
 pickle.
 
-SRC operates directly on the raw outputs of the configured reward models and
-uses their existing source-aware training weights. Those
-weights therefore define both the preference vector and the calibration across
-reward units. A fixed positive affine rescaling of one reward does not change
-the method when its weight is transformed inversely; selector-only bounds would
-cancel algebraically and are not required. Do not z-score rewards separately
-per prompt before selection, because that changes the intended reward geometry.
-For `src`, reward units directly affect candidate ranking, so use
-fixed run-wide reward calibration or source-aware weights that compensate for
-known scale differences; never estimate normalization statistics separately
-for each prompt pool.
+SRC operates on prompt-locally standardized outputs of the configured reward
+models and uses their existing source-aware training weights. For each frozen
+pool, reward and scalar contrasts are divided by their population standard
+deviations, with zero-variance contrasts represented by zero. The weights
+therefore retain their relative preference importance while reward-unit scale
+does not dominate candidate ranking. The same normalization must be used by
+training and offline train-reward analysis.
 
 SRC requires at least two rewards with positive weights.
 `survivor_score: src` requires `advantage_aggregation: sum`, because

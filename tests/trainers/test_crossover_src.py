@@ -230,8 +230,8 @@ def test_src_concordant_pair_has_equal_positive_fitness():
         np.array([1.0, 1.0]),
     )
 
-    np.testing.assert_allclose(scores.contribution_matrix, [[0.5, 0.5], [0.5, 0.5]])
-    np.testing.assert_allclose(scores.fitness, [0.5, 0.5])
+    np.testing.assert_allclose(scores.contribution_matrix, [[1.0, 1.0], [1.0, 1.0]])
+    np.testing.assert_allclose(scores.fitness, [1.0, 1.0])
     assert scores.degenerate_scalar_contrast is False
 
 

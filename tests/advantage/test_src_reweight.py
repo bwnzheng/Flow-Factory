@@ -84,8 +84,10 @@ def test_src_raw_score_matches_magnitude_weighted_definition():
     )
     result = _compute(rewards, score_type="raw")
     centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    centered_rewards /= np.sqrt(np.mean(np.square(centered_rewards), axis=1, keepdims=True))
     scalar_rewards = rewards.sum(axis=0)
     scalar_centered = scalar_rewards - scalar_rewards.mean()
+    scalar_centered /= np.sqrt(np.mean(np.square(scalar_centered)))
     expected_contributions = centered_rewards * scalar_centered[None, :]
     expected_scores = expected_contributions.min(axis=0)
 
@@ -94,7 +96,7 @@ def test_src_raw_score_matches_magnitude_weighted_definition():
     np.testing.assert_allclose(result.scores, expected_scores)
     np.testing.assert_allclose(
         result.normalized_scores,
-        expected_scores / (np.mean(np.square(scalar_centered)) + 1e-8),
+        expected_scores,
     )
 
 
@@ -108,10 +110,11 @@ def test_src_saturated_score_matches_frozen_rms_definition():
     epsilon = 1e-8
     result = _compute(rewards, score_type="saturated", epsilon=epsilon)
     centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    centered_rewards /= np.sqrt(np.mean(np.square(centered_rewards), axis=1, keepdims=True))
     scalar_rewards = rewards.sum(axis=0)
     scalar_centered = scalar_rewards - scalar_rewards.mean()
-    scalar_rms = np.sqrt(np.mean(np.square(scalar_centered)))
-    saturation = scalar_centered / (np.abs(scalar_centered) + scalar_rms + epsilon)
+    scalar_centered /= np.sqrt(np.mean(np.square(scalar_centered)))
+    saturation = scalar_centered / (np.abs(scalar_centered) + 1.0 + epsilon)
     expected_contributions = centered_rewards * saturation[None, :]
     expected_scores = expected_contributions.min(axis=0)
 
@@ -143,9 +146,12 @@ def test_src_saturated_score_approaches_sign_profile_for_large_scalar_contrast()
     rewards[:, -1] = 100.0
     result = _compute(rewards, score_type="saturated")
     centered_rewards = rewards - rewards.mean(axis=1, keepdims=True)
+    centered_rewards /= np.sqrt(np.mean(np.square(centered_rewards), axis=1, keepdims=True))
     scalar_rewards = rewards.sum(axis=0)
     scalar_centered = scalar_rewards - scalar_rewards.mean()
-    sign_profile = centered_rewards[:, -1] * np.sign(scalar_centered[-1])
+    scalar_centered /= np.sqrt(np.mean(np.square(scalar_centered)))
+    saturation = scalar_centered[-1] / (abs(scalar_centered[-1]) + 1.0 + 1e-8)
+    sign_profile = centered_rewards[:, -1] * saturation
 
     np.testing.assert_allclose(
         result.contributions[:, -1],
@@ -173,6 +179,9 @@ def test_src_weighted_centering_diagnostics_remain_sign_based():
 
     weighted_reward_means = rewards @ result.probabilities
     weighted_centered_rewards = rewards - weighted_reward_means[:, None]
+    weighted_centered_rewards /= np.sqrt(
+        result.probabilities @ np.square(weighted_centered_rewards).T
+    )[:, None]
     weighted_scalar_centered = scalar_rewards - result.weighted_means[0]
     np.testing.assert_allclose(
         result.weighted_contributions,

@@ -148,14 +148,15 @@ def compute_src_contributions(
     matrix = _validate_reward_matrix(reward_matrix)
     weight_vector = _validate_weights(weights, matrix.shape[1])
     pool_mean = matrix.mean(axis=0)
-    centered = matrix - pool_mean
+    centered = _standardize_centered(matrix, pool_mean, axis=0)
     scalar_rewards = matrix @ weight_vector
-    scalar_advantages = centered @ weight_vector
+    scalar_centered_raw = scalar_rewards - scalar_rewards.mean()
+    scalar_variance = float(np.mean(np.square(scalar_centered_raw)))
+    scalar_advantages = _standardize_centered(scalar_rewards, scalar_rewards.mean(), axis=0)
     scalar_directions = np.sign(scalar_advantages)
     contributions = centered * scalar_directions[:, None] * weight_vector[None, :]
     fitness = np.min(contributions[:, weight_vector > 0], axis=1)
     variance_tolerance, _ = _scalar_tolerances(matrix, weight_vector)
-    scalar_variance = float(np.mean(np.square(scalar_advantages)))
 
     return SRCContributionScore(
         pool_mean=pool_mean,
@@ -166,6 +167,17 @@ def compute_src_contributions(
         fitness=fitness,
         degenerate_scalar_contrast=bool(scalar_variance <= variance_tolerance),
     )
+
+
+def _standardize_centered(
+    values: np.ndarray,
+    means: np.ndarray | float,
+    axis: int,
+) -> np.ndarray:
+    """Center values and divide by their population standard deviation."""
+    centered = np.asarray(values, dtype=np.float64) - np.asarray(means, dtype=np.float64)
+    scale = np.sqrt(np.mean(np.square(centered), axis=axis, keepdims=True))
+    return np.divide(centered, scale, out=np.zeros_like(centered), where=scale > 0.0)
 
 
 def select_src_group(
