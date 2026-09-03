@@ -28,7 +28,10 @@ import numpy as np
 
 
 def plot_per_reward_conflict_score_trajectories(
-    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
 ) -> None:
     """Write one standardized conflict-score trajectory figure for each reward.
 
@@ -79,7 +82,7 @@ def plot_per_reward_conflict_score_trajectories(
             Path(output_dir)
             / combination
             / "per_reward_conflict_score"
-            / f"{_filename_component(reward)}.png"
+            / f"{_filename_component(reward)}.{plot_format}"
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
@@ -87,7 +90,10 @@ def plot_per_reward_conflict_score_trajectories(
 
 
 def plot_reward_concordance_lower_bound_trajectories(
-    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
 ) -> None:
     """Write one sample-wise reward-concordance lower-bound figure per reward set.
 
@@ -131,14 +137,17 @@ def plot_reward_concordance_lower_bound_trajectories(
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8)
         figure.tight_layout()
-        path = Path(output_dir) / combination / "reward_concordance_lower_bound.png"
+        path = Path(output_dir) / combination / f"reward_concordance_lower_bound.{plot_format}"
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
         plt.close(figure)
 
 
 def plot_per_reward_disagreement_trajectories(
-    rows: Iterable[dict[str, Any]], output_dir: str | Path, smoothing_window: int = 5
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
 ) -> None:
     """Write one per-reward disagreement-rate trajectory figure for each reward."""
     by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -182,7 +191,7 @@ def plot_per_reward_disagreement_trajectories(
             Path(output_dir)
             / combination
             / "per_reward_disagreement"
-            / f"{_filename_component(reward)}.png"
+            / f"{_filename_component(reward)}.{plot_format}"
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)

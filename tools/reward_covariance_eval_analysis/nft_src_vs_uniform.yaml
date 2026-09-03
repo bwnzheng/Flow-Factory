@@ -2,12 +2,12 @@
 model:
   base_model: "stabilityai/stable-diffusion-3.5-medium"
   dtype: "bfloat16"
-  device: "cuda:2"
-  num_processes: 1
+  device: null
+  num_processes: 4
 
 evaluation:
   num_samples_per_prompt: 16
-  generation_batch_size: 1
+  generation_batch_size: 6
   reward_batch_size: 16
   seed: 42
   num_inference_steps: 40
@@ -47,3 +47,4 @@ runs:
     checkpoint: "saves/sd3-5_lora_nft_20260808_215750/checkpoints/checkpoint-60"
 output:
   dir: "analysis_output/reward_covariance_eval_analysis/nft_src_vs_uniform"
+  plot_format: "png"  # Covariance heatmap format: png or pdf.
