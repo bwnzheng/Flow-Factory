@@ -149,14 +149,18 @@ These trackers allow you to visualize both **training samples** and **metric cur
 
 The same `media_save_freq` gate applies to the online backend and local files.
 Training images are organized under
-`<save_dir>/<run_name>/logs/images/training/step_N/group_N/<context>/`.
+`<save_dir>/<run_name>/logs/images/training/step_N/rank_N/group_N/<context>/`
+when distributed local media logging is used (single-process runs omit
+`rank_N`).
 Training contexts include `initial`, `final`, and one `genN` directory per GA
 generation. Evaluation images are stored directly under
-`logs/images/evaluation/step_N/<dataset>/`; group and sample identifiers are
-flattened into each filename. Media from all ranks is gathered before the main
-process writes it.
-For local storage, the originating rank remains in metadata but is not part of
-the path. Every image or video has a same-stem JSON sidecar containing
+`logs/images/evaluation/step_N/rank_N/<dataset>/`; group and sample identifiers are
+flattened into each filename. With local media storage enabled, every rank
+writes its own media shard under `step_N/rank_<rank>/`; only lightweight
+manifest entries are gathered to the main process. Full image and video tensors
+never enter the cross-rank object collective. If an online backend is configured,
+the main process logs the shared rank-local files from the manifest. Every image
+or video has a same-stem JSON sidecar containing
 prompt/source identity,
 rewards and advantages, sampling or evaluation settings, and GA
 lineage/selection evidence where applicable. `logs/media.jsonl` is a lightweight
@@ -165,6 +169,9 @@ per media file with both media and sidecar metadata paths.
 Backend-only logging constructs no replay metadata before cross-rank gathering;
 only caption inputs, media tensors, and minimal group/candidate routing IDs are
 transferred to the main process.
+The rank-local manifest mode requires `save_dir/run_name` to be visible from all
+ranks; on a non-shared filesystem, disable media logging (`media_save_freq: 0`)
+or consume per-rank artifacts with an external manifest workflow.
 The per-sample reward map includes only rewards declared applicable to that
 sample; complete source-aligned reward matrices remain in the raw reward and GA
 logs.

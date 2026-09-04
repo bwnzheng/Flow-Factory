@@ -37,6 +37,35 @@ class _RecordingBackendLogger(Logger):
         self.records.append((step, data))
 
 
+class _RecordingLocalMediaLogger:
+    def __init__(self):
+        self.rank = None
+        self.saved = []
+        self.manifests = []
+        self.backend_manifests = []
+
+    def set_media_rank(self, rank):
+        self.rank = rank
+
+    def save_media_locally(self, data, step):
+        self.saved.append((self.rank, data, step))
+        return [
+            {
+                "step": step,
+                "key": key,
+                "path": f"rank_{self.rank}/{key}",
+                "metadata_path": f"rank_{self.rank}/{key}.json",
+            }
+            for key in data
+        ]
+
+    def write_media_manifest(self, entries):
+        self.manifests.append(entries)
+
+    def log_media_files(self, entries, step):
+        self.backend_manifests.append((entries, step))
+
+
 def _config(tmp_path, *, save_media_locally, process_index=0, num_processes=1):
     config = SimpleNamespace(
         process_index=process_index,
@@ -121,48 +150,32 @@ class _MediaTrainerHarness:
         )
         self.config = SimpleNamespace(to_dict=lambda: {"log": {"run_name": "media-run"}})
         self.records = []
+        self.logger = _RecordingLocalMediaLogger() if save_media_locally else None
 
     def log_data(self, data, step):
         self.records.append((step, data))
 
 
-def test_media_samples_are_gathered_and_reindexed_without_rank_keys(monkeypatch):
+def test_local_media_gathers_only_manifest_records(monkeypatch):
     trainer = _MediaTrainerHarness()
     local_sample = T2ISample(
         image=torch.zeros(3, 8, 8),
         prompt="local sample",
         _unique_id=42,
     )
-    remote_sample = T2ISample(
-        image=torch.zeros(3, 8, 8),
-        prompt="remote sample",
-        _unique_id=42,
-    )
-    remote_media_sample = prepare_sample_for_media(
-        remote_sample,
-        {
-            "run": {"rank": 1, "step": 20, "epoch": 2},
-            "media": {
-                "category": "training",
-                "context": "final",
-                "local_index": 0,
-                "group_index": 0,
-            },
-            "configuration": {},
-        },
-    )
+    gathered_inputs = []
+    remote_manifest = {
+        "step": 20,
+        "key": "media/training/final/group_42/sample_000001",
+        "path": "rank_1/images/training/step_000020/group_42/final/sample_000001.jpg",
+        "metadata_path": "rank_1/images/training/step_000020/group_42/final/sample_000001.json",
+    }
 
-    monkeypatch.setattr(
-        "flow_factory.trainers.abc.gather_object",
-        lambda local_media: local_media
-        + [
-            {
-                "sample": remote_media_sample,
-                "group_id": 42,
-                "candidate_id": None,
-            }
-        ],
-    )
+    def record_gather(local_manifest):
+        gathered_inputs.append(local_manifest)
+        return local_manifest + [remote_manifest]
+
+    monkeypatch.setattr("flow_factory.trainers.abc.gather_object", record_gather)
 
     trainer.log_media_samples(
         [local_sample],
@@ -170,17 +183,55 @@ def test_media_samples_are_gathered_and_reindexed_without_rank_keys(monkeypatch)
         context_name="final",
     )
 
-    assert len(trainer.records) == 1
-    step, payload = trainer.records[0]
-    assert step == 20
-    assert list(payload) == [
-        "media/training/final/group_42/sample_000000",
-        "media/training/final/group_42/sample_000001",
-    ]
-    contexts = [sample.extra_kwargs["_media_metadata"]["context"] for sample in payload.values()]
-    assert [context["run"]["rank"] for context in contexts] == [0, 1]
-    assert [context["media"]["group_index"] for context in contexts] == [0, 1]
-    assert [context["media"]["global_index"] for context in contexts] == [0, 1]
+    assert len(gathered_inputs) == 1
+    assert len(gathered_inputs[0]) == 1
+    assert "sample" not in gathered_inputs[0][0]
+    assert len(trainer.logger.saved) == 1
+    saved_rank, saved_payload, saved_step = trainer.logger.saved[0]
+    assert saved_rank == 0
+    assert saved_step == 20
+    assert list(saved_payload) == ["media/training/final/group_42/sample_000000"]
+    assert len(trainer.logger.manifests) == 1
+    assert trainer.logger.manifests[0] == [gathered_inputs[0][0], remote_manifest]
+
+
+def test_non_main_rank_saves_local_media_without_writing_manifest(monkeypatch):
+    trainer = _MediaTrainerHarness()
+    trainer.accelerator.process_index = 1
+    trainer.accelerator.is_main_process = False
+    monkeypatch.setattr(
+        "flow_factory.trainers.abc.gather_object",
+        lambda local_manifest: local_manifest,
+    )
+
+    trainer.log_media_samples(
+        [T2ISample(image=torch.zeros(3, 8, 8), prompt="rank one", _unique_id=43)],
+        category="training",
+        context_name="final",
+    )
+
+    assert len(trainer.logger.saved) == 1
+    assert trainer.logger.saved[0][0] == 1
+    assert trainer.logger.manifests == []
+    assert trainer.records == []
+
+
+def test_local_media_logs_manifest_files_to_backend_on_main(monkeypatch):
+    trainer = _MediaTrainerHarness()
+    trainer.log_args.logging_backend = "tensorboard"
+    monkeypatch.setattr(
+        "flow_factory.trainers.abc.gather_object",
+        lambda local_manifest: local_manifest,
+    )
+
+    trainer.log_media_samples(
+        [T2ISample(image=torch.zeros(3, 8, 8), prompt="backend sample", _unique_id=44)],
+        category="training",
+        context_name="final",
+    )
+
+    assert len(trainer.logger.manifests) == 1
+    assert trainer.logger.backend_manifests == [(trainer.logger.manifests[0], 20)]
 
 
 def test_backend_media_skips_replay_metadata_before_gather(monkeypatch):
@@ -331,10 +382,64 @@ def test_local_media_interval_path_and_json_sidecar(tmp_path):
         "step": 20,
         "key": key,
         "path": "images/training/step_000020/group_42/final/sample_000000.jpg",
+        "caption": "quality: 0.80, alignment: 0.60 | a red cube",
         "prompt": "a red cube",
         "reward": {"quality": 0.8, "alignment": 0.6},
         "metadata_path": "images/training/step_000020/group_42/final/sample_000000.json",
     }
+
+
+def test_local_media_can_save_rank_shard_before_manifest_append(tmp_path):
+    logger = LocalFileLogger(_config(tmp_path, save_media_locally=True))
+    logger.set_media_rank(1)
+    key = "media/training/final/group_42/sample_000000"
+
+    entries = logger.save_media_locally({key: _media_sample()}, step=20)
+
+    image_path = (
+        tmp_path
+        / "media-run"
+        / "logs"
+        / "images"
+        / "training"
+        / "step_000020"
+        / "rank_1"
+        / "group_42"
+        / "final"
+        / "sample_000000.jpg"
+    )
+    manifest_path = tmp_path / "media-run" / "logs" / "media.jsonl"
+    assert image_path.exists()
+    assert not manifest_path.exists()
+    assert entries[0]["path"] == (
+        "images/training/step_000020/rank_1/group_42/final/sample_000000.jpg"
+    )
+
+    logger.write_media_manifest(entries)
+
+    assert manifest_path.exists()
+    manifest_records = [json.loads(line) for line in manifest_path.read_text().splitlines()]
+    assert manifest_records[-1]["metadata_path"] == (
+        "images/training/step_000020/rank_1/group_42/final/sample_000000.json"
+    )
+
+
+def test_backend_can_log_rank_local_media_from_manifest(tmp_path):
+    config = _config(tmp_path, save_media_locally=True)
+    local_logger = LocalFileLogger(config)
+    local_logger.set_media_rank(1)
+    key = "media/training/final/group_42/sample_000000"
+    entries = local_logger.save_media_locally({key: _media_sample()}, step=20)
+
+    backend_logger = _RecordingBackendLogger(config)
+    backend_logger.log_media_files(entries, step=20)
+
+    assert len(backend_logger.records) == 1
+    step, payload = backend_logger.records[0]
+    assert step == 20
+    assert list(payload) == [key]
+    assert isinstance(payload[key], LogImage)
+    assert payload[key].value == str(tmp_path / "media-run" / "logs" / entries[0]["path"])
 
 
 def test_media_manifest_writes_run_context_once(tmp_path):
@@ -388,13 +493,7 @@ def test_evaluation_media_flattens_group_and_table_items_within_each_step(tmp_pa
     logger.log_data({key: LogImage(torch.zeros(3, 8, 8))}, step=20)
     logger.log_data({key: LogImage(torch.zeros(3, 8, 8))}, step=40)
 
-    eval_dir = (
-        tmp_path
-        / "media-run"
-        / "logs"
-        / "images"
-        / "evaluation"
-    )
+    eval_dir = tmp_path / "media-run" / "logs" / "images" / "evaluation"
     assert sorted(path.name for path in eval_dir.iterdir()) == [
         "step_000020",
         "step_000040",

@@ -33,6 +33,7 @@ class Logger(ABC):
 
     def __init__(self, config: Arguments):
         self.config = config
+        self._media_rank: Optional[int] = None
         self.clean_up_freq = 10
         self._pending_cleanup: List[Dict] = []
         self._init_platform()
@@ -45,24 +46,24 @@ class Logger(ABC):
 
     @property
     def _should_save_locally(self) -> bool:
-        return getattr(self.config.log_args, 'save_media_locally', False)
+        return getattr(self.config.log_args, "save_media_locally", False)
 
     @property
     def _should_log_jsonl(self) -> bool:
-        return getattr(self.config.log_args, 'log_metrics_jsonl', True)
+        return getattr(self.config.log_args, "log_metrics_jsonl", True)
 
     def _should_log_media(self, step: int) -> bool:
         """Return whether sampled media is due at this training step."""
-        frequency = getattr(self.config.log_args, 'media_save_freq', 1)
+        frequency = getattr(self.config.log_args, "media_save_freq", 1)
         return frequency > 0 and step % frequency == 0
 
     @property
     def _logs_dir(self) -> str:
-        if not hasattr(self, '_logs_dir_cache'):
+        if not hasattr(self, "_logs_dir_cache"):
             path = os.path.join(
                 self.config.log_args.save_dir,
                 self.config.log_args.run_name,
-                'logs',
+                "logs",
             )
             os.makedirs(path, exist_ok=True)
             self._logs_dir_cache = path
@@ -70,23 +71,39 @@ class Logger(ABC):
 
     @staticmethod
     def _sanitize_key(key: str) -> str:
-        return key.replace('/', '_')
+        return key.replace("/", "_")
+
+    def set_media_rank(self, rank: Optional[int]) -> None:
+        """Set the rank component used for rank-local media paths.
+
+        Args:
+            rank: Process rank to include in local media paths, or ``None`` to
+                retain the historical path layout without a rank directory.
+        """
+        self._media_rank = None if rank is None else int(rank)
+
+    def _media_rank_parts(self) -> List[str]:
+        """Return the optional rank directory component for local media paths."""
+        if self._media_rank is None:
+            return []
+        return [f"rank_{self._media_rank}"]
 
     def _media_filepath(self, key: str, step: int, root: str, extension: str) -> str:
         """Resolve a collision-safe structured media path from a log key."""
-        if key.startswith('media/'):
-            parts = [self._sanitize_key(part) for part in key.split('/')]
-            category = parts[1] if len(parts) > 1 else 'uncategorized'
-            context = parts[2] if len(parts) > 2 else 'default'
-            remainder = parts[3:] if len(parts) > 3 else ['sample']
-            storage_category = 'training' if category == 'ga' else category
-            if category == 'evaluation':
-                filename = '_'.join(remainder)
+        if key.startswith("media/"):
+            parts = [self._sanitize_key(part) for part in key.split("/")]
+            category = parts[1] if len(parts) > 1 else "uncategorized"
+            context = parts[2] if len(parts) > 2 else "default"
+            remainder = parts[3:] if len(parts) > 3 else ["sample"]
+            storage_category = "training" if category == "ga" else category
+            if category == "evaluation":
+                filename = "_".join(remainder)
                 directory = os.path.join(
                     self._logs_dir,
                     root,
                     storage_category,
-                    f'step_{step:06d}',
+                    f"step_{step:06d}",
+                    *self._media_rank_parts(),
                     context,
                 )
             elif len(remainder) >= 2:
@@ -96,7 +113,8 @@ class Logger(ABC):
                     self._logs_dir,
                     root,
                     storage_category,
-                    f'step_{step:06d}',
+                    f"step_{step:06d}",
+                    *self._media_rank_parts(),
                     group,
                     context,
                     *remainder[1:-1],
@@ -107,39 +125,61 @@ class Logger(ABC):
                     self._logs_dir,
                     root,
                     storage_category,
-                    f'step_{step:06d}',
+                    f"step_{step:06d}",
+                    *self._media_rank_parts(),
                     context,
                 )
         else:
-            directory = os.path.join(self._logs_dir, root, f'step_{step:06d}')
+            directory = os.path.join(self._logs_dir, root, f"step_{step:06d}")
             filename = self._sanitize_key(key)
         os.makedirs(directory, exist_ok=True)
-        return os.path.join(directory, f'{filename}.{extension}')
+        return os.path.join(directory, f"{filename}.{extension}")
 
     def _save_image_file(self, key: str, img_obj: LogImage, step: int) -> str:
         """Save a LogImage locally, return relative path."""
-        fmt = getattr(self.config.log_args, 'image_save_format', 'png').lower()
-        quality = getattr(self.config.log_args, 'image_save_quality', 90)
-        ext = 'jpg' if fmt == 'jpg' else 'png'
-        filepath = self._media_filepath(key, step, 'images', ext)
+        fmt = getattr(self.config.log_args, "image_save_format", "png").lower()
+        quality = getattr(self.config.log_args, "image_save_quality", 90)
+        ext = "jpg" if fmt == "jpg" else "png"
+        filepath = self._media_filepath(key, step, "images", ext)
 
-        img = img_obj.get_pil().convert('RGB')
-        if fmt == 'jpg':
-            img.save(filepath, format='JPEG', quality=quality)
+        img = img_obj.get_pil().convert("RGB")
+        if fmt == "jpg":
+            img.save(filepath, format="JPEG", quality=quality)
         else:
-            img.save(filepath, format='PNG')
+            img.save(filepath, format="PNG")
         return os.path.relpath(filepath, self._logs_dir)
 
     def _save_video_file(self, key: str, vid_obj: LogVideo, step: int) -> str:
         """Save a LogVideo as MP4, return relative path."""
-        filepath = self._media_filepath(key, step, 'videos', 'mp4')
+        filepath = self._media_filepath(key, step, "videos", "mp4")
         arr = vid_obj.get_numpy()  # THWC uint8
-        imageio.mimwrite(filepath, [f for f in arr], fps=vid_obj.fps, format='FFMPEG',
-                         codec='libx264', pixelformat='yuv420p')
+        imageio.mimwrite(
+            filepath,
+            [f for f in arr],
+            fps=vid_obj.fps,
+            format="FFMPEG",
+            codec="libx264",
+            pixelformat="yuv420p",
+        )
         return os.path.relpath(filepath, self._logs_dir)
 
-    def _extract_and_save_media(self, data: Dict, step: int):
-        """Walk dict, save media to local files, and remove from dict."""
+    def _extract_and_save_media(
+        self,
+        data: Dict,
+        step: int,
+        write_manifest: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Walk dict, save media to local files, and remove it from the dict.
+
+        Args:
+            data: Formatted logging dictionary containing media objects.
+            step: Training or evaluation step associated with the media.
+            write_manifest: Whether to append the returned entries to the local
+                ``media.jsonl`` manifest immediately.
+
+        Returns:
+            Lightweight manifest entries for every media file written.
+        """
         entries = []
 
         def _walk(key: str, value: Any):
@@ -148,19 +188,21 @@ class Logger(ABC):
                     path = self._save_image_file(key, value, step)
                 else:
                     path = self._save_video_file(key, value, step)
-                entry = {'step': step, 'key': key, 'path': path, 'caption': value.caption}
+                entry = {"step": step, "key": key, "path": path, "caption": value.caption}
                 if value.metadata:
                     entry.update(value.metadata)
+                if isinstance(value, LogVideo):
+                    entry["fps"] = int(value.fps)
                 entry = _to_json_safe(entry)
-                sidecar_path = os.path.splitext(os.path.join(self._logs_dir, path))[0] + '.json'
+                sidecar_path = os.path.splitext(os.path.join(self._logs_dir, path))[0] + ".json"
                 sidecar_entry = copy.deepcopy(entry)
-                sidecar_context = sidecar_entry.get('context', {})
-                sidecar_context.pop('configuration', None)
-                sidecar_run = sidecar_context.get('run', {})
-                sidecar_run.pop('run_name', None)
-                sidecar_run.pop('step', None)
-                sidecar_run.pop('world_size', None)
-                with open(sidecar_path, 'w') as sidecar_file:
+                sidecar_context = sidecar_entry.get("context", {})
+                sidecar_context.pop("configuration", None)
+                sidecar_run = sidecar_context.get("run", {})
+                sidecar_run.pop("run_name", None)
+                sidecar_run.pop("step", None)
+                sidecar_run.pop("world_size", None)
+                with open(sidecar_path, "w") as sidecar_file:
                     json.dump(
                         sidecar_entry,
                         sidecar_file,
@@ -170,10 +212,10 @@ class Logger(ABC):
                     )
                 manifest_entry = {
                     name: entry[name]
-                    for name in ('step', 'key', 'path', 'prompt', 'reward')
+                    for name in ("step", "key", "path", "prompt", "reward", "caption", "fps")
                     if name in entry
                 }
-                manifest_entry['metadata_path'] = os.path.relpath(
+                manifest_entry["metadata_path"] = os.path.relpath(
                     sidecar_path,
                     self._logs_dir,
                 )
@@ -183,13 +225,17 @@ class Logger(ABC):
                 for row_idx, row in enumerate(value.rows):
                     for col_idx, item in enumerate(row):
                         if item is not None:
-                            col_name = value.columns[col_idx] if col_idx < len(value.columns) else str(col_idx)
-                            _walk(f'{key}/{col_name}/{row_idx}', item)
+                            col_name = (
+                                value.columns[col_idx]
+                                if col_idx < len(value.columns)
+                                else str(col_idx)
+                            )
+                            _walk(f"{key}/{col_name}/{row_idx}", item)
                 return None
             elif isinstance(value, list):
-                return [_walk(f'{key}/{i}', v) for i, v in enumerate(value)]
+                return [_walk(f"{key}/{i}", v) for i, v in enumerate(value)]
             elif isinstance(value, dict):
-                return {k: _walk(f'{key}/{k}', v) for k, v in value.items()}
+                return {k: _walk(f"{key}/{k}", v) for k, v in value.items()}
             return value
 
         for k in list(data.keys()):
@@ -197,96 +243,166 @@ class Logger(ABC):
 
         # Remove sample-list keys (now all-None after media extraction)
         for k in list(data.keys()):
-            if k in ('train_samples', 'train_child_samples') or (k.startswith('eval/') and k.endswith('/samples')):
+            if k in ("train_samples", "train_child_samples") or (
+                k.startswith("eval/") and k.endswith("/samples")
+            ):
                 del data[k]
 
-        if entries:
-            filepath = os.path.join(self._logs_dir, 'media.jsonl')
-            write_run_context = not getattr(self, '_media_run_context_written', False)
-            if write_run_context and os.path.isfile(filepath):
-                with open(filepath, 'r') as manifest_file:
-                    write_run_context = not any(
-                        json.loads(line).get('record_type') == 'run_context'
-                        for line in manifest_file
-                        if line.strip()
-                    )
-            with open(filepath, 'a') as f:
-                if write_run_context:
-                    configuration = (
-                        self.config.to_dict()
-                        if hasattr(self.config, 'to_dict')
-                        else {}
-                    )
-                    run_context = _to_json_safe(
-                        {
-                            'record_type': 'run_context',
-                            'schema_version': 2,
-                            'run': {
-                                'run_name': self.config.log_args.run_name,
-                                'world_size': int(getattr(self.config, 'num_processes', 1)),
-                            },
-                            'configuration': configuration,
-                        }
-                    )
-                    f.write(json.dumps(run_context, ensure_ascii=False, allow_nan=False) + '\n')
-                self._media_run_context_written = True
-                for entry in entries:
-                    f.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + '\n')
+        if entries and write_manifest:
+            self.write_media_manifest(entries)
+
+        return entries
+
+    def save_media_locally(self, data: Dict, step: int) -> List[Dict[str, Any]]:
+        """Save local media and return manifest entries without writing a manifest.
+
+        Args:
+            data: Logging dictionary containing media objects.
+            step: Training or evaluation step associated with the media.
+
+        Returns:
+            Lightweight JSON-safe manifest entries for the saved media.
+        """
+        if not self._should_save_locally or not self._should_log_media(step):
+            return []
+        formatted_dict = LogFormatter.format_dict(data)
+        return self._extract_and_save_media(formatted_dict, step, write_manifest=False)
+
+    def write_media_manifest(self, entries: List[Dict[str, Any]]) -> None:
+        """Append lightweight media entries and run context to ``media.jsonl``.
+
+        Args:
+            entries: JSON-safe media manifest entries, usually gathered from
+                multiple ranks after each rank has saved its own media files.
+        """
+        if not entries:
+            return
+
+        filepath = os.path.join(self._logs_dir, "media.jsonl")
+        write_run_context = not getattr(self, "_media_run_context_written", False)
+        if write_run_context and os.path.isfile(filepath):
+            with open(filepath, "r") as manifest_file:
+                write_run_context = not any(
+                    json.loads(line).get("record_type") == "run_context"
+                    for line in manifest_file
+                    if line.strip()
+                )
+        with open(filepath, "a") as manifest_file:
+            if write_run_context:
+                configuration = self.config.to_dict() if hasattr(self.config, "to_dict") else {}
+                run_context = _to_json_safe(
+                    {
+                        "record_type": "run_context",
+                        "schema_version": 2,
+                        "run": {
+                            "run_name": self.config.log_args.run_name,
+                            "world_size": int(getattr(self.config, "num_processes", 1)),
+                        },
+                        "configuration": configuration,
+                    }
+                )
+                manifest_file.write(
+                    json.dumps(run_context, ensure_ascii=False, allow_nan=False) + "\n"
+                )
+            self._media_run_context_written = True
+            for entry in entries:
+                manifest_file.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n")
+
+    def log_media_files(self, entries: List[Dict[str, Any]], step: int) -> None:
+        """Log rank-local media files to the configured backend.
+
+        The files must be visible from the main process. This path deliberately
+        avoids local extraction and object collectives: only file paths and
+        display metadata are used to construct backend objects.
+        """
+        payload: Dict[str, Any] = {}
+        for entry in entries:
+            path = entry.get("path")
+            key = entry.get("key")
+            if not path or not key:
+                continue
+            absolute_path = os.path.join(self._logs_dir, path)
+            if not os.path.isfile(absolute_path):
+                continue
+            caption = entry.get("caption")
+            extension = os.path.splitext(absolute_path)[1].lower()
+            if extension in LogFormatter.IMG_EXTENSIONS:
+                payload[key] = LogImage(absolute_path, caption=caption)
+            elif extension in LogFormatter.VID_EXTENSIONS:
+                payload[key] = LogVideo(
+                    absolute_path,
+                    caption=caption,
+                    fps=int(entry.get("fps", 8)),
+                )
+
+        if not payload:
+            return
+        formatted_dict = LogFormatter.format_dict(payload)
+        final_dict = {}
+        for key, value in formatted_dict.items():
+            converted = self._recursive_convert(value)
+            if isinstance(converted, dict):
+                final_dict.update(converted)
+            else:
+                final_dict[key] = converted
+        final_dict = {key: value for key, value in final_dict.items() if value is not None}
+        if final_dict:
+            self._log_impl(final_dict, step)
 
     def _save_raw_data_pkl(self, data: Dict, step: int):
         """Save raw analysis arrays to pickle files and remove them from metrics."""
-        out_dir = os.path.join(self._logs_dir, 'rewards')
+        out_dir = os.path.join(self._logs_dir, "rewards")
         for k in list(data.keys()):
-            if k == 'train/rewards':
+            if k == "train/rewards":
                 groups = data.pop(k)
-                data.pop('train/prompts', None)
-                src_groups = data.pop('train/src_groups', None)
-                nondom_sizes = data.pop('train/nondom_sizes_in_group', None)
+                data.pop("train/prompts", None)
+                src_groups = data.pop("train/src_groups", None)
+                nondom_sizes = data.pop("train/nondom_sizes_in_group", None)
                 out = {
-                    'step': step,
-                    'prompts': [g['prompt'] for g in groups],
+                    "step": step,
+                    "prompts": [g["prompt"] for g in groups],
                 }
-                for name in groups[0]['rewards'].keys():
-                    out[name] = [np.array(g['rewards'][name], dtype=np.float32) for g in groups]
+                for name in groups[0]["rewards"].keys():
+                    out[name] = [np.array(g["rewards"][name], dtype=np.float32) for g in groups]
                 if src_groups is not None:
-                    out['src_groups'] = src_groups
+                    out["src_groups"] = src_groups
                 if nondom_sizes is not None:
-                    out['nondom_sizes_in_group'] = nondom_sizes['values']
+                    out["nondom_sizes_in_group"] = nondom_sizes["values"]
                 os.makedirs(out_dir, exist_ok=True)
-                with open(os.path.join(out_dir, f'train_step_{step:06d}.pkl'), 'wb') as f:
+                with open(os.path.join(out_dir, f"train_step_{step:06d}.pkl"), "wb") as f:
                     pickle.dump(out, f)
-            elif k.endswith('/rewards_all'):
-                ds_key = k[:-len('/rewards_all')]
-                ds_slug = ds_key.replace('/', '_')
+            elif k.endswith("/rewards_all"):
+                ds_key = k[: -len("/rewards_all")]
+                ds_slug = ds_key.replace("/", "_")
                 rwd = data.pop(k)
-                out = {'step': step}
+                out = {"step": step}
                 for name, vals in rwd.items():
                     out[name] = np.array(vals, dtype=np.float32)
                 os.makedirs(out_dir, exist_ok=True)
-                with open(os.path.join(out_dir, f'{ds_slug}_step_{step:06d}.pkl'), 'wb') as f:
+                with open(os.path.join(out_dir, f"{ds_slug}_step_{step:06d}.pkl"), "wb") as f:
                     pickle.dump(out, f)
-            elif k == 'ga/raw_selections':
+            elif k == "ga/raw_selections":
                 selections = data.pop(k)
-                ga_out_dir = os.path.join(self._logs_dir, 'ga')
+                ga_out_dir = os.path.join(self._logs_dir, "ga")
                 out = {
-                    'schema_version': 1,
-                    'step': step,
-                    'selections': selections,
+                    "schema_version": 1,
+                    "step": step,
+                    "selections": selections,
                 }
                 os.makedirs(ga_out_dir, exist_ok=True)
-                with open(os.path.join(ga_out_dir, f'train_step_{step:06d}.pkl'), 'wb') as f:
+                with open(os.path.join(ga_out_dir, f"train_step_{step:06d}.pkl"), "wb") as f:
                     pickle.dump(out, f)
 
     def _write_metrics_jsonl(self, scalars: Dict[str, Any], step: int):
-        record = {'step': step}
+        record = {"step": step}
         for k, v in scalars.items():
             scalar = LogFormatter.to_scalar(v)
             if scalar is not None:
                 record[k] = scalar
         if len(record) > 1:
-            filepath = os.path.join(self._logs_dir, 'metrics.jsonl')
-            with open(filepath, 'a') as f:
-                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            filepath = os.path.join(self._logs_dir, "metrics.jsonl")
+            with open(filepath, "a") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # ---- main log flow ----
 
@@ -298,7 +414,7 @@ class Logger(ABC):
     ):
         media_due = self._should_log_media(step)
         if not media_due:
-            data = {key: value for key, value in data.items() if not key.startswith('media/')}
+            data = {key: value for key, value in data.items() if not key.startswith("media/")}
 
         # 1. Process rules (Mean, Paths, wrappers) into IR
         formatted_dict = LogFormatter.format_dict(data)
@@ -315,11 +431,13 @@ class Logger(ABC):
             self._write_metrics_jsonl(formatted_dict, step)
 
         # 5. Remove non-scalar values (nested structures only meaningful for local JSONL)
-        formatted_dict = {k: v for k, v in formatted_dict.items() if not isinstance(v, (list, dict))}
+        formatted_dict = {
+            k: v for k, v in formatted_dict.items() if not isinstance(v, (list, dict))
+        }
 
         # 6. Filter keys if requested
         if keys:
-            valid_keys = keys.split(',')
+            valid_keys = keys.split(",")
             formatted_dict = {k: v for k, v in formatted_dict.items() if k in valid_keys}
 
         # 6. Convert IR to Platform Objects
@@ -344,10 +462,7 @@ class Logger(ABC):
             self._pending_cleanup.append(formatted_dict)
 
     def _recursive_convert(
-        self,
-        value: Any,
-        height: Optional[int] = None,
-        width: Optional[int] = None
+        self, value: Any, height: Optional[int] = None, width: Optional[int] = None
     ) -> Any:
         """Recursively convert IR objects to platform objects."""
         if value is None:
@@ -367,10 +482,7 @@ class Logger(ABC):
 
     @abstractmethod
     def _convert_to_platform(
-        self,
-        value: Any,
-        height: Optional[int] = None,
-        width: Optional[int] = None
+        self, value: Any, height: Optional[int] = None, width: Optional[int] = None
     ) -> Any:
         """
         Convert a single IR object to platform-specific object.

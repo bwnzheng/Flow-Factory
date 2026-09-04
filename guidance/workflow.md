@@ -464,20 +464,21 @@ For step 40, local image paths follow this layout (videos use the parallel
 logs/images/
 ├── training/
 │   └── step_000040/
-│       └── group_42/
+│       └── rank_0/group_42/
 │           ├── initial/sample_000000.jpg
 │           ├── final/sample_000000.jpg
 │           └── gen0/candidate_000004.jpg
 └── evaluation/
-    └── step_000040/<dataset>/group_7_sample_000000.jpg
+    └── step_000040/rank_0/<dataset>/group_7_sample_000000.jpg
 ```
 
-Media from every rank is gathered to the main process before local saving, so
-paths contain no rank directory. The source rank remains in each sidecar. Every
-media file has a JSON file with the same stem in the same directory. The sidecar
-schema includes rank, step, and epoch; prompt/source/sample identity; original
-per-sample fields such as rewards, advantages, and reweighting values; and
-stage-specific sampling/evaluation settings. GA child sidecars additionally
+Each rank saves its own media shard and same-stem JSON sidecars before any
+cross-rank communication. Rank-specific directories prevent filename conflicts.
+Only lightweight manifest entries containing paths and display metadata are
+gathered to the main process; image, video, and audio tensors remain local. The
+sidecar schema includes rank, step, and epoch; prompt/source/sample identity;
+original per-sample fields such as rewards, advantages, and reweighting values;
+and stage-specific sampling/evaluation settings. GA child sidecars additionally
 contain lineage, all candidate reward vectors, parent and survivor selection
 evidence, Pareto membership, and ordered selected/rejected IDs. Arrays larger
 than 4096 elements are represented by shape and dtype rather than duplicated,
@@ -488,9 +489,15 @@ all rewards for legacy single-source records. This display-only filtering does
 not alter training tensors, reward pickles, or complete GA group diagnostics.
 The single `logs/media.jsonl` file starts with one `run_context` record containing
 the run name, world size, and complete configuration. Each subsequent media
-entry contains `step`, logical key, relative media path, `metadata_path`, prompt,
-and reward fields. Run-level fields are omitted from per-media sidecars; detailed
-sample, rank, stage, evaluation, and GA replay metadata remains in those files.
+entry contains `step`, logical key, relative media path, `metadata_path`, caption,
+prompt, reward, and (for videos) `fps` fields gathered from every rank. When an
+online backend is configured, the main process logs the shared rank-local files
+from this manifest. Run-level fields are omitted from per-media sidecars;
+detailed sample, rank, stage, evaluation, and GA replay metadata remains in those
+files.
+Rank-local media logging requires `save_dir/run_name` to be visible from every
+rank. On a non-shared filesystem, set `media_save_freq: 0` or provide an
+external per-rank manifest workflow.
 When `save_media_locally` is false, no replay metadata is constructed for the
 backend path. Each rank transfers only CPU media, prompt/reward caption inputs,
 and minimal group/candidate routing IDs; WandB, SwanLab, and TensorBoard consume

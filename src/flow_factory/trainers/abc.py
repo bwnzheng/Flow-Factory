@@ -16,33 +16,41 @@
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, Tuple, List, Union, Literal
+from dataclasses import dataclass
 from functools import partial
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.distributed as dist
-from torch.utils.data import DataLoader
-from dataclasses import dataclass
-from tqdm import tqdm
-from PIL import Image
-from diffusers.utils.outputs import BaseOutput
+import torch.nn as nn
 from accelerate import Accelerator
-from accelerate.utils import set_seed, ProjectConfiguration, gather_object
+from accelerate.utils import ProjectConfiguration, gather_object, set_seed
+from PIL import Image
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from ..hparams import *
-from ..models.abc import BaseAdapter
+from diffusers.utils.outputs import BaseOutput
+
+from ..advantage import AdvantageProcessor
 from ..data_utils.dataset import METADATA_COLUMN
 from ..data_utils.loader import (
-    get_train_dataloader,
     get_eval_dataloaders,
+    get_train_dataloader,
 )
-from ..rewards import load_reward_model, BaseRewardModel, MultiRewardLoader, RewardProcessor, RewardBuffer
-from ..advantage import AdvantageProcessor
-from ..logger import load_logger, LogFormatter, LocalFileLogger, prepare_sample_for_media
+from ..hparams import *
+from ..logger import LocalFileLogger, LogFormatter, load_logger, prepare_sample_for_media
+from ..models.abc import BaseAdapter
+from ..rewards import (
+    BaseRewardModel,
+    MultiRewardLoader,
+    RewardBuffer,
+    RewardProcessor,
+    load_reward_model,
+)
 from ..samples import BaseSample
-from ..utils.logger_utils import setup_logger
 from ..utils.base import create_generator, create_generator_by_prompt, filter_kwargs, json_default
+from ..utils.logger_utils import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -51,12 +59,13 @@ class BaseTrainer(ABC):
     """
     Abstract Base Class for Flow-Factory trainers.
     """
+
     def __init__(
-            self,
-            accelerator: Accelerator,
-            config : Arguments,
-            adapter : BaseAdapter,
-        ):
+        self,
+        accelerator: Accelerator,
+        config: Arguments,
+        adapter: BaseAdapter,
+    ):
         self.accelerator = accelerator
         self.config = config
         self.log_args = config.log_args
@@ -66,7 +75,9 @@ class BaseTrainer(ABC):
         self.eval_args = config.eval_args
 
         self.reward_args = config.reward_args
-        self.eval_reward_args = config.eval_reward_args or config.reward_args # If `eval_reward_args` is not given, use `reward_args`
+        self.eval_reward_args = (
+            config.eval_reward_args or config.reward_args
+        )  # If `eval_reward_args` is not given, use `reward_args`
 
         self.adapter = adapter
         self.epoch = 0
@@ -80,7 +91,7 @@ class BaseTrainer(ABC):
         self.autocast = partial(
             torch.autocast,
             device_type=accelerator.device.type,
-            dtype=torch.float16 if accelerator.mixed_precision == "fp16" else torch.bfloat16
+            dtype=torch.float16 if accelerator.mixed_precision == "fp16" else torch.bfloat16,
         )
 
         if self.accelerator.is_local_main_process:
@@ -102,15 +113,22 @@ class BaseTrainer(ABC):
         """Log data using the initialized logger."""
         if self.logger is not None:
             self.logger.log_data(data, step=step)
-        
+
         # Print summary to console
         if self.accelerator.is_local_main_process:
-            metrics = {k: v for k, v in ((k, LogFormatter.to_scalar(v)) for k, v in data.items()) if v is not None}
+            metrics = {
+                k: v
+                for k, v in ((k, LogFormatter.to_scalar(v)) for k, v in data.items())
+                if v is not None
+            }
             if metrics:
                 parts = [f"[Step {step:04d} | Epoch {self.epoch:03d}]"]
                 parts.extend(
-                    f"{k}={int(v)}" if isinstance(v, int) or (isinstance(v, float) and v.is_integer())
-                    else f"{k}={v:.4f}"
+                    (
+                        f"{k}={int(v)}"
+                        if isinstance(v, int) or (isinstance(v, float) and v.is_integer())
+                        else f"{k}={v:.4f}"
+                    )
                     for k, v in metrics.items()
                 )
                 logger.info(" ".join(parts))
@@ -166,6 +184,7 @@ class BaseTrainer(ABC):
         limit = self.log_args.max_log_samples
         selected_samples = samples if limit is None else samples[:limit]
         include_metadata = self.log_args.save_media_locally
+        manifest_only_media = include_metadata and self.accelerator.num_processes > 1
         group_counts: Dict[int, int] = {}
         media_records: List[Dict[str, Any]] = []
         for local_index, sample in enumerate(selected_samples):
@@ -184,9 +203,7 @@ class BaseTrainer(ABC):
                 else None
             )
             existing_metadata = sample.extra_kwargs.get("_media_metadata", {})
-            candidate_id = existing_metadata.get("context", {}).get("ga", {}).get(
-                "candidate_id"
-            )
+            candidate_id = existing_metadata.get("context", {}).get("ga", {}).get("candidate_id")
             if candidate_id is None:
                 candidate_id = sample.extra_kwargs.get("ga_candidate_id")
             media_records.append(
@@ -201,7 +218,8 @@ class BaseTrainer(ABC):
                 }
             )
 
-        if self.accelerator.num_processes > 1:
+        gather_media_records = not include_metadata and self.accelerator.num_processes > 1
+        if gather_media_records:
             media_records = gather_object(media_records)
             if not self.accelerator.is_main_process:
                 return
@@ -213,10 +231,8 @@ class BaseTrainer(ABC):
             group_id = media_record["group_id"]
             group_index = group_counts.get(group_id, 0)
             group_counts[group_id] = group_index + 1
-            if include_metadata:
-                media_context = media_sample.extra_kwargs["_media_metadata"]["context"][
-                    "media"
-                ]
+            if include_metadata and not manifest_only_media:
+                media_context = media_sample.extra_kwargs["_media_metadata"]["context"]["media"]
                 media_context["global_index"] = global_index
                 media_context["group_index"] = group_index
             candidate_id = media_record["candidate_id"]
@@ -225,14 +241,22 @@ class BaseTrainer(ABC):
                 if candidate_id is not None
                 else f"sample_{group_index:06d}"
             )
-            key = (
-                f"media/{category}/{context_name}/group_{group_id}/{item_name}"
-            )
+            key = f"media/{category}/{context_name}/group_{group_id}/{item_name}"
             payload[key] = media_sample
+
+        if include_metadata and self.accelerator.num_processes > 1:
+            self.logger.set_media_rank(self.accelerator.process_index)
+            local_manifest = self.logger.save_media_locally(payload, step=self.step)
+            all_manifests = gather_object(local_manifest)
+            if self.accelerator.is_main_process:
+                self.logger.write_media_manifest(all_manifests)
+                if self.log_args.logging_backend not in {None, "none"}:
+                    self.logger.log_media_files(all_manifests, step=self.step)
+            return
 
         if payload:
             self.log_data(payload, step=self.step)
-    
+
     def _init_logging_backend(self):
         """Initialize logging backend if specified."""
         if self.accelerator.is_main_process:
@@ -280,7 +304,7 @@ class BaseTrainer(ABC):
         # Get training & eval reward models
         self.reward_models = self.reward_loader.get_training_reward_models()
         self.eval_reward_models = self.reward_loader.get_eval_reward_models()
-        train_reward_configs = self.reward_loader.get_reward_configs('train')
+        train_reward_configs = self.reward_loader.get_reward_configs("train")
         # Initialize reward processor (training side only — eval-side
         # processors are per-dataset, built below).
         group_on_same_rank = self.config.data_args.sampler_type == "group_contiguous"
@@ -288,13 +312,14 @@ class BaseTrainer(ABC):
             accelerator=self.accelerator,
             reward_models=self.reward_models,
             reward_configs=train_reward_configs,
-            tokenizer=self.adapter.tokenizer, # For prompt encoding/decoding,
+            tokenizer=self.adapter.tokenizer,  # For prompt encoding/decoding,
             group_on_same_rank=group_on_same_rank,
             verbose=self.log_args.verbose,
         )
         # Initialize the training-side reward buffer.
         self.reward_buffer = RewardBuffer(
-            self.reward_processor, self.training_args.group_size,
+            self.reward_processor,
+            self.training_args.group_size,
         )
 
         # Per-eval-dataset reward processors and buffers.  Eval is now
@@ -322,7 +347,8 @@ class BaseTrainer(ABC):
                     )
                     self.eval_dataset_reward_processors[ed.name] = ds_processor
                     self.eval_dataset_reward_buffers[ed.name] = RewardBuffer(
-                        ds_processor, self.training_args.group_size,
+                        ds_processor,
+                        self.training_args.group_size,
                     )
 
         # Initialize advantage processor.
@@ -331,12 +357,9 @@ class BaseTrainer(ABC):
         trainer_type = str(self.training_args.trainer_type).lower()
         self.advantage_processor = AdvantageProcessor(
             accelerator=self.accelerator,
-            reward_weights={
-                name: cfg.weight
-                for name, cfg in train_reward_configs.items()
-            },
+            reward_weights={name: cfg.weight for name, cfg in train_reward_configs.items()},
             group_size=self.training_args.group_size,
-            global_std=getattr(self.training_args, 'global_std', True),
+            global_std=getattr(self.training_args, "global_std", True),
             sampler_type=self.config.data_args.sampler_type,
             verbose=self.log_args.verbose,
             max_log_samples=self.log_args.max_log_samples,
@@ -377,15 +400,16 @@ class BaseTrainer(ABC):
 
         return self.reward_models, self.eval_reward_models
 
-    def _init_dataloader(self) -> Tuple[Optional[Union[DataLoader, "MultiSourceTrainDataLoader"]], Dict[str, DataLoader]]:
+    def _init_dataloader(
+        self,
+    ) -> Tuple[Optional[Union[DataLoader, "MultiSourceTrainDataLoader"]], Dict[str, DataLoader]]:
         """Build train and eval dataloaders.
 
         Returns:
             Tuple of (train_dataloader, eval_dataloaders_by_name).
         """
         self.adapter.on_load_components(
-            components=self.adapter.preprocessing_modules,
-            device=self.accelerator.device
+            components=self.adapter.preprocessing_modules, device=self.accelerator.device
         )
 
         dataloader, train_dataloaders_by_source = get_train_dataloader(
@@ -409,7 +433,7 @@ class BaseTrainer(ABC):
         self.accelerator.wait_for_everyone()
 
         return dataloader, eval_dataloaders
-    
+
     def _init_optimizer(self) -> torch.optim.Optimizer:
         """Initialize optimizer."""
         self.optimizer = torch.optim.AdamW(
@@ -424,23 +448,23 @@ class BaseTrainer(ABC):
     def _load_inference_components(self, trainable_module_names: List[str]):
         """
         Load non-trainable components needed at runtime to the accelerator device.
-        
+
         Trainable modules are already on-device via `accelerator.prepare()`.
         This loads the remaining modules required for inference and,
         when preprocessing is disabled, also loads encoding components
         that would otherwise stay offloaded.
         """
         prepared_names = set(trainable_module_names)
-        
+
         modules_to_load = list(self.adapter.inference_modules)
-        
+
         if not self.config.data_args.enable_preprocess:
             modules_to_load.extend(self.adapter.preprocessing_modules)
-        
+
         # Resolve group names → concrete names, then deduplicate & exclude prepared
         resolved = self.adapter._resolve_component_names(modules_to_load)
         resolved = [m for m in resolved if m not in prepared_names]
-        
+
         if resolved:
             self.adapter.on_load_components(
                 components=resolved,
@@ -474,12 +498,14 @@ class BaseTrainer(ABC):
 
         # Explicit slice (not implicit zip truncation): prepared also holds the
         # optimizer + eval dataloaders after the trainable-module prefix.
-        for name, module in zip(trainable_names, prepared[:len(trainable_modules)]):
+        for name, module in zip(trainable_names, prepared[: len(trainable_modules)]):
             self.adapter.set_component(name, module)
 
         self.optimizer = prepared[len(trainable_modules)]
-        prepared_eval_dataloaders = prepared[len(trainable_modules) + 1:]
-        self.eval_dataloaders: Dict[str, DataLoader] = dict(zip(eval_dataloader_names, prepared_eval_dataloaders))
+        prepared_eval_dataloaders = prepared[len(trainable_modules) + 1 :]
+        self.eval_dataloaders: Dict[str, DataLoader] = dict(
+            zip(eval_dataloader_names, prepared_eval_dataloaders)
+        )
 
         # Load inference modules, excluding already-prepared ones
         self._load_inference_components(trainable_names)
@@ -490,7 +516,7 @@ class BaseTrainer(ABC):
     def _synchronize_frozen_components(self):
         if self.accelerator.num_processes <= 1:
             return
-        
+
         # Synchronize all non-prepared components
         all_names = self.adapter._resolve_component_names()
         for name in all_names:
@@ -521,7 +547,7 @@ class BaseTrainer(ABC):
         torch_autocast_dtype fall through to the active torch.autocast state so
         the engine re-enables (rather than disables) autocast during forward.
         """
-        if getattr(accelerator.state, 'deepspeed_plugin', None) is None:
+        if getattr(accelerator.state, "deepspeed_plugin", None) is None:
             return
 
         try:
@@ -530,13 +556,13 @@ class BaseTrainer(ABC):
         except ImportError:
             return
 
-        if getattr(DeepSpeedEngine, '_ff_autocast_patched', False):
+        if getattr(DeepSpeedEngine, "_ff_autocast_patched", False):
             return
 
-        if hasattr(_ds_ac, 'validate_nested_autocast'):
+        if hasattr(_ds_ac, "validate_nested_autocast"):
             _ds_ac.validate_nested_autocast = lambda engine: None
 
-        if hasattr(DeepSpeedEngine, 'torch_autocast_enabled'):
+        if hasattr(DeepSpeedEngine, "torch_autocast_enabled"):
             _orig_enabled = DeepSpeedEngine.torch_autocast_enabled
             _orig_dtype = DeepSpeedEngine.torch_autocast_dtype
 
@@ -612,7 +638,7 @@ class BaseTrainer(ABC):
         if not self.training_args.offload_samples_to_cpu:
             return
         for sample in samples:
-            sample.to('cpu')
+            sample.to("cpu")
 
     def sample_batch(
         self,
@@ -726,8 +752,8 @@ class BaseTrainer(ABC):
         # Per-prompt ratio used for both metadata and __source__ broadcasting.
         # Some adapters generate K replicates per prompt (group_size > 1) so
         # one batch row maps to several samples.
-        sources = batch.get('__source__')
-        source_ids = batch.get('__source_id__')
+        sources = batch.get("__source__")
+        source_ids = batch.get("__source_id__")
         metadata_list = batch.get(METADATA_COLUMN)
         if not metadata_list and not sources and not source_ids:
             return
@@ -828,7 +854,7 @@ class BaseTrainer(ABC):
         with torch.no_grad(), self.autocast():
             for _ in tqdm(
                 range(self.training_args.num_batches_per_epoch),
-                desc=f'Epoch {self.epoch} Sampling',
+                desc=f"Epoch {self.epoch} Sampling",
                 disable=not self.show_progress_bar,
             ):
                 batch = next(data_iter)
@@ -849,10 +875,7 @@ class BaseTrainer(ABC):
         # fire there. This catches a trainer that overrode generate_samples
         # but bypassed sample_batch / _inject_batch_metadata.
         if len(self.train_dataloaders_by_source) > 1 and samples:
-            missing = [
-                i for i, s in enumerate(samples)
-                if s.source is None
-            ]
+            missing = [i for i, s in enumerate(samples) if s.source is None]
             if missing:
                 raise RuntimeError(
                     f"Multi-source training: {len(missing)} sample(s) at indices "
@@ -892,13 +915,11 @@ class BaseTrainer(ABC):
             for dataset_name, dataloader in self.eval_dataloaders.items():
                 buffer = self.eval_dataset_reward_buffers.get(dataset_name)
                 if buffer is None:
-                    logger.warning(
-                        f"No reward buffer for eval dataset '{dataset_name}', skipping."
-                    )
+                    logger.warning(f"No reward buffer for eval dataset '{dataset_name}', skipping.")
                     continue
                 buffer.clear()
                 all_samples: List[BaseSample] = []
-                debug_eval_enabled = getattr(self.eval_args, 'debug_eval', False)
+                debug_eval_enabled = getattr(self.eval_args, "debug_eval", False)
                 if debug_eval_enabled:
                     logger.info(
                         f"Debug eval enabled: limiting to first 5 prompts for dataset '{dataset_name}'."
@@ -906,19 +927,21 @@ class BaseTrainer(ABC):
 
                 # Merge per-dataset eval overrides with shared eval_args
                 ed_config = self._eval_dataset_configs[dataset_name]
-                eval_kwargs = ed_config.eval.get_merged_eval_kwargs(self.eval_args) if ed_config.eval else dict(self.eval_args)
+                eval_kwargs = (
+                    ed_config.eval.get_merged_eval_kwargs(self.eval_args)
+                    if ed_config.eval
+                    else dict(self.eval_args)
+                )
 
                 for batch in tqdm(
                     dataloader,
-                    desc=f'Eval/{dataset_name}',
+                    desc=f"Eval/{dataset_name}",
                     disable=not self.show_progress_bar,
                 ):
                     batch = self._augment_batch_with_source(
                         batch, dataset_name, ed_config.source_id
                     )
-                    generator = create_generator_by_prompt(
-                        batch['prompt'], self.training_args.seed
-                    )
+                    generator = create_generator_by_prompt(batch["prompt"], self.training_args.seed)
                     samples = self.sample_batch(
                         batch,
                         reward_buffer=buffer,
@@ -936,7 +959,7 @@ class BaseTrainer(ABC):
                         )
                         break
 
-                rewards = buffer.finalize(store_to_samples=True, split='pointwise')
+                rewards = buffer.finalize(store_to_samples=True, split="pointwise")
                 self.log_media_samples(
                     all_samples,
                     category="evaluation",
@@ -952,23 +975,25 @@ class BaseTrainer(ABC):
 
                 # Gather across ranks
                 rewards_tensors = {
-                    k: torch.as_tensor(v).to(self.accelerator.device)
-                    for k, v in rewards.items()
+                    k: torch.as_tensor(v).to(self.accelerator.device) for k, v in rewards.items()
                 }
                 gathered_rewards = {
-                    k: self.accelerator.gather(v).cpu().numpy()
-                    for k, v in rewards_tensors.items()
+                    k: self.accelerator.gather(v).cpu().numpy() for k, v in rewards_tensors.items()
                 }
 
                 # Log per-dataset immediately to avoid accumulating all samples in memory
                 if self.accelerator.is_main_process:
                     log_data: Dict[str, Any] = {}
                     for k, v in gathered_rewards.items():
-                        log_data[f'eval/{dataset_name}/reward_{k}_mean'] = np.mean(v)
-                        log_data[f'eval/{dataset_name}/reward_{k}_std'] = np.std(v)
+                        log_data[f"eval/{dataset_name}/reward_{k}_mean"] = np.mean(v)
+                        log_data[f"eval/{dataset_name}/reward_{k}_std"] = np.std(v)
                         for q in [0, 25, 50, 75, 100]:
-                            log_data[f'eval/{dataset_name}/reward_{k}_p{q}'] = float(np.percentile(v, q))
-                    log_data[f'eval/{dataset_name}/rewards_all'] = {k: v.tolist() for k, v in gathered_rewards.items()}
+                            log_data[f"eval/{dataset_name}/reward_{k}_p{q}"] = float(
+                                np.percentile(v, q)
+                            )
+                    log_data[f"eval/{dataset_name}/rewards_all"] = {
+                        k: v.tolist() for k, v in gathered_rewards.items()
+                    }
                     self.log_data(log_data, step=self.step)
 
         self.accelerator.wait_for_everyone()
@@ -986,10 +1011,10 @@ class BaseTrainer(ABC):
         self.accelerator.wait_for_everyone()
 
     def load_checkpoint(
-            self,
-            path: str,
-            resume_type: Optional[Literal['lora', 'full', 'state']] = None,
-        ):
+        self,
+        path: str,
+        resume_type: Optional[Literal["lora", "full", "state"]] = None,
+    ):
         """Load trainer state from a specific path."""
         self.adapter.load_checkpoint(
             path=path,
@@ -1007,11 +1032,11 @@ class BaseTrainer(ABC):
         reclaim all resources including GPU memory.
         """
         # Training-side reward buffer.
-        train_buf = getattr(self, 'reward_buffer', None)
+        train_buf = getattr(self, "reward_buffer", None)
         if train_buf is not None:
             train_buf.shutdown(wait=False, cancel_futures=True)
 
         # Per-eval-dataset reward buffers.
-        for buf in getattr(self, 'eval_dataset_reward_buffers', {}).values():
+        for buf in getattr(self, "eval_dataset_reward_buffers", {}).values():
             if buf is not None:
                 buf.shutdown(wait=False, cancel_futures=True)

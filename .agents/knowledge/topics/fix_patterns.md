@@ -278,6 +278,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Text-based VLM reward adapters must match the upstream inference contract and must not use a valid-looking numeric sentinel for parse failures. Preserve raw output context at the failure boundary so prompt or format drift is diagnosable.
 - **Related Constraint**: #26
 
+### Distributed media object gathering exhausted accelerator memory
+- **Date**: 2026-09-04
+- **Symptom**: Multi-rank GA/NFT training failed in `log_media_samples()` with an NPU out-of-memory error from `torch.distributed.all_gather_object`, despite the media samples having been moved to CPU.
+- **Root Cause**: Accelerate serializes gathered objects through device tensors, so gathering CPU media samples still staged the full image/video payload on every NPU; local file saving happened only after the oversized collective.
+- **Fix**: `BaseTrainer.log_media_samples()` now lets every rank save media and sidecars locally under a rank-specific path, gathers only JSON-safe manifest entries, and has rank 0 append `logs/media.jsonl`. Configured backends read the shared local files from the manifest; backend-only runs retain the original media gather. `Logger` exposes separate local-save, manifest-write, and file-backed backend logging helpers.
+- **Lesson**: Moving tensors to CPU before an object collective does not make the collective device-free. For distributed artifacts, persist large payloads at the producing rank and communicate only bounded metadata; require a shared filesystem when a main process consumes rank-local paths.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

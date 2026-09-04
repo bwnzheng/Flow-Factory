@@ -197,6 +197,18 @@ Two-layer structure (constraint #14): task-level samples (`T2ISample`, `I2VSampl
 ### Advantage Computation
 `AdvantageProcessor` (`advantage/advantage_processor.py`): communication-aware, auto-selects gather vs local path. Strategies: `"sum"` (GRPO) and `"gdpo"`; shared sample weighting is applied here before trainer-specific optimization. SRC keeps the ordinary uniform prompt-group baseline for the optimization advantage and applies its `K * probability` outer multiplier once. Linear consumers fold that multiplier into the advantage, while NFT keeps it separate and multiplies the complete per-sample regression objective; weighted-centered SRC advantages remain diagnostics for the reweighted distribution. GA trainers apply SRC to the fixed-size survivor population returned by genetic evolution, with `ga_nft` using NFT's separate outer objective multiplier. Logging arrays are globally complete after `_gather_for_logging()` and must be summarized locally rather than rank-reduced again. All reward-based trainers delegate to `self.advantage_processor.compute_advantages()`; the distillation trainer `diffusion-opd` is the exception (its `prepare_feedback()` is a no-op — no reward/advantage stage).
 
+### Distributed Media Logging
+
+When `save_media_locally` is enabled, each rank writes its own image/video shard
+under a rank-specific directory. Only lightweight JSON-safe manifest entries
+are gathered to the main process, which appends the unified `logs/media.jsonl`.
+Media tensors must not enter the cross-rank object collective. Backend-only
+logging retains media gathering because the main-process backend consumes the
+actual media objects; local-media runs let the main process read the shared
+rank-local files from the manifest instead. The rank-local mode requires a shared
+`save_dir/run_name` filesystem; on a non-shared filesystem, disable media
+logging or provide an external per-rank manifest workflow.
+
 ### Configuration Hierarchy
 ```
 Arguments (top-level)
