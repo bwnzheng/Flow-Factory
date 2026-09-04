@@ -134,24 +134,49 @@ def _load_v15(model_path: str, device: torch.device) -> Tuple[object, object, ob
 # Score parsing
 # ---------------------------------------------------------------------------
 
+_SCORE_VALUE_PATTERN = r"(?:\d+(?:\.\d*)?|\.\d+)"
 _SCORE_LINE_RE = re.compile(
-    r"^\s*(Alignment|Coherence|Style)\s*:\s*([\d.]+)\s*/\s*5\s*$",
+    rf"^\s*(?:[-*]\s*)?(?:\*\*)?(Alignment|Coherence|Style)(?:\*\*)?"
+    rf"(?:\s+Score)?(?:\s*\(\s*1\s*[-–]\s*5\s*\))?\s*:\s*"
+    rf"({_SCORE_VALUE_PATTERN})(?:\s*/\s*5(?:\.\d+)?)?\s*(?:\*\*)?\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
+
+
+def _compact_output(text: str) -> str:
+    """Compact model output for an actionable parsing error."""
+    compact = " ".join(text.split())
+    return compact if len(compact) <= 500 else f"{compact[:497]}..."
 
 
 def _parse_scores(text: str) -> Tuple[float, float, float, float]:
     """Parse alignment, coherence, style scores from model output.
 
-    Returns (alignment, coherence, style, overall) where overall is the mean.
-    If parsing fails for a dimension, returns 0.0 for that dimension.
+    Supports both the official UniReward v2 output format and the legacy
+    ``Alignment: X/5`` format.  Raises ``ValueError`` when a dimension is
+    missing or outside the declared 1–5 scale.
     """
     matches = {m.group(1).lower(): float(m.group(2)) for m in _SCORE_LINE_RE.finditer(text)}
 
-    alignment = matches.get("alignment", 0.0)
-    coherence = matches.get("coherence", 0.0)
-    style = matches.get("style", 0.0)
-    overall = (alignment + coherence + style) / 3.0 if matches else 0.0
+    score_names = ("alignment", "coherence", "style")
+    missing = [name for name in score_names if name not in matches]
+    if missing:
+        raise ValueError(
+            "UniReward output is missing score fields "
+            f"{missing}. Expected 'Alignment Score (1-5): X', "
+            f"'Coherence Score (1-5): Y', and 'Style Score (1-5): Z'. "
+            f"Raw output: {_compact_output(text)!r}"
+        )
+
+    invalid = {name: matches[name] for name in score_names if not 1.0 <= matches[name] <= 5.0}
+    if invalid:
+        raise ValueError(
+            f"UniReward scores outside the expected 1-5 range: {invalid}. "
+            f"Raw output: {_compact_output(text)!r}"
+        )
+
+    alignment, coherence, style = (matches[name] for name in score_names)
+    overall = (alignment + coherence + style) / 3.0
 
     return alignment, coherence, style, overall
 

@@ -270,6 +270,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Compatibility shims that emulate removed framework attributes must preserve the complete read/write contract of the replacement API. Avoid global monkey patches where possible, and test framework lifecycle assignments rather than only import success.
 - **Related Constraint**: N/A
 
+### UniReward parser treated official score output as zero
+- **Date**: 2026-09-04
+- **Symptom**: Standalone reward evaluation returned zero for many UniReward samples even though the model generated valid score text.
+- **Root Cause**: The parser only accepted `Alignment: X/5` while the official UniReward v2 inference prompt emits `Alignment Score (1-5): X`, so all dimensions silently defaulted to zero.
+- **Fix**: `rewards/unireward.py` now accepts the official, legacy, and common Markdown score formats, validates the declared 1–5 scale, and raises an actionable error containing a compact raw-output excerpt when a dimension is missing or invalid. Regression tests cover each supported format and failure mode.
+- **Lesson**: Text-based VLM reward adapters must match the upstream inference contract and must not use a valid-looking numeric sentinel for parse failures. Preserve raw output context at the failure boundary so prompt or format drift is diagnosable.
+- **Related Constraint**: #26
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
