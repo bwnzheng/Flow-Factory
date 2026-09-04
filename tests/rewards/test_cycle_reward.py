@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from PIL import Image
+from transformers.modeling_utils import PreTrainedModel
 
 from flow_factory.hparams import RewardArguments
 from flow_factory.rewards import cycle_reward as cycle_reward_module
@@ -39,6 +40,20 @@ class _FakeCycleReward:
 def test_registry_resolves_cycle_reward_case_insensitively():
     assert get_reward_model_class("Cycle_Reward") is CycleRewardModel
     assert get_reward_model_class("CycleReward") is CycleRewardModel
+
+
+def test_transformers_compat_all_tied_weights_keys_is_writable():
+    descriptor = PreTrainedModel.__dict__.get("all_tied_weights_keys")
+    if not isinstance(descriptor, property):
+        pytest.skip("The installed Transformers version provides its own attribute.")
+
+    assert descriptor.fset is not None
+
+    dummy_model = SimpleNamespace()
+    expected = {"text_model.embeddings.token_embedding.weight": "token_embedding.weight"}
+    descriptor.__set__(dummy_model, expected)
+
+    assert descriptor.__get__(dummy_model, type(dummy_model)) == expected
 
 
 def test_cycle_reward_batches_and_uses_upstream_preprocess(monkeypatch):

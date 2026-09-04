@@ -262,6 +262,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: NPU compatibility cannot be inferred from successful checkpoint loading; audit every custom kernel on the actual forward path and provide a numerically equivalent backend-specific fallback before invoking it.
 - **Related Constraint**: N/A
 
+### CycleReward compatibility shim shadowed a writable Transformers attribute
+- **Date**: 2026-09-04
+- **Symptom**: Standalone reward evaluation failed while loading an SD3.5 pipeline with `AttributeError: property of 'CLIPTextModel' object has no setter`.
+- **Root Cause**: The CycleReward compatibility shim installed a getter-only `PreTrainedModel.all_tied_weights_keys` property, while newer Transformers assigns that attribute during `PreTrainedModel.post_init()`.
+- **Fix**: `rewards/cycle_reward.py` now stores newer Transformers assignments in `_all_tied_weights_keys` and falls back to `_tied_weights_keys` for older CycleReward code; a regression test verifies that the compatibility descriptor is writable.
+- **Lesson**: Compatibility shims that emulate removed framework attributes must preserve the complete read/write contract of the replacement API. Avoid global monkey patches where possible, and test framework lifecycle assignments rather than only import success.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

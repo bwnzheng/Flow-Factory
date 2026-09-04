@@ -80,6 +80,20 @@ def _get_head_mask(
     return converted.to(dtype=model.dtype, device=model.device)
 
 
+def _get_all_tied_weights_keys(model: PreTrainedModel) -> dict:
+    """Read the expanded tied-weight mapping while supporting older Transformers models."""
+    return (
+        getattr(model, "_all_tied_weights_keys", None)
+        or getattr(model, "_tied_weights_keys", None)
+        or {}
+    )
+
+
+def _set_all_tied_weights_keys(model: PreTrainedModel, value: dict) -> None:
+    """Store the expanded tied-weight mapping assigned by newer Transformers models."""
+    model._all_tied_weights_keys = value
+
+
 try:
     # CycleReward 0.1.7 vendors a BLIP fork written for older Transformers.
     # Transformers 5 moved two helpers and removed one; expose compatible
@@ -96,9 +110,13 @@ try:
         _transformers_modeling_utils.find_pruneable_heads_and_indices = (
             _find_pruneable_heads_and_indices
         )
-    if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+    all_tied_weights_keys = getattr(PreTrainedModel, "all_tied_weights_keys", None)
+    if all_tied_weights_keys is None or (
+        isinstance(all_tied_weights_keys, property) and all_tied_weights_keys.fset is None
+    ):
         PreTrainedModel.all_tied_weights_keys = property(
-            lambda model: getattr(model, "_tied_weights_keys", None) or {}
+            _get_all_tied_weights_keys,
+            _set_all_tied_weights_keys,
         )
     if not hasattr(PreTrainedModel, "get_head_mask"):
         PreTrainedModel.get_head_mask = _get_head_mask
