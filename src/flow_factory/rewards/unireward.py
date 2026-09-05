@@ -168,7 +168,16 @@ def _parse_scores(text: str) -> Tuple[float, float, float, float]:
             f"Raw output: {_compact_output(text)!r}"
         )
 
-    invalid = {name: matches[name] for name in score_names if not 1.0 <= matches[name] <= 5.0}
+    # The upstream checkpoint occasionally emits an all-zero vector for a
+    # sample even though its nominal pointwise scale is 1--5.  Treat that
+    # explicit sentinel as a zero reward; continue rejecting partial or other
+    # out-of-range values so malformed generations remain visible.
+    all_zero = all(matches[name] == 0.0 for name in score_names)
+    invalid = {
+        name: matches[name]
+        for name in score_names
+        if not (all_zero or 1.0 <= matches[name] <= 5.0)
+    }
     if invalid:
         raise ValueError(
             f"UniReward scores outside the expected 1-5 range: {invalid}. "

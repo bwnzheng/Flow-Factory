@@ -38,6 +38,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 
 <!-- This section accumulates over time. Append new records at the end using the template above. -->
 
+### UniReward all-zero pointwise sentinel
+- **Date**: 2026-09-05
+- **Symptom**: Offline UniReward workers failed with `scores outside the expected 1-5 range` when the model returned `Alignment: 0.0/5`, `Coherence: 0.0/5`, and `Style: 0.0/5`.
+- **Root Cause**: The upstream checkpoint can emit an all-zero vector for a sample despite documenting a nominal 1-5 pointwise scale, and the parser treated that explicit sentinel as malformed input.
+- **Fix**: `rewards/unireward.py:_parse_scores` accepts only the complete all-zero vector as a zero reward while retaining fail-fast validation for missing, partial, or otherwise out-of-range values; a regression test covers the sentinel.
+- **Lesson**: Preserve strict validation for malformed model output, but explicitly handle documented-by-observation sentinel outputs at the parser boundary so one sample does not abort a long evaluation.
+- **Related Constraint**: #26
+
 ### Multi-modal batch homogeneity (R6)
 - **Date**: 2026-04
 - **Symptom**: Silent HF `Dataset.map` errors and inconsistent per-sample types in the `audios` column (sometimes `None`, sometimes `Tensor`, sometimes `List[Tensor]`); image/video columns had a latent batch-length mismatch when a sample contributed zero items.
