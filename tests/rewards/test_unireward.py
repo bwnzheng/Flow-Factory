@@ -56,13 +56,16 @@ def test_parse_scores_reports_missing_dimensions_with_raw_output():
     assert "Alignment Score (1-5): 3.0" in str(exc_info.value)
 
 
-def test_parse_scores_accepts_upstream_all_zero_sentinel():
+def test_parse_scores_accepts_upstream_zero_scores():
     assert _parse_scores(
-        "Alignment: 0.0/5\nCoherence: 0.0/5\nStyle: 0.0/5"
-    ) == (0.0, 0.0, 0.0, 0.0)
+        "Alignment: 0.0/5\nCoherence: 3.6798999309539795\nStyle: 2.513000011444092"
+    ) == pytest.approx(
+        (0.0, 3.6798999309539795, 2.513000011444092,
+         (3.6798999309539795 + 2.513000011444092) / 3)
+    )
 
 
-@pytest.mark.parametrize("score", [0, 5.1, 10])
+@pytest.mark.parametrize("score", [-0.1, 5.1, 10])
 def test_parse_scores_rejects_values_outside_the_declared_scale(score):
     text = f"Alignment Score (1-5): {score}\nCoherence Score (1-5): 3\nStyle Score (1-5): 3"
 

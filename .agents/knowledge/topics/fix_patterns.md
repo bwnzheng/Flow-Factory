@@ -38,12 +38,12 @@ Based on the fix type, write the fix entry to the appropriate document:
 
 <!-- This section accumulates over time. Append new records at the end using the template above. -->
 
-### UniReward all-zero pointwise sentinel
+### UniReward zero-valued pointwise scores
 - **Date**: 2026-09-05
-- **Symptom**: Offline UniReward workers failed with `scores outside the expected 1-5 range` when the model returned `Alignment: 0.0/5`, `Coherence: 0.0/5`, and `Style: 0.0/5`.
-- **Root Cause**: The upstream checkpoint can emit an all-zero vector for a sample despite documenting a nominal 1-5 pointwise scale, and the parser treated that explicit sentinel as malformed input.
-- **Fix**: `rewards/unireward.py:_parse_scores` accepts only the complete all-zero vector as a zero reward while retaining fail-fast validation for missing, partial, or otherwise out-of-range values; a regression test covers the sentinel.
-- **Lesson**: Preserve strict validation for malformed model output, but explicitly handle documented-by-observation sentinel outputs at the parser boundary so one sample does not abort a long evaluation.
+- **Symptom**: Offline UniReward workers failed with `scores outside the expected 1-5 range` when the model returned a zero for one or more dimensions.
+- **Root Cause**: The upstream checkpoint emits zero-valued pointwise scores despite documenting a nominal 1-5 scale, and the parser treated each zero as malformed input.
+- **Fix**: `rewards/unireward.py:_parse_scores` accepts the observed 0-5 output range while retaining fail-fast validation for missing, negative, or above-five values; a regression test covers a partial-zero result.
+- **Lesson**: Validate the range actually emitted by the checkpoint at the parser boundary, and keep strict rejection for values that cannot represent a score.
 - **Related Constraint**: #26
 
 ### Multi-modal batch homogeneity (R6)
