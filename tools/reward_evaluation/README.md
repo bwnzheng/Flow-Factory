@@ -74,6 +74,12 @@ as `tools.model_inference`. The built-in UniReward backends pin their complete
 model to the worker's assigned accelerator rather than using automatic
 cross-device model sharding.
 
+Each source evaluation (image generation for all selected checkpoints) runs in its own
+spawned process. Accelerator reward scoring also uses a fresh spawned process for each
+reward, including when `model.num_processes: 1`; process exit is the cleanup boundary
+between models and prevents CUDA/Ascend allocator and compiled-operator state from leaking
+across task switches. CPU single-worker scoring retains a direct path for lightweight tests.
+
 Each `runs` entry can select one checkpoint or an entire checkpoint directory:
 
 ```yaml

@@ -139,16 +139,37 @@ def score_reward(
         )
         if len(chunks) == 1:
             worker_device = _worker_device(device, 0, num_processes)
-            chunk_results = _score_chunk(
-                dict(reward_config),
-                chunks[0],
-                manifest_rows,
-                image_root,
-                prompt_records,
-                worker_device,
-                dtype,
-                batch_size,
-            )
+            # Accelerator runtimes retain allocator and compiled-op state beyond
+            # Python object destruction.  Keep the direct path only for CPU;
+            # every CUDA/NPU reward gets a fresh spawned process even with one
+            # configured worker, making reward-to-reward switching a hard
+            # process-lifetime boundary.
+            if torch.device(worker_device).type == "cpu":
+                chunk_results = _score_chunk(
+                    dict(reward_config),
+                    chunks[0],
+                    manifest_rows,
+                    image_root,
+                    prompt_records,
+                    worker_device,
+                    dtype,
+                    batch_size,
+                )
+            else:
+                with ProcessPoolExecutor(
+                    max_workers=1, mp_context=get_context("spawn")
+                ) as executor:
+                    chunk_results = executor.submit(
+                        _score_chunk,
+                        dict(reward_config),
+                        chunks[0],
+                        manifest_rows,
+                        image_root,
+                        prompt_records,
+                        worker_device,
+                        dtype,
+                        batch_size,
+                    ).result()
             results.update(chunk_results)
             cached.update(chunk_results)
             _write_scores(output_path, cached)
@@ -636,6 +657,7 @@ def _score_chunk(
                 report_progress()
     finally:
         del model
+        gc.collect()
         if device_object.type == "cuda":
             torch.cuda.empty_cache()
         elif device_object.type == "npu":

@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -286,6 +288,29 @@ def _generate_images(
     prompt_records: List[PromptRecord],
     image_root: Path,
 ) -> List[Dict[str, Any]]:
+    # Keep the complete inference task in a spawned process.  Diffusion
+    # pipelines and Ascend runtimes can retain device allocator/compiler state
+    # after ``runner.close()``; returning from this process is the reclamation
+    # boundary before the next source/checkpoint task starts.
+    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
+        executor.submit(
+            _generate_images_worker,
+            config,
+            checkpoints,
+            prompt_records,
+            str(image_root),
+        ).result()
+    manifest = image_root / "manifest.jsonl"
+    return [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _generate_images_worker(
+    config: EvaluationSuiteConfig,
+    checkpoints: List[Tuple[int, str]],
+    prompt_records: List[PromptRecord],
+    image_root: str,
+) -> None:
+    """Generate one source's images in an isolated spawned process."""
     if config.model.num_processes == 1:
         runner = EvaluationRunner(
             config.model.base_model,
@@ -314,8 +339,6 @@ def _generate_images(
         )
     finally:
         runner.close()
-    manifest = image_root / "manifest.jsonl"
-    return [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _write_artifacts(
