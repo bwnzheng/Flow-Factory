@@ -14,9 +14,11 @@
 
 # src/flow_factory/hparams/log_args.py
 import os
-import yaml
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Optional
+
+import yaml
+
 from .abc import ArgABC
 
 
@@ -29,16 +31,16 @@ class LogArguments(ArgABC):
         metadata={"help": "Name of the training run."},
     )
     project: str = field(
-        default='Flow-Factory',
+        default="Flow-Factory",
         metadata={"help": "Project name for logging platforms."},
     )
-    logging_backend: Optional[Literal['wandb', 'swanlab', 'none']] = field(
+    logging_backend: Optional[Literal["wandb", "swanlab", "none"]] = field(
         default=None,
         metadata={"help": "Logging backend to use."},
     )
 
     save_dir: str = field(
-        default='save',
+        default="save",
         metadata={"help": "Directory to save logs and checkpoints. None for no saving."},
     )
 
@@ -46,30 +48,37 @@ class LogArguments(ArgABC):
         default=10,
         metadata={"help": "Model saving frequency (in epochs). 0 for no saving."},
     )
-    
-    save_model_only : bool = field(
+
+    save_model_only: bool = field(
         default=True,
-        metadata={"help": "Whether to save the model only, or the complete training state (model and optimizer)."}
+        metadata={
+            "help": "Whether to save the model only, or the complete training state (model and optimizer)."
+        },
     )
 
     save_media_locally: bool = field(
         default=False,
-        metadata={"help": "Save images/videos to local files instead of uploading to logging backend."},
+        metadata={
+            "help": "Save images/videos to local files; media is never uploaded to a logging backend."
+        },
     )
 
     media_save_freq: int = field(
         default=20,
         metadata={
             "help": (
-                "Save or upload sampled media every N training steps. "
-                "0 disables media logging while keeping scalar/raw-data logging enabled."
+                "Save sampled media locally every N training steps. "
+                "Media is never uploaded to a logging backend. "
+                "0 disables media saving while keeping scalar/raw-data logging enabled."
             )
         },
     )
 
     log_metrics_jsonl: bool = field(
         default=True,
-        metadata={"help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."},
+        metadata={
+            "help": "Write all scalar metrics to a local JSONL file (saves/{run_name}/logs/metrics.jsonl)."
+        },
     )
 
     max_log_samples: Optional[int] = field(
@@ -84,7 +93,9 @@ class LogArguments(ArgABC):
 
     image_save_format: str = field(
         default="png",
-        metadata={"help": "Image save format for local storage: 'png' (lossless) or 'jpg' (smaller)."},
+        metadata={
+            "help": "Image save format for local storage: 'png' (lossless) or 'jpg' (smaller)."
+        },
     )
 
     image_save_quality: int = field(
@@ -108,13 +119,11 @@ class LogArguments(ArgABC):
             )
         if self.image_save_format.lower() not in {"png", "jpg"}:
             raise ValueError(
-                "`image_save_format` must be 'png' or 'jpg', "
-                f"got {self.image_save_format!r}."
+                "`image_save_format` must be 'png' or 'jpg', " f"got {self.image_save_format!r}."
             )
         if not 1 <= self.image_save_quality <= 100:
             raise ValueError(
-                "`image_save_quality` must be in [1, 100], "
-                f"got {self.image_save_quality}."
+                "`image_save_quality` must be in [1, 100], " f"got {self.image_save_quality}."
             )
 
         # Expand path to user's path
@@ -122,14 +131,13 @@ class LogArguments(ArgABC):
         # If save_dir does not exist, create it
         os.makedirs(self.save_dir, exist_ok=True)
 
-
     def to_dict(self) -> dict[str, Any]:
         return super().to_dict()
 
     def __str__(self) -> str:
         """Pretty print configuration as YAML."""
         return yaml.dump(self.to_dict(), default_flow_style=False, sort_keys=False, indent=2)
-    
+
     def __repr__(self) -> str:
         """Same as __str__ for consistency."""
         return self.__str__()

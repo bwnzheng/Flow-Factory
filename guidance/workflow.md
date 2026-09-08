@@ -450,7 +450,7 @@ section:
 
 ```yaml
 log:
-  media_save_freq: 20       # 0 disables local saves and backend uploads
+  media_save_freq: 20       # 0 disables local media saves
   max_log_samples: null     # null saves all samples; an integer caps each call
   save_media_locally: true
   image_save_format: jpg    # png or jpg
@@ -490,15 +490,13 @@ not alter training tensors, reward pickles, or complete GA group diagnostics.
 The single `logs/media.jsonl` file starts with one `run_context` record containing
 the run name, world size, and complete configuration. Each subsequent media
 entry contains `step`, logical key, relative media path, `metadata_path`, caption,
-prompt, reward, and (for videos) `fps` fields gathered from every rank. When an
-online backend is configured, the main process logs the shared rank-local files
-from this manifest. Run-level fields are omitted from per-media sidecars;
+prompt, reward, and (for videos) `fps` fields gathered from every rank. Run-level
+fields are omitted from per-media sidecars;
 detailed sample, rank, stage, evaluation, and GA replay metadata remains in those
 files.
 Rank-local media logging requires `save_dir/run_name` to be visible from every
 rank. On a non-shared filesystem, set `media_save_freq: 0` or provide an
 external per-rank manifest workflow.
-When `save_media_locally` is false, no replay metadata is constructed for the
-backend path. Each rank transfers only CPU media, prompt/reward caption inputs,
-and minimal group/candidate routing IDs; WandB, SwanLab, and TensorBoard consume
-the resulting media object and caption.
+The `logging_backend` setting applies to scalar metrics and run configuration.
+It never receives image or video payloads. `save_media_locally` independently
+controls whether media files and replay metadata are written to disk.

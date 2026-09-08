@@ -308,47 +308,6 @@ class Logger(ABC):
             for entry in entries:
                 manifest_file.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n")
 
-    def log_media_files(self, entries: List[Dict[str, Any]], step: int) -> None:
-        """Log rank-local media files to the configured backend.
-
-        The files must be visible from the main process. This path deliberately
-        avoids local extraction and object collectives: only file paths and
-        display metadata are used to construct backend objects.
-        """
-        payload: Dict[str, Any] = {}
-        for entry in entries:
-            path = entry.get("path")
-            key = entry.get("key")
-            if not path or not key:
-                continue
-            absolute_path = os.path.join(self._logs_dir, path)
-            if not os.path.isfile(absolute_path):
-                continue
-            caption = entry.get("caption")
-            extension = os.path.splitext(absolute_path)[1].lower()
-            if extension in LogFormatter.IMG_EXTENSIONS:
-                payload[key] = LogImage(absolute_path, caption=caption)
-            elif extension in LogFormatter.VID_EXTENSIONS:
-                payload[key] = LogVideo(
-                    absolute_path,
-                    caption=caption,
-                    fps=int(entry.get("fps", 8)),
-                )
-
-        if not payload:
-            return
-        formatted_dict = LogFormatter.format_dict(payload)
-        final_dict = {}
-        for key, value in formatted_dict.items():
-            converted = self._recursive_convert(value)
-            if isinstance(converted, dict):
-                final_dict.update(converted)
-            else:
-                final_dict[key] = converted
-        final_dict = {key: value for key, value in final_dict.items() if value is not None}
-        if final_dict:
-            self._log_impl(final_dict, step)
-
     def _save_raw_data_pkl(self, data: Dict, step: int):
         """Save raw analysis arrays to pickle files and remove them from metrics."""
         out_dir = os.path.join(self._logs_dir, "rewards")
@@ -423,6 +382,10 @@ class Logger(ABC):
         if media_due and self._should_save_locally:
             self._extract_and_save_media(formatted_dict, step)
 
+        # Media never belongs in an online backend payload. This also protects
+        # direct logger callers that bypass BaseTrainer.log_media_samples.
+        formatted_dict = self._remove_media_objects(formatted_dict)
+
         # 3. Save raw analysis arrays to pickle and keep them out of metrics JSONL
         self._save_raw_data_pkl(formatted_dict, step)
 
@@ -460,6 +423,30 @@ class Logger(ABC):
                 first_data = self._pending_cleanup.pop(0)
                 self._cleanup_temp_files(first_data)
             self._pending_cleanup.append(formatted_dict)
+
+    def _remove_media_objects(self, value: Any) -> Any:
+        """Remove image, video, and table objects before backend logging."""
+        if isinstance(value, (LogImage, LogVideo, LogTable)):
+            return None
+        if isinstance(value, dict):
+            return {
+                key: cleaned
+                for key, item in value.items()
+                if (cleaned := self._remove_media_objects(item)) is not None
+            }
+        if isinstance(value, list):
+            return [
+                cleaned
+                for item in value
+                if (cleaned := self._remove_media_objects(item)) is not None
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                cleaned
+                for item in value
+                if (cleaned := self._remove_media_objects(item)) is not None
+            )
+        return value
 
     def _recursive_convert(
         self, value: Any, height: Optional[int] = None, width: Optional[int] = None

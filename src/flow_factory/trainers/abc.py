@@ -175,16 +175,16 @@ class BaseTrainer(ABC):
         """Log every sampled media item at the configured interval."""
         if not self.should_log_media():
             return
-        if not self.log_args.save_media_locally and self.log_args.logging_backend in {
-            None,
-            "none",
-        }:
+        # Media is a local artifact only. ``logging_backend`` controls scalar
+        # logging, while ``save_media_locally`` controls whether these files
+        # and their replay metadata are written to disk.
+        if not self.log_args.save_media_locally:
             return
 
         limit = self.log_args.max_log_samples
         selected_samples = samples if limit is None else samples[:limit]
-        include_metadata = self.log_args.save_media_locally
-        manifest_only_media = include_metadata and self.accelerator.num_processes > 1
+        include_metadata = True
+        manifest_only_media = self.accelerator.num_processes > 1
         group_counts: Dict[int, int] = {}
         media_records: List[Dict[str, Any]] = []
         for local_index, sample in enumerate(selected_samples):
@@ -218,12 +218,6 @@ class BaseTrainer(ABC):
                 }
             )
 
-        gather_media_records = not include_metadata and self.accelerator.num_processes > 1
-        if gather_media_records:
-            media_records = gather_object(media_records)
-            if not self.accelerator.is_main_process:
-                return
-
         payload: Dict[str, Any] = {}
         group_counts = {}
         for global_index, media_record in enumerate(media_records):
@@ -250,8 +244,6 @@ class BaseTrainer(ABC):
             all_manifests = gather_object(local_manifest)
             if self.accelerator.is_main_process:
                 self.logger.write_media_manifest(all_manifests)
-                if self.log_args.logging_backend not in {None, "none"}:
-                    self.logger.log_media_files(all_manifests, step=self.step)
             return
 
         if payload:

@@ -202,12 +202,11 @@ Two-layer structure (constraint #14): task-level samples (`T2ISample`, `I2VSampl
 When `save_media_locally` is enabled, each rank writes its own image/video shard
 under a rank-specific directory. Only lightweight JSON-safe manifest entries
 are gathered to the main process, which appends the unified `logs/media.jsonl`.
-Media tensors must not enter the cross-rank object collective. Backend-only
-logging retains media gathering because the main-process backend consumes the
-actual media objects; local-media runs let the main process read the shared
-rank-local files from the manifest instead. The rank-local mode requires a shared
-`save_dir/run_name` filesystem; on a non-shared filesystem, disable media
-logging or provide an external per-rank manifest workflow.
+Media tensors must not enter the cross-rank object collective. Online backends
+receive scalar metrics and run configuration only; image and video payloads are
+never sent to them. The rank-local mode requires a shared `save_dir/run_name`
+filesystem; on a non-shared filesystem, disable media logging or provide an
+external per-rank manifest workflow.
 
 ### Configuration Hierarchy
 ```

@@ -42,7 +42,6 @@ class _RecordingLocalMediaLogger:
         self.rank = None
         self.saved = []
         self.manifests = []
-        self.backend_manifests = []
 
     def set_media_rank(self, rank):
         self.rank = rank
@@ -61,9 +60,6 @@ class _RecordingLocalMediaLogger:
 
     def write_media_manifest(self, entries):
         self.manifests.append(entries)
-
-    def log_media_files(self, entries, step):
-        self.backend_manifests.append((entries, step))
 
 
 def _config(tmp_path, *, save_media_locally, process_index=0, num_processes=1):
@@ -216,7 +212,7 @@ def test_non_main_rank_saves_local_media_without_writing_manifest(monkeypatch):
     assert trainer.records == []
 
 
-def test_local_media_logs_manifest_files_to_backend_on_main(monkeypatch):
+def test_local_media_does_not_log_manifest_files_to_backend_on_main(monkeypatch):
     trainer = _MediaTrainerHarness()
     trainer.log_args.logging_backend = "tensorboard"
     monkeypatch.setattr(
@@ -231,10 +227,9 @@ def test_local_media_logs_manifest_files_to_backend_on_main(monkeypatch):
     )
 
     assert len(trainer.logger.manifests) == 1
-    assert trainer.logger.backend_manifests == [(trainer.logger.manifests[0], 20)]
 
 
-def test_backend_media_skips_replay_metadata_before_gather(monkeypatch):
+def test_media_logging_is_disabled_when_local_saving_is_disabled(monkeypatch):
     trainer = _MediaTrainerHarness(save_media_locally=False)
     sample = T2ISample(
         image=torch.zeros(3, 8, 8),
@@ -256,16 +251,8 @@ def test_backend_media_skips_replay_metadata_before_gather(monkeypatch):
         context_name="final",
     )
 
-    assert len(gathered) == 1
-    gathered_sample = gathered[0]["sample"]
-    assert gathered[0]["group_id"] == 42
-    assert "_media_metadata" not in gathered_sample.extra_kwargs
-    assert gathered_sample.extra_kwargs == {"rewards": {"quality": 0.8}}
-    assert gathered_sample.prompt == "backend sample"
-    assert gathered_sample.source is None
-    assert gathered_sample._unique_id is None
-    payload = trainer.records[0][1]
-    assert list(payload) == ["media/training/final/group_42/sample_000000"]
+    assert gathered == []
+    assert trainer.records == []
 
 
 def test_backend_media_keeps_only_fields_required_by_multimodal_formatters():
@@ -422,24 +409,6 @@ def test_local_media_can_save_rank_shard_before_manifest_append(tmp_path):
     assert manifest_records[-1]["metadata_path"] == (
         "images/training/step_000020/rank_1/group_42/final/sample_000000.json"
     )
-
-
-def test_backend_can_log_rank_local_media_from_manifest(tmp_path):
-    config = _config(tmp_path, save_media_locally=True)
-    local_logger = LocalFileLogger(config)
-    local_logger.set_media_rank(1)
-    key = "media/training/final/group_42/sample_000000"
-    entries = local_logger.save_media_locally({key: _media_sample()}, step=20)
-
-    backend_logger = _RecordingBackendLogger(config)
-    backend_logger.log_media_files(entries, step=20)
-
-    assert len(backend_logger.records) == 1
-    step, payload = backend_logger.records[0]
-    assert step == 20
-    assert list(payload) == [key]
-    assert isinstance(payload[key], LogImage)
-    assert payload[key].value == str(tmp_path / "media-run" / "logs" / entries[0]["path"])
 
 
 def test_media_manifest_writes_run_context_once(tmp_path):
@@ -619,7 +588,7 @@ def test_local_media_sidecar_normalizes_direct_logimage_metadata(tmp_path):
     }
 
 
-def test_backend_media_uses_the_same_interval(tmp_path):
+def test_backend_logger_never_receives_media(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
     key = "media/evaluation/benchmark/group_42/sample_000000"
     sample = _media_sample()
@@ -627,15 +596,14 @@ def test_backend_media_uses_the_same_interval(tmp_path):
     logger.log_data({key: sample}, step=19)
     assert logger.records == []
 
-    logger.log_data({key: sample}, step=20)
+    logger.log_data({key: sample, "train/loss": 0.25}, step=20)
     assert len(logger.records) == 1
     step, payload = logger.records[0]
     assert step == 20
-    assert list(payload) == [key]
-    assert isinstance(payload[key], LogImage)
+    assert payload == {"train/loss": 0.25}
 
 
-def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
+def test_backend_logger_strips_nested_media(tmp_path):
     logger = _RecordingBackendLogger(_config(tmp_path, save_media_locally=False))
     key = "media/training/final/group_42/sample_000000"
     sample = prepare_sample_for_media(_media_sample(), include_metadata=False)
@@ -646,9 +614,4 @@ def test_backend_media_normalizes_nonfinite_tensor_rewards(tmp_path):
 
     logger.log_data({key: sample}, step=20)
 
-    media = logger.records[0][1][key]
-    assert media.metadata["reward"] == {
-        "quality": {"type": "nonfinite_float", "value": "nan"},
-        "alignment": {"type": "nonfinite_float", "value": "-inf"},
-    }
-    assert "context" not in media.metadata
+    assert logger.records == []

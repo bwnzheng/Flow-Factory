@@ -294,6 +294,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Moving tensors to CPU before an object collective does not make the collective device-free. For distributed artifacts, persist large payloads at the producing rank and communicate only bounded metadata; require a shared filesystem when a main process consumes rank-local paths.
 - **Related Constraint**: N/A
 
+### Online backends received media artifacts
+- **Date**: 2026-09-08
+- **Symptom**: Configuring local media saving on a distributed run still caused rank-local images to be sent to the online logging backend; backend-disabled media behavior was also coupled to the media path.
+- **Root Cause**: The distributed media workaround re-read rank-local files from `media.jsonl` and called a backend logging helper, conflating local artifact persistence with online scalar logging.
+- **Fix**: `BaseTrainer.log_media_samples()` now handles media only when `save_media_locally` is enabled and never calls backend media logging. `Logger.log_data()` strips media objects at the backend boundary while retaining scalar/configuration logging. Documentation and regression tests now enforce the separation.
+- **Lesson**: Keep media persistence and backend logging as independent contracts; online backends may receive scalar metrics and run configuration, but media payloads must be excluded at the logger boundary.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)
