@@ -39,6 +39,7 @@ compute:
 
 output:
   dir: "analysis_output"
+  cache_mode: "regenerate"  # "regenerate" computes data; "reuse" only redraws cached plot data.
 ```
 
 Pareto metrics are computed independently by step. `compute.max_workers: 0` selects up to
@@ -89,3 +90,10 @@ analysis_output/reward_pareto_analysis/<run_name>/
 
 Pareto-convexity outputs require prompt-group indices. Evaluation reward files without group
 indices still receive reward-percentile plots but do not receive misleading group metrics.
+
+Each reward-combination directory contains a `plot_data.json` cache with the complete
+step-wise arrays consumed by its plots. The run directory also contains
+`plot_cache_manifest.json`, which records every plot source and its labels. Set
+`output.cache_mode: reuse` to skip source loading, reward models, checkpoint generation,
+and metric recomputation; the command redraws every figure directly from these caches.
+Use `regenerate` after changing input data, reward configuration, or analysis settings.

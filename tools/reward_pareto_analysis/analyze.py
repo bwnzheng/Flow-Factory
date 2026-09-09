@@ -103,6 +103,7 @@ class AnalysisConfig:
 
     output_dir: str = "analysis_output"
     max_workers: int = 0
+    cache_mode: str = "regenerate"
 
 
 def _parse_config(path: str) -> AnalysisConfig:
@@ -142,6 +143,7 @@ def _parse_config(path: str) -> AnalysisConfig:
         rewards=raw.get("rewards", []),
         output_dir=output.get("dir", "analysis_output"),
         max_workers=max_workers,
+        cache_mode=_parse_cache_mode(output.get("cache_mode", "regenerate")),
     )
 
 
@@ -155,6 +157,13 @@ def _validate_config(config: AnalysisConfig) -> None:
         )
     if config.num_processes <= 0:
         raise ValueError(f"model.num_processes must be positive, got {config.num_processes}")
+
+
+def _parse_cache_mode(value: Any) -> str:
+    """Validate whether plot data should be regenerated or reused."""
+    if not isinstance(value, str) or value.lower() not in {"regenerate", "reuse"}:
+        raise ValueError("output.cache_mode must be either 'regenerate' or 'reuse'.")
+    return value.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +271,8 @@ def _dispatch_plots(
     window_size: int = 20,
     normalization_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
     max_workers: int = 0,
+    cache_mode: str = "regenerate",
+    cache_manifest_path: Optional[str] = None,
 ) -> None:
     """Generate plots for a single dataset/source combination.
 
@@ -275,6 +286,34 @@ def _dispatch_plots(
     combination_slug = "__".join(reward_names)
     combination_dir = os.path.join(out_dir, "reward_combinations", combination_slug)
     os.makedirs(combination_dir, exist_ok=True)
+    plot_cache_path = os.path.join(combination_dir, "plot_data.json")
+    if cache_mode == "reuse":
+        if not os.path.isfile(plot_cache_path):
+            raise FileNotFoundError(
+                f"Plot-data cache not found: {plot_cache_path}. "
+                "Use output.cache_mode: regenerate first."
+            )
+        all_step_data = _load_plot_data_cache(plot_cache_path)
+        print(f"  [Plot] Reusing plot-data cache: {plot_cache_path}")
+    elif cache_mode == "regenerate":
+        _save_plot_data_cache(plot_cache_path, all_step_data)
+        if cache_manifest_path is not None:
+            _append_plot_cache_manifest(
+                cache_manifest_path,
+                {
+                    "cache_file": os.path.relpath(
+                        plot_cache_path, os.path.dirname(cache_manifest_path)
+                    ),
+                    "reward_names": reward_names,
+                    "title_prefix": title_prefix,
+                    "label_name": label_name,
+                    "window_size": window_size,
+                    "normalization_bounds": normalization_bounds,
+                    "out_dir": os.path.relpath(out_dir, os.path.dirname(cache_manifest_path)),
+                },
+            )
+    else:
+        raise ValueError(f"cache_mode must be either 'regenerate' or 'reuse', got {cache_mode!r}.")
     if n_models >= 2:
         pareto_dir = os.path.join(combination_dir, "pareto_convexity")
         plot_pareto_convexity_metrics(
@@ -300,9 +339,8 @@ def _dispatch_plots(
             f"  [Plot] Reward percentiles: {percentile_path} "
             f"({time.perf_counter() - percentile_start:.1f}s)"
         )
-
     else:
-        print(f"  [Plot] Generating 1-D reward distribution ...")
+        print("  [Plot] Generating 1-D reward distribution ...")
         plot_distribution_1d(
             all_step_data,
             reward_names[0],
@@ -318,6 +356,48 @@ def _dispatch_plots(
             label_name=label_name,
             window_size=window_size,
         )
+
+
+def _save_plot_data_cache(path: str, all_step_data: Dict[int, Dict[str, Any]]) -> None:
+    """Serialize the complete data consumed by every Pareto plot."""
+    payload = {}
+    for step, data in all_step_data.items():
+        record = {key: value for key, value in data.items() if key not in {"points", "prompt_idx"}}
+        record["points"] = np.asarray(data.get("points", []), dtype=float).tolist()
+        if "prompt_idx" in data:
+            record["prompt_idx"] = np.asarray(data["prompt_idx"]).tolist()
+        payload[str(step)] = record
+    with open(path, "w") as handle:
+        json.dump({"cache_version": 1, "steps": payload}, handle, indent=2, allow_nan=False)
+
+
+def _load_plot_data_cache(path: str) -> Dict[int, Dict[str, Any]]:
+    """Load serialized plot data and restore NumPy arrays used by plotters."""
+    with open(path) as handle:
+        raw = json.load(handle)
+    if raw.get("cache_version") != 1 or not isinstance(raw.get("steps"), dict):
+        raise ValueError(f"Unsupported or corrupt plot-data cache: {path}")
+    result: Dict[int, Dict[str, Any]] = {}
+    for step, record in raw["steps"].items():
+        data = dict(record)
+        data["step"] = int(data.get("step", step))
+        data["points"] = np.asarray(data.get("points", []), dtype=float)
+        if "prompt_idx" in data:
+            data["prompt_idx"] = np.asarray(data["prompt_idx"])
+        result[int(step)] = data
+    return result
+
+
+def _append_plot_cache_manifest(path: str, record: Dict[str, Any]) -> None:
+    """Record enough context to redraw all plots without source data or models."""
+    existing = []
+    if os.path.isfile(path):
+        with open(path) as handle:
+            existing = json.load(handle).get("plots", [])
+    existing = [item for item in existing if item.get("cache_file") != record["cache_file"]]
+    existing.append(record)
+    with open(path, "w") as handle:
+        json.dump({"cache_version": 1, "plots": existing}, handle, indent=2, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +546,8 @@ def _run_images_analysis(
         label_name="Step",
         window_size=_eval_window,
         max_workers=config.max_workers,
+        cache_mode=config.cache_mode,
+        cache_manifest_path=os.path.join(output_dir, "plot_cache_manifest.json"),
     )
     print(f"  {label} → {out_dir}/")
     return all_step_data
@@ -633,6 +715,8 @@ def _run_evaluation(
         label_name="Epoch",
         window_size=1,
         max_workers=config.max_workers,
+        cache_mode=config.cache_mode,
+        cache_manifest_path=os.path.join(output_dir, "plot_cache_manifest.json"),
     )
     print(f"  Evaluation results saved to {ev_out}/")
     return all_epoch_data
@@ -732,6 +816,8 @@ def _run_rewards_analysis(
                 window_size=20,
                 normalization_bounds=normalization_bounds,
                 max_workers=config.max_workers,
+                cache_mode=config.cache_mode,
+                cache_manifest_path=os.path.join(output_dir, "plot_cache_manifest.json"),
             )
         print(f"  Train rewards → {tr_out}/")
 
@@ -761,6 +847,8 @@ def _run_rewards_analysis(
                 label_name="Step",
                 window_size=1,
                 max_workers=config.max_workers,
+                cache_mode=config.cache_mode,
+                cache_manifest_path=os.path.join(output_dir, "plot_cache_manifest.json"),
             )
             print(f"  Eval/{ds_name} → {ds_out}/")
 
@@ -876,6 +964,38 @@ def main(config_path: str) -> None:
 
     with open(os.path.join(output_dir, "config.yaml"), "w") as f:
         yaml.dump({k: v for k, v in config.__dict__.items() if not k.startswith("_")}, f)
+
+    if config.cache_mode == "reuse":
+        manifest_path = os.path.join(output_dir, "plot_cache_manifest.json")
+        if not os.path.isfile(manifest_path):
+            raise FileNotFoundError(
+                f"Plot-cache manifest not found: {manifest_path}. "
+                "Use output.cache_mode: regenerate first."
+            )
+        with open(manifest_path) as handle:
+            manifest = json.load(handle)
+        plots = manifest.get("plots", [])
+        if not plots:
+            raise ValueError(f"Plot-cache manifest has no plot sources: {manifest_path}")
+        for record in plots:
+            _dispatch_plots(
+                {},
+                list(record["reward_names"]),
+                os.path.join(output_dir, record["out_dir"]),
+                title_prefix=record["title_prefix"],
+                label_name=record["label_name"],
+                window_size=record["window_size"],
+                normalization_bounds=record.get("normalization_bounds"),
+                max_workers=config.max_workers,
+                cache_mode="reuse",
+            )
+        print(f"\nDone. Plots redrawn from cache in {output_dir}/")
+        return
+
+    # A regeneration run defines the complete set of plot sources. Clear the
+    # old manifest so removed/disabled sources cannot be redrawn later.
+    with open(os.path.join(output_dir, "plot_cache_manifest.json"), "w") as handle:
+        json.dump({"cache_version": 1, "plots": []}, handle, indent=2)
 
     all_prompts = _load_prompts(config) if config.evaluation_enabled else []
     reward_names = [r.get("name", r.get("reward_model", "?")) for r in config.rewards]

@@ -53,3 +53,4 @@ compute:
 # ---- Output ----
 output:
   dir: "analysis_output"
+  cache_mode: "regenerate"          # "regenerate" computes plot data; "reuse" redraws only from cached plot_data.json files.

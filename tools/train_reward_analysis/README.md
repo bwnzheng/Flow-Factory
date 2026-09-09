@@ -49,6 +49,7 @@ plot:
 output:
   dir: "analysis_output/train_reward_analysis"
   plot_format: "png"  # Matplotlib output format: png or pdf.
+  cache_mode: "regenerate"  # "regenerate" writes plot_data.json; "reuse" redraws from it.
 ```
 
 Then run:
@@ -109,3 +110,7 @@ window in `plot.smoothing_window`. At the first and last few recorded steps,
 the average uses the available in-range points. The original unsmoothed curve
 is retained as a same-color transparent background trace; use `1` when the
 foreground should equal the raw values.
+
+The final tidy rows used by all figures are stored in `plot_data.json`. Set
+`output.cache_mode: reuse` to skip reward-pickle analysis and redraw every figure
+directly from that cache. If the cache is absent, use `regenerate` first.

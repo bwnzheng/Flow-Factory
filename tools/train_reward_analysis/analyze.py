@@ -68,6 +68,7 @@ class AnalysisConfig:
     smoothing_window: int = 5
     output_dir: str = "analysis_output/train_reward_analysis"
     plot_format: str = "png"
+    cache_mode: str = "regenerate"
 
 
 def main() -> None:
@@ -77,9 +78,25 @@ def main() -> None:
     args = parser.parse_args()
     config = _parse_config(args.config)
     _validate_config(config)
-    rows, metadata = run_analysis(config)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = output_dir / "plot_data.json"
+    if config.cache_mode == "reuse":
+        if not cache_path.is_file():
+            raise FileNotFoundError(
+                f"Plot-data cache not found: {cache_path}. Use output.cache_mode: regenerate first."
+            )
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        rows = cached["rows"]
+        metadata = cached["metadata"]
+        print(f"[Reward concordance] Reusing plot-data cache: {cache_path}")
+    else:
+        rows, metadata = run_analysis(config)
+        cache_path.write_text(
+            json.dumps({"rows": rows, "metadata": metadata}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[Reward concordance] Wrote plot-data cache: {cache_path}")
     _write_rows(rows, output_dir / "metrics.csv")
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
@@ -222,6 +239,7 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
         ),
         output_dir=str(output.get("dir", "analysis_output/train_reward_analysis")),
         plot_format=_parse_plot_format(output.get("plot_format", "png")),
+        cache_mode=_parse_cache_mode(output.get("cache_mode", "regenerate")),
     )
 
 
@@ -239,6 +257,13 @@ def _parse_plot_format(value: Any) -> str:
     """Validate the configured matplotlib output format."""
     if not isinstance(value, str) or value.lower() not in {"png", "pdf"}:
         raise ValueError("output.plot_format must be either 'png' or 'pdf'.")
+    return value.lower()
+
+
+def _parse_cache_mode(value: Any) -> str:
+    """Validate whether plot data should be regenerated or reused."""
+    if not isinstance(value, str) or value.lower() not in {"regenerate", "reuse"}:
+        raise ValueError("output.cache_mode must be either 'regenerate' or 'reuse'.")
     return value.lower()
 
 
