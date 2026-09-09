@@ -68,7 +68,7 @@ def _discover(root: Path) -> Tuple[List[Path], List[Path]]:
     else:
         # Searching only for the media directory avoids a second full Python
         # tree walk. The summary lives next to it in W&B offline runs.
-        media_dirs = _find_paths(root, ["-type", "d", "-path", "*/files/media"])
+        media_dirs = _find_paths(root, ["-type", "d", "-path", "*/files/media", "-prune"])
         for media in media_dirs:
             summary = media.parent / "wandb-summary.json"
             if summary.is_file():
