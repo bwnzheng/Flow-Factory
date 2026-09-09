@@ -21,8 +21,8 @@ Examples:
     python tools/wandb_media_cleanup.py delete --execute --workers 8
 
 The cache is append-only. A successful deletion is recorded immediately, so a
-later invocation skips completed files. ``--max-retries 0`` retries transient
-network and server errors indefinitely.
+later invocation skips completed files. Files that still fail after their
+retry budget are recorded as ``skipped`` and are not retried by default.
 
 Authentication is delegated to the W&B SDK; set ``WANDB_API_KEY`` in the
 environment before running this tool. The key is never written to the cache.
@@ -59,6 +59,7 @@ class CacheState:
     pattern: Optional[str] = None
     files: Dict[Tuple[str, str], Dict[str, Any]] = field(default_factory=dict)
     deleted: Set[Tuple[str, str]] = field(default_factory=set)
+    skipped: Set[Tuple[str, str]] = field(default_factory=set)
     scan_complete: Set[str] = field(default_factory=set)
 
 
@@ -101,6 +102,8 @@ class EventCache:
                     state.files[key] = event
                 elif record_type == "deleted":
                     state.deleted.add((event["run_id"], event["name"]))
+                elif record_type == "skipped":
+                    state.skipped.add((event["run_id"], event["name"]))
                 elif record_type == "scan_complete":
                     state.scan_complete.add(event["run_id"])
         return state
@@ -206,7 +209,7 @@ def _resolve_entity(
         except Exception as error:
             if _is_permanent_error(error):
                 raise
-            if max_retries > 0 and retries >= max_retries:
+            if retries >= max_retries:
                 raise
             retries += 1
             delay = _backoff_seconds(retries, base_delay, max_delay)
@@ -222,11 +225,11 @@ def retry_call(
     sleep: Callable[[float], None] = time.sleep,
     on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
 ) -> Tuple[str, int]:
-    """Run a deletion operation with bounded or unlimited transient retries.
+    """Run a deletion operation with a bounded retry budget.
 
     Returns:
-        A pair of final status and retry count. Status is ``deleted`` or
-        ``already_missing``.
+        A pair of final status and retry count. Status is ``deleted``,
+        ``already_missing``, or ``skipped``.
     """
     retries = 0
     while True:
@@ -239,8 +242,8 @@ def retry_call(
                 return "already_missing", retries
             if _is_permanent_error(error):
                 raise
-            if max_retries > 0 and retries >= max_retries:
-                raise
+            if retries >= max_retries:
+                return "skipped", retries
             retries += 1
             delay = _backoff_seconds(retries, base_delay, max_delay)
             if on_retry is not None:
@@ -300,7 +303,7 @@ def _scan_run(
             except Exception as error:
                 if _is_permanent_error(error):
                     raise
-                if max_retries > 0 and retry_count >= max_retries:
+                if retry_count >= max_retries:
                     raise
                 retry_count += 1
                 delay = _backoff_seconds(retry_count, base_delay, max_delay)
@@ -385,7 +388,20 @@ def _delete_cached_file(
     """Delete one cached filename with retry accounting."""
 
     def operation() -> None:
-        clients.run(run_id).file(name).delete()
+        run = clients.run(run_id)
+        remote_file = run.file(name)
+        try:
+            remote_file.delete()
+        except Exception as delete_error:
+            # The mutation may have succeeded even if its response was lost.
+            # Re-check before retrying, so an already-removed file is not
+            # submitted repeatedly.
+            try:
+                run.file(name)
+            except Exception as verify_error:
+                if _http_status(verify_error) == 404 or "not found" in str(verify_error).lower():
+                    raise ValueError(f"file no longer exists: {name}") from verify_error
+            raise delete_error
 
     def report_retry(attempt: int, error: BaseException, delay: float) -> None:
         if attempt == 1 or attempt % 10 == 0:
@@ -400,13 +416,19 @@ def _delete_cached_file(
     )
 
 
-def _pending_files(state: CacheState, run_ids: Optional[Iterable[str]]) -> List[Tuple[str, str]]:
+def _pending_files(
+    state: CacheState,
+    run_ids: Optional[Iterable[str]],
+    retry_skipped: bool = False,
+) -> List[Tuple[str, str]]:
     """Return stable pending cache keys, optionally filtered by run ID."""
     selected = set(run_ids) if run_ids else None
     return sorted(
         key
         for key in state.files
-        if key not in state.deleted and (selected is None or key[0] in selected)
+        if key not in state.deleted
+        and (retry_skipped or key not in state.skipped)
+        and (selected is None or key[0] in selected)
     )
 
 
@@ -417,9 +439,10 @@ def delete_command(args: argparse.Namespace) -> int:
     if state.entity is None or state.project is None:
         raise ValueError(f"Cache has no valid header: {args.cache}")
 
-    pending = _pending_files(state, args.run_id)
+    pending = _pending_files(state, args.run_id, retry_skipped=args.retry_skipped)
     print(
         f"cache={args.cache} pending={len(pending)} deleted={len(state.deleted)} "
+        f"skipped={len(state.skipped)} "
         f"workers={args.workers} max_retries={args.max_retries}"
     )
     if not args.execute:
@@ -430,6 +453,7 @@ def delete_command(args: argparse.Namespace) -> int:
 
     clients = _ThreadClients(state.entity, state.project, args.timeout)
     failed: List[Tuple[str, str, str]] = []
+    skipped_count = 0
     total_retries = 0
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
@@ -450,15 +474,18 @@ def delete_command(args: argparse.Namespace) -> int:
                 try:
                     status, retries = future.result()
                     total_retries += retries
+                    record_type = "skipped" if status == "skipped" else "deleted"
                     cache.append(
                         {
-                            "record_type": "deleted",
+                            "record_type": record_type,
                             "run_id": run_id,
                             "name": name,
                             "status": status,
                             "retries": retries,
                         }
                     )
+                    if status == "skipped":
+                        skipped_count += 1
                 except Exception as error:
                     failed.append((run_id, name, str(error)))
                     tqdm.write(f"[permanent failure] run={run_id} file={name}: {error}")
@@ -466,8 +493,8 @@ def delete_command(args: argparse.Namespace) -> int:
                 progress.update(1)
 
     print(
-        f"Deletion finished: completed={len(pending) - len(failed)} "
-        f"failed={len(failed)} retries={total_retries}"
+        f"Deletion finished: completed={len(pending) - len(failed) - skipped_count} "
+        f"skipped={skipped_count} failed={len(failed)} retries={total_retries}"
     )
     return 1 if failed else 0
 
@@ -477,10 +504,12 @@ def status_command(args: argparse.Namespace) -> int:
     state = EventCache(args.cache).load()
     per_run: Dict[str, Dict[str, int]] = {}
     for run_id, name in state.files:
-        counts = per_run.setdefault(run_id, {"cached": 0, "deleted": 0})
+        counts = per_run.setdefault(run_id, {"cached": 0, "deleted": 0, "skipped": 0})
         counts["cached"] += 1
         if (run_id, name) in state.deleted:
             counts["deleted"] += 1
+        if (run_id, name) in state.skipped:
+            counts["skipped"] += 1
 
     print(
         f"cache={args.cache} entity={state.entity} project={state.project} "
@@ -488,10 +517,10 @@ def status_command(args: argparse.Namespace) -> int:
     )
     for run_id, counts in sorted(per_run.items()):
         complete = "yes" if run_id in state.scan_complete else "no"
-        pending = counts["cached"] - counts["deleted"]
+        pending = counts["cached"] - counts["deleted"] - counts["skipped"]
         print(
             f"run={run_id} cached={counts['cached']} deleted={counts['deleted']} "
-            f"pending={pending} scan_complete={complete}"
+            f"skipped={counts['skipped']} pending={pending} scan_complete={complete}"
         )
     return 0
 
@@ -502,7 +531,7 @@ def _add_retry_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-retries",
         type=int,
         default=0,
-        help="Maximum transient retries per operation; 0 retries indefinitely.",
+        help="Maximum transient retries per file before recording it as skipped (0 = no retry).",
     )
     parser.add_argument("--base-delay", type=float, default=2.0)
     parser.add_argument("--max-delay", type=float, default=120.0)
@@ -533,6 +562,11 @@ def parse_args() -> argparse.Namespace:
     delete.add_argument("--run-id", action="append")
     delete.add_argument("--workers", type=int, default=8)
     delete.add_argument("--execute", action="store_true")
+    delete.add_argument(
+        "--retry-skipped",
+        action="store_true",
+        help="Retry files previously recorded as skipped.",
+    )
     _add_retry_arguments(delete)
     delete.set_defaults(func=delete_command)
 

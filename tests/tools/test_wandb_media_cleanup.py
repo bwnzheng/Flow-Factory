@@ -87,7 +87,7 @@ def test_retry_call_retries_transient_errors(monkeypatch):
 
     status, retries = retry_call(
         operation,
-        max_retries=0,
+        max_retries=2,
         base_delay=1.0,
         max_delay=10.0,
         sleep=sleeps.append,
@@ -106,6 +106,28 @@ def test_retry_call_treats_not_found_as_completed():
         "already_missing",
         0,
     )
+
+
+def test_retry_call_skips_after_retry_budget():
+    attempts = []
+    sleeps = []
+
+    def operation():
+        attempts.append(1)
+        raise _HTTPError(503)
+
+    status, retries = retry_call(
+        operation,
+        max_retries=2,
+        base_delay=1.0,
+        max_delay=10.0,
+        sleep=sleeps.append,
+    )
+
+    assert status == "skipped"
+    assert retries == 2
+    assert len(attempts) == 3
+    assert len(sleeps) == 2
 
 
 def test_retry_call_stops_on_permanent_error():
