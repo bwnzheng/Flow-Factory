@@ -220,13 +220,15 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
     """Discover and clean local W&B media files and summary references."""
     args = args or parse_args()
     media_dirs, summaries = _discover(args.root)
-    print(f"media_dirs={len(media_dirs)} summaries={len(summaries)} execute={args.execute}")
+    run_dirs = sorted({media.parent.parent for media in media_dirs})
+    print(f"runs_with_media={len(run_dirs)} summaries={len(summaries)} execute={args.execute}")
+    for run_dir in run_dirs:
+        print(f"run: {run_dir}")
     if not media_dirs and not summaries:
         print(f"No W&B files found below {args.root}")
         return 0
 
     for media_dir in media_dirs:
-        print(f"media: {media_dir}")
         _find_xargs_delete(media_dir, args.split_depth, args.workers, args.execute)
     for summary in summaries:
         removed = _clean_summary(summary, args.backup_dir, args.execute)
