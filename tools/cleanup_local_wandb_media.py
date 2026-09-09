@@ -38,8 +38,19 @@ MEDIA_TYPES = {
 }
 
 
+def _find_paths(root: Path, expression: Sequence[str]) -> List[Path]:
+    """Run GNU find once and decode its NUL-delimited output."""
+    process = subprocess.Popen(["find", str(root), *expression, "-print0"], stdout=subprocess.PIPE)
+    assert process.stdout is not None
+    paths = [Path(os.fsdecode(raw)) for raw in process.stdout.read().split(b"\0") if raw]
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"find failed for {root} with exit code {return_code}")
+    return paths
+
+
 def _discover(root: Path) -> Tuple[List[Path], List[Path]]:
-    """Find media directories and summary files below a run or W&B root."""
+    """Find media directories and associated summaries below a run or W&B root."""
     root = root.resolve()
     media_dirs: List[Path] = []
     summaries: List[Path] = []
@@ -55,7 +66,14 @@ def _discover(root: Path) -> Tuple[List[Path], List[Path]]:
     if root.name == "files":
         candidates = root.glob("wandb-summary.json")
     else:
-        candidates = root.rglob("wandb-summary.json")
+        # Searching only for the media directory avoids a second full Python
+        # tree walk. The summary lives next to it in W&B offline runs.
+        media_dirs = _find_paths(root, ["-type", "d", "-path", "*/files/media"])
+        for media in media_dirs:
+            summary = media.parent / "wandb-summary.json"
+            if summary.is_file():
+                summaries.append(summary)
+        return sorted(set(media_dirs)), sorted(set(summaries))
 
     for summary in candidates:
         if summary.parent.name != "files":
