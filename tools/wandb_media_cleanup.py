@@ -30,7 +30,6 @@ environment before running this tool. The key is never written to the cache.
 
 import argparse
 import json
-import os
 import random
 import threading
 import time
@@ -40,6 +39,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from tqdm import tqdm
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 SCHEMA_VERSION = 1
 DEFAULT_CACHE = ".scratch/wandb_media_cleanup.jsonl"
@@ -140,12 +144,8 @@ class EventCache:
 
 def _load_wandb() -> Any:
     """Import the optional W&B dependency with an actionable error."""
-    try:
-        import wandb
-    except ImportError as error:
-        raise RuntimeError(
-            'W&B is not installed. Install it with `pip install -e ".[wandb]"`.'
-        ) from error
+    if wandb is None:
+        raise RuntimeError('W&B is not installed. Install it with `pip install -e ".[wandb]"`.')
     return wandb
 
 
@@ -176,6 +176,42 @@ def _backoff_seconds(attempt: int, base_delay: float, max_delay: float) -> float
     exponent = min(max(0, attempt - 1), 10)
     delay = min(max_delay, base_delay * (2**exponent))
     return delay * random.uniform(0.8, 1.2)
+
+
+def _resolve_entity(
+    entity: Optional[str],
+    timeout: int,
+    max_retries: int,
+    base_delay: float,
+    max_delay: float,
+) -> str:
+    """Resolve the authenticated account's default entity when omitted."""
+    if entity:
+        return entity
+
+    retries = 0
+    while True:
+        try:
+            wandb = _load_wandb()
+            resolved = wandb.Api(timeout=timeout).default_entity
+            if not resolved:
+                raise ValueError(
+                    "W&B did not return a default entity for the authenticated account. "
+                    "Pass --entity explicitly."
+                )
+            tqdm.write(f"Using W&B default entity: {resolved}")
+            return resolved
+        except ValueError:
+            raise
+        except Exception as error:
+            if _is_permanent_error(error):
+                raise
+            if max_retries > 0 and retries >= max_retries:
+                raise
+            retries += 1
+            delay = _backoff_seconds(retries, base_delay, max_delay)
+            tqdm.write(f"[entity] retry {retries} in {delay:.1f}s: {error}")
+            time.sleep(delay)
 
 
 def retry_call(
@@ -274,8 +310,15 @@ def _scan_run(
 
 def scan_command(args: argparse.Namespace) -> int:
     """Scan selected runs into the append-only cache."""
+    entity = _resolve_entity(
+        args.entity,
+        timeout=args.timeout,
+        max_retries=args.max_retries,
+        base_delay=args.base_delay,
+        max_delay=args.max_delay,
+    )
     cache = EventCache(args.cache)
-    state = cache.initialize(args.entity, args.project, args.pattern)
+    state = cache.initialize(entity, args.project, args.pattern)
     run_ids = list(dict.fromkeys(args.run_id))
     if not args.rescan:
         run_ids = [run_id for run_id in run_ids if run_id not in state.scan_complete]
@@ -289,7 +332,7 @@ def scan_command(args: argparse.Namespace) -> int:
                 _scan_run,
                 cache,
                 state,
-                args.entity,
+                entity,
                 args.project,
                 run_id,
                 args.pattern,
@@ -473,7 +516,10 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="List W&B media and append names to cache.")
-    scan.add_argument("--entity", required=True)
+    scan.add_argument(
+        "--entity",
+        help="W&B entity; defaults to the authenticated account's default entity.",
+    )
     scan.add_argument("--project", required=True)
     scan.add_argument("--run-id", action="append", required=True)
     scan.add_argument("--pattern", default="media/%")
