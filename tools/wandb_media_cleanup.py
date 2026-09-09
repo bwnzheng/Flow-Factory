@@ -488,6 +488,15 @@ def delete_command(args: argparse.Namespace) -> int:
                         skipped_count += 1
                 except Exception as error:
                     failed.append((run_id, name, str(error)))
+                    cache.append(
+                        {
+                            "record_type": "skipped",
+                            "run_id": run_id,
+                            "name": name,
+                            "status": "skipped",
+                            "error": str(error),
+                        }
+                    )
                     tqdm.write(f"[permanent failure] run={run_id} file={name}: {error}")
                 progress.set_postfix(retries=total_retries, failed=len(failed))
                 progress.update(1)
