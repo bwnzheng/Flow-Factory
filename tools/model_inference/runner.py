@@ -20,8 +20,8 @@ import json
 import os
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -560,7 +560,7 @@ class ParallelEvaluationRunner:
         device: Optional[str] = None,
         model_type: str = "sd3-5",
     ) -> None:
-        """Initialize one lazy runner per accelerator device.
+        """Initialize isolated generation workers for accelerator devices.
 
         Args:
             base_model: Hugging Face model identifier or local model path.
@@ -588,15 +588,9 @@ class ParallelEvaluationRunner:
             )
         self._num_processes = num_processes
         self.model_type = validate_model_type(model_type)
-        self._runners = [
-            EvaluationRunner(
-                base_model,
-                dtype_str,
-                device=f"{device_type}:{index}",
-                model_type=self.model_type,
-            )
-            for index in range(num_processes)
-        ]
+        self._base_model = base_model
+        self._dtype_str = dtype_str
+        self._device_type = device_type
 
     def generate_for_checkpoint(
         self,
@@ -674,12 +668,16 @@ class ParallelEvaluationRunner:
             flush=True,
         )
 
-        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            futures = {
-                executor.submit(
-                    self._generate_chunk,
+        context = get_context("spawn")
+        workers = [
+            context.Process(
+                target=_generate_chunk_in_subprocess,
+                args=(
                     process_index,
-                    self._runners[process_index],
+                    self._base_model,
+                    self._dtype_str,
+                    f"{self._device_type}:{process_index}",
+                    self.model_type,
                     checkpoint_path,
                     prompts,
                     output_dir,
@@ -687,31 +685,49 @@ class ParallelEvaluationRunner:
                     generation_kwargs,
                     batch_size,
                     chunk,
-                ): process_index
-                for process_index, chunk in chunks
-            }
-            for future in as_completed(futures):
-                future.result()
+                ),
+            )
+            for process_index, chunk in chunks
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        failed = [worker.pid for worker in workers if worker.exitcode != 0]
+        if failed:
+            raise RuntimeError(
+                "Parallel evaluation generation failed in spawned worker process(es): "
+                f"pids={failed}. Inspect the worker traceback above for the original error."
+            )
         return paths
 
-    @staticmethod
-    def _generate_chunk(
-        process_index: int,
-        runner: EvaluationRunner,
-        checkpoint_path: Optional[str],
-        prompts: List[str],
-        output_dir: str,
-        step: int,
-        generation_kwargs: Dict[str, Any],
-        batch_size: int,
-        chunk: List[Tuple[int, int, int]],
-    ) -> None:
-        """Generate one device's assigned image slots."""
-        if runner.device.startswith("npu"):
-            torch.npu.set_device(process_index)
-        elif runner.device.startswith("cuda"):
-            torch.cuda.set_device(process_index)
+    def close(self) -> None:
+        """Provide lifecycle compatibility; workers own no parent-process pipeline."""
+        return None
 
+
+def _generate_chunk_in_subprocess(
+    process_index: int,
+    base_model: str,
+    dtype_str: str,
+    device: str,
+    model_type: str,
+    checkpoint_path: Optional[str],
+    prompts: List[str],
+    output_dir: str,
+    step: int,
+    generation_kwargs: Dict[str, Any],
+    batch_size: int,
+    chunk: List[Tuple[int, int, int]],
+) -> None:
+    """Generate one accelerator shard in a dedicated spawned process."""
+    if device.startswith("npu"):
+        torch.npu.set_device(process_index)
+    elif device.startswith("cuda"):
+        torch.cuda.set_device(process_index)
+
+    runner = EvaluationRunner(base_model, dtype_str, device=device, model_type=model_type)
+    try:
         if checkpoint_path is not None:
             apply_lora(runner.pipeline, checkpoint_path, runner.dtype, runner.model_type)
         try:
@@ -727,11 +743,8 @@ class ParallelEvaluationRunner:
         finally:
             if checkpoint_path is not None:
                 runner.unload_lora()
-
-    def close(self) -> None:
-        """Release all loaded pipelines and cached accelerator memory."""
-        for runner in self._runners:
-            runner.close()
+    finally:
+        runner.close()
 
 
 def _build_manifest_rows(

@@ -78,7 +78,9 @@ Each source evaluation (image generation for all selected checkpoints) runs in i
 spawned process. Accelerator reward scoring also uses a fresh spawned process for each
 reward, including when `model.num_processes: 1`; process exit is the cleanup boundary
 between models and prevents CUDA/Ascend allocator and compiled-operator state from leaking
-across task switches. CPU single-worker scoring retains a direct path for lightweight tests.
+across task switches. For multi-device generation, the source worker starts one additional
+spawned process per assigned CUDA/NPU device; each of those processes owns exactly one pipeline
+and exits after its shard. CPU single-worker scoring retains a direct path for lightweight tests.
 
 Each `runs` entry can select one checkpoint or an entire checkpoint directory:
 

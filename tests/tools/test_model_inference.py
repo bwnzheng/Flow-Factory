@@ -394,6 +394,7 @@ def test_npu_is_auto_detected_for_single_and_parallel_inference(
     parallel_runner = ParallelEvaluationRunner("unused", "bfloat16", num_processes=2)
 
     assert single_runner.device == "npu"
-    assert [runner.device for runner in parallel_runner._runners] == ["npu:0", "npu:1"]
+    assert parallel_runner._device_type == "npu"
+    assert parallel_runner._num_processes == 2
     with pytest.raises(ValueError, match=r"num_processes\(3\).*npu devices\(2\)"):
         ParallelEvaluationRunner("unused", "bfloat16", num_processes=3)
