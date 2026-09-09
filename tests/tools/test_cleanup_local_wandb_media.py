@@ -30,6 +30,19 @@ def test_discover_run_media_and_summary(tmp_path: Path):
     assert summaries == [files / "wandb-summary.json"]
 
 
+def test_discover_summary_without_media_directory(tmp_path: Path):
+    summary = tmp_path / "offline-run-summary-only" / "files" / "wandb-summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps({"image": {"path": "media/images/missing.jpg"}}), encoding="utf-8"
+    )
+
+    media, summaries = _discover(tmp_path)
+
+    assert media == []
+    assert summaries == [summary]
+
+
 def test_clean_summary_removes_media_references_and_backs_up(tmp_path: Path):
     summary = tmp_path / "files" / "wandb-summary.json"
     summary.parent.mkdir()
@@ -37,6 +50,7 @@ def test_clean_summary_removes_media_references_and_backs_up(tmp_path: Path):
         json.dumps(
             {
                 "loss": 0.1,
+                "nonfinite": float("nan"),
                 "media/evaluation": {"_type": "image-file", "path": "media/images/a.jpg"},
                 "generated": {"path": "media/images/b.jpg"},
             }
@@ -47,7 +61,10 @@ def test_clean_summary_removes_media_references_and_backs_up(tmp_path: Path):
     removed = _clean_summary(summary, tmp_path / "backup", execute=True)
 
     assert removed == ["generated", "media/evaluation"]
-    assert json.loads(summary.read_text(encoding="utf-8")) == {"loss": 0.1}
+    assert json.loads(summary.read_text(encoding="utf-8")) == {
+        "loss": 0.1,
+        "nonfinite": None,
+    }
     assert list((tmp_path / "backup").glob("*.bak"))
 
 
@@ -93,4 +110,5 @@ def test_main_dry_run_prints_summary_count_without_keys(tmp_path: Path, capsys):
 
     output = capsys.readouterr().out
     assert "would remove 1 media-related keys" in output
+    assert "estimated_media_files=0 estimated_files_per_worker=[0, 0]" in output
     assert "media/private-key" not in output

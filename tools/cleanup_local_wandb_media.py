@@ -23,6 +23,7 @@ workers while the media directory itself is preserved.
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -40,7 +41,7 @@ MEDIA_TYPES = {
 
 def _find_paths(root: Path, expression: Sequence[str]) -> List[Path]:
     """Run GNU find once and decode its NUL-delimited output."""
-    process = subprocess.Popen(["find", str(root), *expression, "-print0"], stdout=subprocess.PIPE)
+    process = subprocess.Popen(["find", str(root), *expression], stdout=subprocess.PIPE)
     assert process.stdout is not None
     paths = [Path(os.fsdecode(raw)) for raw in process.stdout.read().split(b"\0") if raw]
     return_code = process.wait()
@@ -66,13 +67,32 @@ def _discover(root: Path) -> Tuple[List[Path], List[Path]]:
     if root.name == "files":
         candidates = root.glob("wandb-summary.json")
     else:
-        # Searching only for the media directory avoids a second full Python
-        # tree walk. The summary lives next to it in W&B offline runs.
-        media_dirs = _find_paths(root, ["-type", "d", "-path", "*/files/media", "-prune"])
-        for media in media_dirs:
-            summary = media.parent / "wandb-summary.json"
-            if summary.is_file():
-                summaries.append(summary)
+        entries = _find_paths(
+            root,
+            [
+                "(",
+                "-type",
+                "d",
+                "-path",
+                "*/files/media",
+                "-print0",
+                "-prune",
+                ")",
+                "-o",
+                "(",
+                "-type",
+                "f",
+                "-path",
+                "*/files/wandb-summary.json",
+                "-print0",
+                ")",
+            ],
+        )
+        for entry in entries:
+            if entry.is_dir():
+                media_dirs.append(entry)
+            else:
+                summaries.append(entry)
         return sorted(set(media_dirs)), sorted(set(summaries))
 
     for summary in candidates:
@@ -147,6 +167,19 @@ def _find_xargs_delete(path: Path, depth: int, workers: int, execute: bool) -> N
     )
 
 
+def _count_files(path: Path) -> int:
+    """Count regular files without retaining or printing their names."""
+    process = subprocess.Popen(["find", str(path), "-type", "f", "-print0"], stdout=subprocess.PIPE)
+    assert process.stdout is not None
+    count = 0
+    while chunk := process.stdout.read(1024 * 1024):
+        count += chunk.count(b"\0")
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"find failed while counting {path}: exit code {return_code}")
+    return count
+
+
 def _contains_media_reference(value: Any) -> bool:
     """Return whether a JSON value contains a W&B media-file reference."""
     if isinstance(value, str):
@@ -159,6 +192,17 @@ def _contains_media_reference(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_media_reference(item) for item in value)
     return False
+
+
+def _json_compliant(value: Any) -> Any:
+    """Convert non-finite floating-point values to JSON null recursively."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_compliant(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_compliant(item) for item in value]
+    return value
 
 
 def _clean_summary(path: Path, backup_dir: Path, execute: bool) -> List[str]:
@@ -185,6 +229,7 @@ def _clean_summary(path: Path, backup_dir: Path, execute: bool) -> List[str]:
     backup.write_bytes(path.read_bytes())
     for key in removed:
         del summary[key]
+    summary = _json_compliant(summary)
 
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -219,21 +264,42 @@ def parse_args() -> argparse.Namespace:
 def main(args: Optional[argparse.Namespace] = None) -> int:
     """Discover and clean local W&B media files and summary references."""
     args = args or parse_args()
+    if args.workers < 1:
+        raise ValueError(f"--workers must be positive, got {args.workers}")
     media_dirs, summaries = _discover(args.root)
-    run_dirs = sorted({media.parent.parent for media in media_dirs})
-    print(f"runs_with_media={len(run_dirs)} summaries={len(summaries)} execute={args.execute}")
-    for run_dir in run_dirs:
-        print(f"run: {run_dir}")
     if not media_dirs and not summaries:
         print(f"No W&B files found below {args.root}")
         return 0
 
-    for media_dir in media_dirs:
-        _find_xargs_delete(media_dir, args.split_depth, args.workers, args.execute)
+    summary_results = []
     for summary in summaries:
         removed = _clean_summary(summary, args.backup_dir, args.execute)
-        if removed and not args.execute:
-            print(f"DRY-RUN: summary={summary} would remove {len(removed)} media-related keys")
+        if removed:
+            summary_results.append((summary, len(removed)))
+
+    media_run_dirs = sorted({media.parent.parent for media in media_dirs})
+    summary_run_dirs = sorted({summary.parent.parent for summary, _ in summary_results})
+    print(
+        f"runs_with_media={len(media_run_dirs)} "
+        f"runs_with_summary_media={len(summary_run_dirs)} "
+        f"execute={args.execute}"
+    )
+    for run_dir in media_run_dirs:
+        print(f"media run: {run_dir}")
+    for run_dir in summary_run_dirs:
+        print(f"summary-media run: {run_dir}")
+
+    total_files = sum(_count_files(media_dir) for media_dir in media_dirs)
+    if media_dirs:
+        base, extra = divmod(total_files, args.workers)
+        per_worker = [base + int(index < extra) for index in range(args.workers)]
+        print(f"estimated_media_files={total_files} estimated_files_per_worker={per_worker}")
+
+    for media_dir in media_dirs:
+        _find_xargs_delete(media_dir, args.split_depth, args.workers, args.execute)
+    if not args.execute:
+        for summary, removed_count in summary_results:
+            print(f"DRY-RUN: summary={summary} " f"would remove {removed_count} media-related keys")
     if not args.execute:
         print("Dry run only. Add --execute to apply changes.")
     return 0
