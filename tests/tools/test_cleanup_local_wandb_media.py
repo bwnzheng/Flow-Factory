@@ -68,7 +68,7 @@ def test_clean_summary_removes_media_references_and_backs_up(tmp_path: Path):
     assert list((tmp_path / "backup").glob("*.bak"))
 
 
-def test_main_deletes_media_children_but_preserves_media_dir(tmp_path: Path):
+def test_main_deletes_media_children_and_media_dir(tmp_path: Path):
     files = tmp_path / "offline-run-x" / "files"
     media = files / "media"
     (media / "images" / "a" / "nested").mkdir(parents=True)
@@ -86,8 +86,7 @@ def test_main_deletes_media_children_but_preserves_media_dir(tmp_path: Path):
         )
     )
 
-    assert media.is_dir()
-    assert list(media.iterdir()) == []
+    assert not media.exists()
 
 
 def test_main_dry_run_prints_summary_count_without_keys(tmp_path: Path, capsys):

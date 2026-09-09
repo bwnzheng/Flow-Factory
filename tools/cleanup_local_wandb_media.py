@@ -17,7 +17,7 @@
 The tool is dry-run by default. With ``--execute`` it removes children of
 ``files/media`` using a NUL-safe ``find | xargs -P`` pipeline. Work is split at
 ``--split-depth`` so many independent subdirectories can be distributed across
-workers while the media directory itself is preserved.
+workers; after the children are removed, the media directory itself is also removed.
 """
 
 import argparse
@@ -139,6 +139,7 @@ def _find_xargs_delete(path: Path, depth: int, workers: int, execute: bool) -> N
         print("DRY-RUN:", " ".join(frontier), "| xargs -0 -n 1 -P", workers, "rm -rf --")
         if depth > 1:
             print("DRY-RUN:", " ".join(shallow), "| xargs -0 -n 1 -P", workers, "rm -f --")
+        print("DRY-RUN: rm -rf --", path)
         return
 
     for find_command, remove_flags in (
@@ -161,10 +162,7 @@ def _find_xargs_delete(path: Path, depth: int, workers: int, execute: bool) -> N
                 f"find/xargs deletion failed for {path}: find={find_code}, xargs={remove_code}"
             )
 
-    subprocess.run(
-        ["find", str(path), "-mindepth", "1", "-depth", "-type", "d", "-empty", "-delete"],
-        check=True,
-    )
+    subprocess.run(["rm", "-rf", "--", str(path)], check=True)
 
 
 def _count_files(path: Path) -> int:
