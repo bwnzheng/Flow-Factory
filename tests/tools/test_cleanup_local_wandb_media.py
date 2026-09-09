@@ -71,3 +71,26 @@ def test_main_deletes_media_children_but_preserves_media_dir(tmp_path: Path):
 
     assert media.is_dir()
     assert list(media.iterdir()) == []
+
+
+def test_main_dry_run_prints_summary_count_without_keys(tmp_path: Path, capsys):
+    files = tmp_path / "offline-run-x" / "files"
+    (files / "media").mkdir(parents=True)
+    (files / "wandb-summary.json").write_text(
+        json.dumps({"media/private-key": {"path": "media/images/x.jpg"}}),
+        encoding="utf-8",
+    )
+
+    main(
+        SimpleNamespace(
+            root=tmp_path,
+            workers=2,
+            split_depth=3,
+            backup_dir=tmp_path / "backup",
+            execute=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "would remove 1 media-related keys" in output
+    assert "media/private-key" not in output

@@ -233,7 +233,7 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
     for summary in summaries:
         removed = _clean_summary(summary, args.backup_dir, args.execute)
         if removed and not args.execute:
-            print(f"DRY-RUN: summary={summary} would remove {len(removed)} keys: {removed}")
+            print(f"DRY-RUN: summary={summary} would remove {len(removed)} media-related keys")
     if not args.execute:
         print("Dry run only. Add --execute to apply changes.")
     return 0
