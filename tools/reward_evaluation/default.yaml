@@ -121,6 +121,19 @@ sources:
       - name: "ocr"
         reward_model: "ocr"
 
+  # DrawBench is an independent eval-only prompt source. Materialize it first:
+  #   python -m tools.evaluation_sets.download_drawbench
+  # Then add this source to evaluate it with the same checkpoint/run settings:
+  # - name: "drawbench"
+  #   dataset_dir: "dataset/drawbench"
+  #   split: "test"
+  #   prompt_key: "prompt"
+  #   max_prompts: 0
+  #   rewards:
+  #     - {name: "pick_score", reward_model: "pickscore"}
+  #     - {name: "hpsv2", reward_model: "hpsv2"}
+  #     - {name: "clip_score", reward_model: "clip"}
+
   # Add other registry rewards in the source where they apply.
 
 runs:
