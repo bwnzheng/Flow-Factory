@@ -156,6 +156,26 @@ outer multiplier separate and applies it to the complete positive/negative
 per-sample NFT objective while retaining the uniform-baseline advantage for the
 branch mixture. Independent KL regularizers remain uniformly aggregated.
 
+SRC ranks samples by reward concordance and scalar-contrast magnitude only, never
+by sign: a consistently bad sample is as informative as a consistently good one,
+and the algorithm's own signed objective decides the update direction. `K * p_i`
+is therefore a confidence multiplier rather than a preference, and it is
+otherwise unbounded in `[(1 - lambda), (1 - lambda) + lambda * K]`. Setting
+`src_reweight_max_multiplier` to a positive value clamps that outer mass. The
+clamp does not renormalize: scores, probabilities, and the group ordering stay
+untouched, so a group whose bound binds simply carries less total mass, which
+shrinks its share of the loss instead of redistributing it onto the remaining
+samples. The clamp is applied after the probability mapping, so the logged
+`src_probability` and `src_ess` metrics keep describing the unclamped SRC
+distribution; `sample_weight_max` is the metric that shows whether a configured
+cap binds. In the fully concentrated case at `lambda: 0.8` and `group_size: 16`
+the multiplier reaches `(1 - lambda) + lambda * K = 13`, letting one sample carry
+`13` of its group's `16` units of mass; a cap of `4.0` lowers that to `4` units,
+i.e. `57%` of the group's remaining `7` (`2.0` gives `2` units and `40%` of `5`), while the
+default `null` leaves the multiplier unbounded. The bound is a tail-only safety
+net: typical groups keep their unclamped weights because their multipliers
+already sit below the cap.
+
 ```yaml
 train:
   trainer_type: grpo  # Also supported: grpo-guard, dppo, nft, awm, ga_grpo_guard, ga_nft
@@ -166,6 +186,7 @@ train:
   src_reweight_temperature: 1.0  # > 0
   src_reweight_epsilon: 1.0e-8
   src_reweight_degeneracy_threshold: 1.0e-12
+  src_reweight_max_multiplier: null  # Optional positive cap on K * p_i; null = unbounded
 ```
 
 SRC requires at least two active rewards with positive, nonnegative fixed
@@ -179,7 +200,8 @@ CRD. GA trainers use the final evolved survivor population as the SRC support;
 `ga_nft` retains NFT's outer-loss multiplier contract and may use either its
 current policy or EMA sampling policy as the rollout/reference distribution.
 
-Logging includes probability and `sample_weight` distributions, ESS and
+Logging includes probability and `sample_weight` distributions (`sample_weight_max`
+reveals whether a configured cap binds), ESS and
 ESS/K, scalar and weighted variance, uniform-versus-reweighted SRC lower
 bounds, degeneracy rate, frozen and weighted-recentered per-reward
 contribution/conflict metrics, weighted centering/probability-sum errors, raw

@@ -364,6 +364,7 @@ class BaseTrainer(ABC):
             src_reweight_degeneracy_threshold=(
                 self.training_args.src_reweight_degeneracy_threshold
             ),
+            src_reweight_max_multiplier=self.training_args.src_reweight_max_multiplier,
             sample_weighting_consumer=(
                 "nft" if trainer_type in {"nft", "ga_nft"} else "linear_advantage"
             ),
@@ -384,6 +385,7 @@ class BaseTrainer(ABC):
                 f"src_reweight_interpolation({self.training_args.src_reweight_interpolation}), "
                 f"src_reweight_temperature({self.training_args.src_reweight_temperature}), "
                 f"src_reweight_epsilon({self.training_args.src_reweight_epsilon}), "
+                f"src_reweight_max_multiplier({self.training_args.src_reweight_max_multiplier}), "
                 f"sample_weighting_consumer({sample_weighting_consumer}), "
                 "loss_multiplier(K * probability). "
                 f"{normalization_note} Independent KL regularization remains uniformly "

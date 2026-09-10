@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -57,6 +57,7 @@ def compute_src_reweight(
     epsilon: float,
     degeneracy_threshold: float,
     score_type: Literal["raw", "saturated"] = "saturated",
+    max_multiplier: Optional[float] = None,
 ) -> SRCReweightResult:
     """Compute frozen-group SRC probabilities and effective advantages.
 
@@ -74,6 +75,10 @@ def compute_src_reweight(
         epsilon: Positive numerical safeguard for raw calibration and saturation.
         degeneracy_threshold: Scalar-variance threshold for uniform fallback.
         score_type: Frozen-group SRC score formula used for softmax weighting.
+        max_multiplier: Optional positive upper bound on the outer sample mass
+            ``group_size * p_i``. ``None`` leaves the multiplier unbounded in
+            ``[(1 - interpolation), (1 - interpolation) + interpolation * group_size]``.
+            A set value clamps every multiplier to that bound.
 
     Returns:
         SRC diagnostics, probabilities, and effective advantages aligned with samples.
@@ -83,6 +88,12 @@ def compute_src_reweight(
         optimization advantage remains centered and scaled with the original
         uniform prompt-group statistics; the weighted-centered quantities are
         retained as diagnostics for the SRC distribution itself.
+
+        ``max_multiplier`` clamps the outer sample mass only; scores,
+        probabilities, and the group's relative ordering are untouched. The clamp
+        does not renormalize, so a group's total mass falls below ``group_size``
+        whenever the bound binds, which shrinks that group's share of the loss
+        instead of redistributing it onto other samples.
     """
     rewards = np.asarray(reward_matrix, dtype=np.float64)
     weights = np.asarray(weight_matrix, dtype=np.float64)
@@ -111,6 +122,8 @@ def compute_src_reweight(
         raise ValueError(f"degeneracy_threshold must be >= 0, got {degeneracy_threshold}.")
     if score_type not in {"raw", "saturated"}:
         raise ValueError(f"score_type must be 'raw' or 'saturated', got {score_type!r}.")
+    if max_multiplier is not None and max_multiplier <= 0.0:
+        raise ValueError(f"max_multiplier must be > 0 when set, got {max_multiplier}.")
     if np.any(weights[applicable_mask] < 0.0):
         raise ValueError("SRC-Reweight requires nonnegative active reward weights.")
 
@@ -233,6 +246,11 @@ def compute_src_reweight(
         group_uniform_advantages = uniform_centered / np.sqrt(scalar_variance + epsilon)
         group_weighted_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
         group_multipliers = group_size * group_probabilities
+        if max_multiplier is not None:
+            # Bound the outer sample mass without renormalizing: the scoring
+            # ordering is direction-agnostic, so an uncapped multiplier lets a
+            # single extreme sample dominate its group's loss.
+            group_multipliers = np.minimum(group_multipliers, max_multiplier)
 
         normalized_scores[sample_indices] = group_normalized_scores
         weighted_contributions[np.flatnonzero(active)[:, None], sample_indices] = (

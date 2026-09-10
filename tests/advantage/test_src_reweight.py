@@ -28,6 +28,7 @@ def _compute(
     interpolation: float = 0.6,
     score_type: str = "saturated",
     epsilon: float = 1e-8,
+    max_multiplier: float | None = None,
 ):
     num_rewards, num_samples = rewards.shape
     if groups is None:
@@ -42,6 +43,7 @@ def _compute(
         epsilon=epsilon,
         degeneracy_threshold=1e-12,
         score_type=score_type,
+        max_multiplier=max_multiplier,
     )
 
 
@@ -208,6 +210,51 @@ def test_src_degenerate_group_uses_uniform_weights_and_zero_advantages():
     np.testing.assert_allclose(result.effective_advantages, np.zeros(3))
 
 
+def test_src_max_multiplier_bounds_outer_mass_without_renormalizing():
+    rewards = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    uncapped = _compute(rewards, interpolation=0.8)
+    capped = _compute(rewards, interpolation=0.8, max_multiplier=2.0)
+    assert uncapped.loss_multipliers.max() > 2.0
+
+    np.testing.assert_allclose(capped.loss_multipliers, np.minimum(uncapped.loss_multipliers, 2.0))
+    # The bound touches the outer sample mass only: the score, its probability
+    # mapping, and diagnostic advantages are all frozen.
+    np.testing.assert_allclose(capped.scores, uncapped.scores)
+    np.testing.assert_allclose(capped.probabilities, uncapped.probabilities)
+    np.testing.assert_allclose(capped.uniform_advantages, uncapped.uniform_advantages)
+    np.testing.assert_allclose(
+        capped.effective_advantages, capped.loss_multipliers * capped.uniform_advantages
+    )
+    # No renormalization: the constrained group carries less total mass.
+    assert capped.loss_multipliers.sum() < uncapped.loss_multipliers.sum()
+
+
+def test_src_max_multiplier_above_the_uniform_bound_changes_nothing():
+    rewards = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    uncapped = _compute(rewards, interpolation=0.8)
+    capped = _compute(rewards, interpolation=0.8, max_multiplier=100.0)
+
+    np.testing.assert_allclose(capped.loss_multipliers, uncapped.loss_multipliers)
+    np.testing.assert_allclose(capped.effective_advantages, uncapped.effective_advantages)
+
+
+def test_src_max_multiplier_leaves_uniform_fallback_weights_untouched():
+    result = _compute(np.ones((2, 3)), max_multiplier=2.0)
+
+    assert result.degenerate_scalar_contrast.all()
+    np.testing.assert_allclose(result.loss_multipliers, np.ones(3))
+
+
 def test_src_never_mixes_prompt_groups():
     rewards = np.array(
         [
@@ -234,6 +281,21 @@ def test_src_requires_two_positive_active_rewards():
             temperature=1.0,
             epsilon=1e-8,
             degeneracy_threshold=1e-12,
+        )
+
+
+def test_src_rejects_non_positive_max_multiplier():
+    with pytest.raises(ValueError, match="max_multiplier"):
+        compute_src_reweight(
+            reward_matrix=np.array([[0.0, 1.0], [0.0, 1.0]]),
+            weight_matrix=np.ones((2, 2)),
+            applicable=np.ones((2, 2), dtype=bool),
+            group_indices=np.array([0, 0]),
+            interpolation=0.5,
+            temperature=1.0,
+            epsilon=1e-8,
+            degeneracy_threshold=1e-12,
+            max_multiplier=0.0,
         )
 
 
@@ -309,6 +371,30 @@ def test_src_config_rejects_invalid_score_type():
     config["train"]["src_score_type"] = "unknown"
 
     with pytest.raises(ValueError, match="src_score_type"):
+        Arguments.from_dict(config)
+
+
+def test_src_config_max_multiplier_defaults_to_unbounded():
+    args = Arguments.from_dict(_src_config())
+
+    assert args.training_args.src_reweight_max_multiplier is None
+
+
+def test_src_config_accepts_max_multiplier():
+    config = _src_config()
+    config["train"]["src_reweight_max_multiplier"] = 4.0
+
+    args = Arguments.from_dict(config)
+
+    assert args.training_args.src_reweight_max_multiplier == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_src_config_rejects_non_positive_max_multiplier(value):
+    config = _src_config()
+    config["train"]["src_reweight_max_multiplier"] = value
+
+    with pytest.raises(ValueError, match="src_reweight_max_multiplier"):
         Arguments.from_dict(config)
 
 
@@ -452,6 +538,57 @@ def test_advantage_processor_supports_src_on_ga_survivor_population(consumer):
         expected_src.loss_multipliers,
         rtol=1e-6,
     )
+
+
+@pytest.mark.parametrize("consumer", ["linear_advantage", "nft"])
+def test_advantage_processor_applies_src_max_multiplier_to_outer_weight(consumer):
+    rewards = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    samples = [BaseSample(prompt="prompt", _unique_id=31) for _ in range(5)]
+    processor = AdvantageProcessor(
+        accelerator=Float32ReduceAccelerator(),
+        reward_weights={"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        group_size=5,
+        global_std=True,
+        sampler_type="group_contiguous",
+        verbose=False,
+        sample_weighting="src",
+        sample_weighting_consumer=consumer,
+        src_reweight_interpolation=0.8,
+        src_reweight_temperature=0.7,
+        src_reweight_max_multiplier=2.0,
+    )
+
+    advantages = processor.compute_advantages(
+        samples,
+        rewards={
+            "quality": torch.tensor(rewards[0]),
+            "safety": torch.tensor(rewards[1]),
+        },
+        aggregation_func="sum",
+    )
+    expected_src = _compute(rewards, interpolation=0.8, max_multiplier=2.0)
+    metrics = processor.pop_advantage_metrics()
+
+    assert expected_src.loss_multipliers.max() == pytest.approx(2.0)
+    np.testing.assert_allclose(
+        [sample.extra_kwargs["sample_weight"].item() for sample in samples],
+        expected_src.loss_multipliers,
+        rtol=1e-6,
+    )
+    if consumer == "nft":
+        np.testing.assert_allclose(
+            advantages.cpu().numpy(), expected_src.uniform_advantages, rtol=1e-6, atol=1e-6
+        )
+    else:
+        np.testing.assert_allclose(
+            advantages.cpu().numpy(), expected_src.effective_advantages, rtol=1e-6, atol=1e-6
+        )
+    assert metrics["train/sample_weight_max"] == pytest.approx(2.0)
 
 
 def test_globally_gathered_baseline_metrics_are_not_rank_reduced_again():

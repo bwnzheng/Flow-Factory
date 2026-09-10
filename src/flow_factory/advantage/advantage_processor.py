@@ -91,6 +91,7 @@ class AdvantageProcessor:
         src_reweight_degeneracy_threshold: float = 1e-12,
         sample_weighting_consumer: Literal["linear_advantage", "nft"] = "linear_advantage",
         src_score_type: Literal["raw", "saturated"] = "saturated",
+        src_reweight_max_multiplier: Optional[float] = None,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -116,6 +117,7 @@ class AdvantageProcessor:
         self.src_reweight_temperature = src_reweight_temperature
         self.src_reweight_epsilon = src_reweight_epsilon
         self.src_reweight_degeneracy_threshold = src_reweight_degeneracy_threshold
+        self.src_reweight_max_multiplier = src_reweight_max_multiplier
         self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
 
@@ -776,6 +778,7 @@ class AdvantageProcessor:
                 epsilon=self.src_reweight_epsilon,
                 degeneracy_threshold=self.src_reweight_degeneracy_threshold,
                 score_type=self.src_score_type,
+                max_multiplier=self.src_reweight_max_multiplier,
             )
             if self.sample_weighting_consumer == "nft":
                 if self.global_std:

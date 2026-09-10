@@ -220,6 +220,15 @@ class TrainingArguments(ArgABC):
             )
         },
     )
+    src_reweight_max_multiplier: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional positive upper bound on the SRC outer sample mass K * p_i. None leaves "
+                "the multiplier unbounded in [(1 - lambda), (1 - lambda) + lambda * group_size]."
+            )
+        },
+    )
     unique_sample_num_per_epoch: int = field(
         default=8,
         metadata={"help": "Number of unique samples per group."},
@@ -345,6 +354,11 @@ class TrainingArguments(ArgABC):
             raise ValueError(
                 "`src_reweight_degeneracy_threshold` must be >= 0, "
                 f"got {self.src_reweight_degeneracy_threshold}."
+            )
+        if self.src_reweight_max_multiplier is not None and self.src_reweight_max_multiplier <= 0.0:
+            raise ValueError(
+                "`src_reweight_max_multiplier` must be > 0 when set, "
+                f"got {self.src_reweight_max_multiplier}."
             )
 
         # --- Resolution standardization ---
