@@ -20,6 +20,7 @@ import json
 import os
 import re
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -359,7 +360,11 @@ def _generate_batches(
 ) -> None:
     """Generate missing images in batches and save them to disk."""
     device_type = runner.device.split(":")[0]
-    use_autocast = device_type in ("cuda", "npu")
+    # SDXL's VAE must be allowed to run outside the outer autocast scope.
+    # Diffusers upcasts the VAE to float32 because its decoder can overflow in
+    # float16; wrapping the complete pipeline in autocast defeats that guard on
+    # some CUDA/NPU backends and can turn the decoded image into NaNs (black PNGs).
+    use_autocast = device_type in ("cuda", "npu") and runner.model_type != "sdxl"
     pipeline_kwargs = {key: value for key, value in generation_kwargs.items() if key != "seed"}
     pipeline_kwargs["output_type"] = "pil"
 
@@ -370,10 +375,12 @@ def _generate_batches(
             torch.Generator(device=runner.device).manual_seed(seed) for _, _, seed in batch
         ]
         pipeline_kwargs["generator"] = generators
-        if use_autocast:
-            with torch.autocast(device_type=device_type, dtype=runner.dtype):
-                result = runner.pipeline(batch_prompts, **pipeline_kwargs)
-        else:
+        autocast_context = (
+            torch.autocast(device_type=device_type, dtype=runner.dtype)
+            if use_autocast
+            else nullcontext()
+        )
+        with autocast_context:
             result = runner.pipeline(batch_prompts, **pipeline_kwargs)
 
         if len(result.images) != len(batch):

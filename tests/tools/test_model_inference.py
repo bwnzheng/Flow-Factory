@@ -37,7 +37,7 @@ from tools.model_inference import (
     resolve_device,
     run_evaluation_set,
 )
-from tools.model_inference.runner import _expected_outputs
+from tools.model_inference.runner import _expected_outputs, _generate_batches
 
 
 class _FakeRunner:
@@ -207,6 +207,47 @@ def test_expected_outputs_marks_truncated_png_as_missing(tmp_path: Path) -> None
 
     assert paths == ["checkpoint_4/p0_s0.png"]
     assert missing == [(0, 0, 42)]
+
+
+def test_sdxl_generation_keeps_vae_outside_outer_autocast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "outputs"
+    (output_dir / "checkpoint_0").mkdir(parents=True)
+
+    class FakeGenerator:
+        def manual_seed(self, seed: int) -> "FakeGenerator":
+            return self
+
+    def pipeline(prompts: List[str], **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            images=[Image.new("RGB", (1, 1), color="white") for _ in prompts]
+        )
+
+    runner = SimpleNamespace(
+        device="npu:0",
+        dtype=torch.float16,
+        model_type="sdxl",
+        pipeline=pipeline,
+    )
+    monkeypatch.setattr(torch, "Generator", lambda **kwargs: FakeGenerator())
+    monkeypatch.setattr(
+        torch,
+        "autocast",
+        lambda **kwargs: pytest.fail("SDXL generation must not use outer autocast"),
+    )
+
+    _generate_batches(
+        runner=runner,
+        prompts=["test prompt"],
+        output_dir=str(output_dir),
+        step=0,
+        generation_kwargs={},
+        batch_size=1,
+        missing=[(0, 0, 42)],
+    )
+
+    assert (output_dir / "checkpoint_0" / "p0_s0.png").is_file()
 
 
 def test_standalone_cli_resolves_evaluation_set_and_generation_args(
