@@ -102,6 +102,15 @@ Effect of the offload pipeline: `sample.to('cpu')` and `sample.to(device)` both 
 
 If a future custom adapter stores large GPU tensors in `extra_kwargs`, either handle them adapter-side or refactor `BaseSample.to` to delegate to `move_tensors_to_device(value, device, max_depth=1)` in an independent PR (note: that refactor will start moving `extra_kwargs['advantage']` together with the sample, which is benign for the current data flow but is a contract change).
 
+## Derived Samples Must Not Inherit Score State
+
+`to_dict()` / `from_dict()` copy nested values (`extra_kwargs`) **by reference** — a round-tripped sample shares the same `rewards` dict object with its source. Any code that derives one sample from another (GA children, template-based augmentation) must therefore:
+
+1. **Delete** `rewards` / `advantage` from the inherited dict instead of assigning in place — in-place mutation would write through to the source sample. Use `trainers/evolution.drop_inherited_sample_state()`.
+2. **Store** the derived sample's own scores after evaluating it (`compute_rewards(..., store_to_samples=True)` from `GA._run_generation`), never leave them absent — media logging reads `sample.extra_kwargs['rewards']` and would otherwise report the source's numbers.
+
+Scores are per-sample state, not configuration: an unscored sample is legitimate (it is simply logged without scores), a mislabelled one is not.
+
 ## Cross-refs
 
 - `constraints.md` #11 (BaseTrainer hook order: `sample()` → `prepare_feedback()` → `optimize()`)

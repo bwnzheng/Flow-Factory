@@ -302,6 +302,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Keep media persistence and backend logging as independent contracts; online backends may receive scalar metrics and run configuration, but media payloads must be excluded at the logger boundary.
 - **Related Constraint**: N/A
 
+### GA children inherited their template's reward vector
+- **Date**: 2026-09-10
+- **Symptom**: Saved media metadata showed the same reward vector for every GA candidate image in a group — worst in resample generations, where the whole group matched one template's scores even though the images differed.
+- **Root Cause**: Child factories built children from `template.to_dict()` (nested values shared by reference) and `_run_generation` evaluated offspring with `store_to_samples=False`, so `extra_kwargs["rewards"]` was never replaced by the child's own result. Media logging reads that key, so it reported the template's numbers; a resample template is only a conditioning carrier and its scores are meaningless for the child.
+- **Fix**: `trainers/evolution/genetic_algorithm.py` drops `rewards`/`advantage` from the inherited dict via the new `drop_inherited_sample_state()` helper (exported from `trainers/evolution/__init__.py`) and evaluates offspring with `store_to_samples=True`; `trainers/ga_grpo_guard.py:_build_child` uses the same helper. Regression tests assert both factories return unscored children, that templates keep their own scores untouched, and that `_run_generation` stores each child's own evaluation result.
+- **Lesson**: Scores are per-sample state, not inherited configuration — a derived sample starts unscored and receives its own numbers from the evaluator. Because `to_dict()`/`from_dict()` alias nested objects, "inherit everything then override" must *delete* stale state keys; assigning in place would write through to the source sample.
+- **Related Constraint**: N/A (codified in `topics/sample_lifecycle.md` → "Derived Samples Must Not Inherit Score State")
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

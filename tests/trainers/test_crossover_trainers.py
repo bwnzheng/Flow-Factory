@@ -334,6 +334,142 @@ def test_grpo_child_factory_uses_trainer_public_state():
     assert children[0].all_latents[:, 0, 0].tolist() == [0.0, 1.0, 20.0, 30.0, 40.0]
 
 
+def test_ga_child_factories_drop_inherited_scores():
+    """A child starts unscored: parent scores must not be inherited.
+
+    ``to_dict``/``from_dict`` keep nested values by reference, so inheriting
+    ``extra_kwargs["rewards"]`` would both mislabel the child (media metadata
+    reads it) and alias the parent's dict.
+    """
+
+    def _scored_parent() -> BaseSample:
+        parent = _dense_parent()
+        parent.extra_kwargs["rewards"] = {"quality": torch.tensor(7.0)}
+        parent.extra_kwargs["advantage"] = torch.tensor(3.0)
+        return parent
+
+    class DecodeAdapter:
+        def decode_latents(self, latents):
+            return None
+
+    # NFT-style factory (no trajectory, no log_probs)
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._adapter = DecodeAdapter()
+    nft_parent = _scored_parent()
+    nft_children = ga._default_child_factory(
+        templates=[nft_parent],
+        child_latents=torch.tensor([[[20.0]]]),
+        cxo_step=2,
+        denoise_output=(torch.tensor([[[50.0]]]), None, None, None),
+        ctx=SimpleNamespace(n_stored=4, gen_idx=0, strategy_name="uniform", gid=7),
+    )
+
+    assert nft_children[0].all_latents.shape == (4, 1, 1)
+    assert "rewards" not in nft_children[0].extra_kwargs
+    assert "advantage" not in nft_children[0].extra_kwargs
+
+    # GRPO-Guard factory (merged parent + child trajectory)
+    trainer = GAGRPOGuardTrainer.__new__(GAGRPOGuardTrainer)
+    trainer.training_args = SimpleNamespace(
+        num_inference_steps=4,
+        ga=SimpleNamespace(strategy="uniform"),
+    )
+    trainer.adapter = DecodeAdapter()
+    trainer._compute_boundary_statistics = lambda parent, latent, step: {
+        "log_prob": torch.tensor(2.5),
+        "next_latents_mean": torch.tensor([[20.5]]),
+    }
+    grpo_parent = _scored_parent()
+    grpo_children = trainer._grpo_child_factory(
+        templates=[grpo_parent],
+        child_latents=torch.tensor([[[20.0]]]),
+        cxo_step=2,
+        denoise_output=(
+            torch.tensor([[[50.0]]]),
+            [torch.tensor([[[30.0]]]), torch.tensor([[[40.0]]])],
+            [torch.tensor([3.0]), torch.tensor([4.0])],
+            {
+                "next_latents_mean": [
+                    torch.tensor([[[30.5]]]),
+                    torch.tensor([[[40.5]]]),
+                ]
+            },
+        ),
+        ctx=SimpleNamespace(strategy_name="uniform", gen_idx=0, gid=123),
+    )
+
+    assert "rewards" not in grpo_children[0].extra_kwargs
+    assert "advantage" not in grpo_children[0].extra_kwargs
+
+    # Templates keep their own scores, untouched.
+    assert nft_parent.extra_kwargs["rewards"]["quality"].item() == 7.0
+    assert grpo_parent.extra_kwargs["rewards"]["quality"].item() == 7.0
+
+
+def test_run_generation_stores_each_childs_own_rewards():
+    """Step 5 evaluates children with ``store_to_samples=True``.
+
+    Media metadata reads ``sample.extra_kwargs["rewards"]``; without storing,
+    a child keeps whatever its template carried and every sibling in a group
+    is logged with the same reward vector.  A resample template is only a
+    conditioning carrier, so its scores are meaningless for the child.
+    """
+
+    class RecordingRewardProcessor:
+        def __init__(self):
+            self.split = None
+
+        def compute_rewards(self, samples, store_to_samples=False, split="all"):
+            self.split = split
+            scores = torch.arange(1, len(samples) + 1, dtype=torch.float32)
+            if store_to_samples:
+                # Mirrors RewardProcessor: a fresh dict per sample.
+                for i, sample in enumerate(samples):
+                    sample.extra_kwargs["rewards"] = {"quality": scores[i]}
+            return {"quality": scores}
+
+    evaluated = [_dense_parent(), _dense_parent()]
+    rp = RecordingRewardProcessor()
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._accelerator = SimpleNamespace(device=torch.device("cpu"))
+    ga._reward_buffer = SimpleNamespace(rp=rp)
+    ga._offspring_mode = "resample"
+    ga._strategy = SimpleNamespace(num_children=lambda n: len(evaluated))
+    ga._seed = 0
+    ga._num_steps = 4
+    ga._mutation_std = 0.0
+    ga._advantage_aggregation = "sum"
+    ga._reward_weights = {"quality": {"default": 1.0}}
+    ga._denoise_and_create_children = (
+        lambda child_latents, cxo_step, population, prefix_indices, ctx: evaluated
+    )
+    ga._select_survivors = lambda **kwargs: (
+        kwargs["population"],
+        kwargs["pop_rewards"],
+        {"selection_event": {"offspring": {}}},
+    )
+
+    population = [_dense_parent(), _dense_parent()]
+    population[0].extra_kwargs["rewards"] = {"quality": torch.tensor(-1.0)}
+    pop_rewards = {"quality": np.array([1.0, 3.0], dtype=np.float32)}
+
+    survivors, _, stats = ga._run_generation(
+        population=population,
+        pop_rewards=pop_rewards,
+        reward_keys=["quality"],
+        valid_reward_keys=["quality"],
+        source=None,
+        epoch=0,
+        ctx=SimpleNamespace(gid=11, gen_idx=0, strategy_name="resample"),
+    )
+
+    assert rp.split == "pointwise"
+    assert [c.extra_kwargs["rewards"]["quality"].item() for c in evaluated] == [1.0, 2.0]
+    # The template's scores are neither aliased nor overwritten.
+    assert population[0].extra_kwargs["rewards"]["quality"].item() == -1.0
+    assert survivors is population
+
+
 def test_nft_crossover_sample_batch_bypasses_eval(monkeypatch):
     trainer = GANFTTrainer.__new__(GANFTTrainer)
     trainer._crossover_enabled = True

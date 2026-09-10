@@ -16,7 +16,7 @@
 """Evolution utilities for genetic augmentation during RL training."""
 
 from .abc import BaseCrossover, CrossoverOutput
-from .genetic_algorithm import GeneticAlgorithm
+from .genetic_algorithm import GeneticAlgorithm, drop_inherited_sample_state
 from .pareto import (
     compute_pareto_mask,
     filter_by_group,
@@ -58,6 +58,7 @@ __all__ = [
     "compute_src_contributions",
     "covariance_group_score",
     "create_crossover_strategy",
+    "drop_inherited_sample_state",
     "filter_by_group",
     "list_crossover_strategies",
     "population_covariance",

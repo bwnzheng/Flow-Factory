@@ -103,6 +103,26 @@ def _resolve_cxo_step(sample: BaseSample, num_steps: int) -> int:
     return num_steps // 2
 
 
+# Per-sample score bookkeeping lives in ``extra_kwargs`` next to conditioning
+# fields.  ``BaseSample.to_dict()`` flattens that dict into the top level and
+# ``from_dict()`` recollects the unknown keys, so a child built from a template
+# would silently inherit the template's numbers — which is wrong for every
+# offspring mode: crossover/mutation children are new samples that have not
+# been scored yet, and resample children have no parent at all (their template
+# only carries conditioning fields through the denoising forward).
+_INHERITED_STATE_KEYS = ("rewards", "advantage")
+
+
+def drop_inherited_sample_state(sample_dict: Dict[str, Any]) -> None:
+    """Remove per-sample score state from a flattened ``to_dict()`` payload.
+
+    Scores are sample state, not sample configuration: callers must attach
+    them per child once the child has actually been evaluated.
+    """
+    for key in _INHERITED_STATE_KEYS:
+        sample_dict.pop(key, None)
+
+
 def _format_src_selection_log(selection: Dict[str, Any], n_pop: int) -> str:
     """Format SRC selection diagnostics."""
     elite_id = int(selection["elite_id"])
@@ -690,9 +710,12 @@ class GeneticAlgorithm:
             )
             child.extra_kwargs["offspring_mode"] = self._offspring_mode
 
-        # 5. Evaluate children
+        # 5. Evaluate children.  Scores are stored back onto each child so the
+        #    sample owns its own numbers (media/logging reads
+        #    ``sample.extra_kwargs["rewards"]``); neither the returned dict nor
+        #    any template value is shared between samples.
         child_rewards_dict_raw = self._reward_buffer.rp.compute_rewards(
-            children, store_to_samples=False, split="pointwise"
+            children, store_to_samples=True, split="pointwise"
         )
         child_rewards_dict = {k: v.cpu().numpy() for k, v in child_rewards_dict_raw.items()}
         self._device_sync()
@@ -959,8 +982,10 @@ class GeneticAlgorithm:
             lmap = torch.full((ctx.n_stored,), -1, dtype=torch.long, device=device)
             lmap[-1] = ctx.n_stored - 1
 
-            # Inherit everything from the template, then override.
+            # Inherit everything from the template, then override.  Scores are
+            # dropped rather than inherited: a child starts unscored.
             child_dict = template.to_dict()
+            drop_inherited_sample_state(child_dict)
             child_dict["all_latents"] = al
             child_dict["latent_index_map"] = lmap
             child_dict["image"] = imgs

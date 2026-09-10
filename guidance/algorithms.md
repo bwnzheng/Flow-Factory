@@ -342,7 +342,9 @@ population consumed by optimization under `.../final/`, and every generated
 child under `.../genN/`. The generation folders include rejected as well as
 selected children. Each media file has a same-stem JSON sidecar with candidate
 rewards, selection advantage and score, Pareto membership, selected order,
-parent IDs, and the complete group selection event. These files provide a
+parent IDs, and the complete group selection event. A child is scored by its
+own evaluation, so its metadata never reflects a template's rewards — the
+resample template is only a conditioning carrier. These files provide a
 human-viewable counterpart to the compact aggregate metrics and raw selection
 pickle.
 

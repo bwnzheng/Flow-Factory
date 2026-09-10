@@ -37,6 +37,7 @@ from ..utils.logger_utils import setup_logger
 from .evolution import (
     GeneticAlgorithm,
     create_crossover_strategy,
+    drop_inherited_sample_state,
     sample_crossover_step,
 )
 from .grpo import GRPOGuardTrainer
@@ -393,8 +394,10 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
         merged_lp = torch.stack(lp_list)
         lpm2 = torch.arange(T, dtype=torch.long, device=device)
 
-        # Inherit all parent fields via to_dict/from_dict
+        # Inherit all parent fields via to_dict/from_dict.  Scores are dropped
+        # rather than inherited: a child starts unscored.
         parent_dict = parent.to_dict()
+        drop_inherited_sample_state(parent_dict)
         parent_dict["all_latents"] = merged_al
         parent_dict["latent_index_map"] = lm
         parent_dict["log_probs"] = merged_lp
