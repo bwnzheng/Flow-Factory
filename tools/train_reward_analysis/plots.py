@@ -176,7 +176,6 @@ def plot_standardized_reward_covariance_trajectories(
             ].append(row)
 
     run_styles = ["-", "--", ":", "-."]
-    output_path = Path(output_dir) / "standardized_reward_covariance"
     for (dataset, combination, pair), pair_rows in sorted(by_dataset_combination_pair.items()):
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for index, (label, line_rows) in enumerate(sorted(_group_by_run(pair_rows).items())):
@@ -211,7 +210,12 @@ def plot_standardized_reward_covariance_trajectories(
         axis.legend(fontsize=8)
         figure.tight_layout()
         filename = f"{_filename_component(pair)}.{plot_format}"
-        path = output_path / _filename_component(dataset) / filename
+        path = (
+            Path(output_dir)
+            / _filename_component(dataset)
+            / "standardized_reward_covariance"
+            / filename
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
         plt.close(figure)

@@ -297,6 +297,6 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     assert (output_dir / "per_reward_conflict_score" / "pick_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_disagreement" / "clip_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_disagreement" / "pick_score.png").stat().st_size > 0
-    covariance_dir = tmp_path / "standardized_reward_covariance"
-    assert (covariance_dir / "pickscore" / "clip_score__pick_score.png").stat().st_size > 0
+    covariance_dir = tmp_path / "pickscore" / "standardized_reward_covariance"
+    assert (covariance_dir / "clip_score__pick_score.png").stat().st_size > 0
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
