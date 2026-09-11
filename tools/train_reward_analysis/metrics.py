@@ -50,11 +50,13 @@ def compute_reward_concordance_metrics(
     scalar_advantages = _standardize_centered(scalar_rewards, axis=0)
     conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
     disagreement = (centered_rewards * scalar_advantages[:, None] < 0.0).mean(axis=0)
+    standardized_covariance = centered_rewards.T @ centered_rewards / group_size
 
     return {
         "group_size": group_size,
         "per_reward_conflict_score": conflict_scores.mean(axis=0),
         "per_reward_disagreement": disagreement,
+        "standardized_reward_covariance": standardized_covariance,
         "reward_concordance_lower_bound": float(conflict_scores.min(axis=1).mean()),
     }
 
@@ -76,6 +78,9 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
     for metrics in group_metrics:
         if len(metrics["per_reward_conflict_score"]) != n_rewards:
             raise ValueError("All groups must have the same number of active rewards.")
+        covariance = np.asarray(metrics["standardized_reward_covariance"])
+        if covariance.shape != (n_rewards, n_rewards):
+            raise ValueError("All groups must have square reward covariance matrices.")
 
     return {
         "n_groups": len(group_metrics),
@@ -85,6 +90,9 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         ),
         "per_reward_disagreement": np.mean(
             [metrics["per_reward_disagreement"] for metrics in group_metrics], axis=0
+        ),
+        "standardized_reward_covariance": np.mean(
+            [metrics["standardized_reward_covariance"] for metrics in group_metrics], axis=0
         ),
         "reward_concordance_lower_bound": float(
             np.mean([metrics["reward_concordance_lower_bound"] for metrics in group_metrics])

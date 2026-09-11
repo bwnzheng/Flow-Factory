@@ -41,6 +41,7 @@ from tools.train_reward_analysis.plots import (
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
+    plot_standardized_reward_covariance_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
@@ -114,6 +115,12 @@ def main() -> None:
         smoothing_window=config.smoothing_window,
         plot_format=config.plot_format,
     )
+    plot_standardized_reward_covariance_trajectories(
+        rows,
+        output_dir,
+        smoothing_window=config.smoothing_window,
+        plot_format=config.plot_format,
+    )
     plot_reward_concordance_lower_bound_trajectories(
         rows,
         output_dir,
@@ -147,6 +154,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         for (step, reward_names), groups in sorted(by_step_combination.items()):
             weights, weight_source = _weights_for_group(run, reward_names, saved_weight_context)
             weight_sources["__".join(reward_names)] = weight_source
+            dataset = _dataset_from_weight_source(weight_source)
             metrics = [
                 compute_reward_concordance_metrics(
                     group.rewards,
@@ -156,7 +164,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
             ]
             aggregate = aggregate_group_metrics(metrics)
             groups_seen += len(groups)
-            rows.extend(_metric_rows(run, step, reward_names, aggregate))
+            rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
 
         run_metadata.append(
             {
@@ -179,6 +187,9 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "metrics": {
             "per_reward_conflict_score": "mean_standardized_weighted_reward_contribution",
             "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
+            "standardized_reward_covariance": (
+                "prompt-local population covariance of standardized reward pairs"
+            ),
             "reward_concordance_lower_bound": (
                 "mean_over_samples_of_the_minimum_standardized_reward_contribution"
             ),
@@ -367,13 +378,16 @@ def _metric_rows(
     step: int,
     reward_names: tuple[str, ...],
     metrics: dict[str, Any],
+    dataset: str,
 ) -> list[dict[str, Any]]:
     common = {
         "run_name": run.name,
         "run_label": run.label,
+        "dataset": dataset,
         "step": step,
         "reward_combination": "__".join(reward_names),
         "n_groups": metrics["n_groups"],
+        "reward_pair": "",
     }
     rows: list[dict[str, Any]] = []
     for reward_name, value in zip(
@@ -397,10 +411,23 @@ def _metric_rows(
                 "value": float(value),
             }
         )
+    covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
+    for first_index, first_name in enumerate(reward_names):
+        for second_index in range(first_index + 1, len(reward_names)):
+            rows.append(
+                {
+                    **common,
+                    "reward": "",
+                    "reward_pair": f"{first_name}__{reward_names[second_index]}",
+                    "metric": "standardized_reward_covariance",
+                    "value": float(covariance[first_index, second_index]),
+                }
+            )
     rows.append(
         {
             **common,
             "reward": "",
+            "reward_pair": "",
             "metric": "reward_concordance_lower_bound",
             "value": float(metrics["reward_concordance_lower_bound"]),
         }
@@ -408,14 +435,26 @@ def _metric_rows(
     return rows
 
 
+def _dataset_from_weight_source(weight_source: str) -> str:
+    """Extract the saved dataset/source label used to resolve reward weights."""
+    prefix = "saved_media_run_context:"
+    if weight_source.startswith(prefix):
+        source = weight_source[len(prefix) :].strip()
+        if source:
+            return source.replace(",", "+")
+    return "unknown_dataset"
+
+
 def _write_rows(rows: list[dict[str, Any]], path: Path) -> None:
     fields = (
         "run_name",
         "run_label",
+        "dataset",
         "step",
         "reward_combination",
         "n_groups",
         "reward",
+        "reward_pair",
         "metric",
         "value",
     )

@@ -41,15 +41,15 @@ def plot_per_reward_conflict_score_trajectories(
         smoothing_window: Positive odd number of adjacent recorded steps used
             for centered moving-average smoothing. ``1`` disables smoothing.
     """
-    by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_dataset_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row["metric"] != "per_reward_conflict_score":
             continue
         reward = str(row["reward"])
         if reward:
-            by_combination_reward[(str(row["reward_combination"]), reward)].append(row)
+            by_dataset_reward[(str(row.get("dataset", "unknown_dataset")), reward)].append(row)
 
-    for (combination, reward), reward_rows in by_combination_reward.items():
+    for (dataset, reward), reward_rows in by_dataset_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(reward_rows).items()):
             raw_steps, raw_values = _series(line_rows)
@@ -72,7 +72,7 @@ def plot_per_reward_conflict_score_trajectories(
                 zorder=2,
             )
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
-        axis.set_title(f"{reward} conflict score: {combination.replace('__', ' + ')}")
+        axis.set_title(f"{reward} conflict score [{dataset}]")
         axis.set_xlabel("Training step")
         axis.set_ylabel("Mean standardized conflict score")
         axis.grid(alpha=0.25)
@@ -80,7 +80,7 @@ def plot_per_reward_conflict_score_trajectories(
         figure.tight_layout()
         path = (
             Path(output_dir)
-            / combination
+            / _filename_component(dataset)
             / "per_reward_conflict_score"
             / f"{_filename_component(reward)}.{plot_format}"
         )
@@ -103,12 +103,12 @@ def plot_reward_concordance_lower_bound_trajectories(
         smoothing_window: Positive odd number of adjacent recorded steps used
             for centered moving-average smoothing. ``1`` disables smoothing.
     """
-    by_combination: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row["metric"] == "reward_concordance_lower_bound":
-            by_combination[str(row["reward_combination"])].append(row)
+            by_dataset[str(row.get("dataset", "unknown_dataset"))].append(row)
 
-    for combination, combination_rows in by_combination.items():
+    for dataset, combination_rows in by_dataset.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(combination_rows).items()):
             raw_steps, raw_values = _series(line_rows)
@@ -131,13 +131,87 @@ def plot_reward_concordance_lower_bound_trajectories(
                 zorder=2,
             )
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
-        axis.set_title(f"Reward-concordance lower bound: {combination.replace('__', ' + ')}")
+        axis.set_title(f"Reward-concordance lower bound [{dataset}]")
         axis.set_xlabel("Training step")
         axis.set_ylabel("Mean weakest standardized conflict score")
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8)
         figure.tight_layout()
-        path = Path(output_dir) / combination / f"reward_concordance_lower_bound.{plot_format}"
+        path = (
+            Path(output_dir)
+            / _filename_component(dataset)
+            / f"reward_concordance_lower_bound.{plot_format}"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
+def plot_standardized_reward_covariance_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one standardized reward-pair covariance trajectory per reward pair.
+
+    Each curve is a prompt-group macro-average at one recorded training step.
+    Every off-diagonal reward pair receives its own figure; all configured runs
+    are overlaid in that figure for direct step-by-step comparison.
+    """
+    by_dataset_combination_pair: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(
+        list
+    )
+    for row in rows:
+        if row["metric"] != "standardized_reward_covariance":
+            continue
+        pair = str(row.get("reward_pair", ""))
+        if pair:
+            by_dataset_combination_pair[
+                (
+                    str(row.get("dataset", "unknown_dataset")),
+                    str(row["reward_combination"]),
+                    pair,
+                )
+            ].append(row)
+
+    run_styles = ["-", "--", ":", "-."]
+    output_path = Path(output_dir) / "standardized_reward_covariance"
+    for (dataset, combination, pair), pair_rows in sorted(by_dataset_combination_pair.items()):
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for index, (label, line_rows) in enumerate(sorted(_group_by_run(pair_rows).items())):
+            raw_steps, raw_values = _series(line_rows)
+            linestyle = run_styles[index % len(run_styles)]
+            axis.plot(
+                raw_steps,
+                raw_values,
+                color=f"C{index % 10}",
+                alpha=0.18,
+                linewidth=0.9,
+                linestyle=linestyle,
+                label="_nolegend_",
+                zorder=1,
+            )
+            steps, values = _smoothed_series(line_rows, smoothing_window)
+            axis.plot(
+                steps,
+                values,
+                color=f"C{index % 10}",
+                linestyle=linestyle,
+                marker="o",
+                markersize=3,
+                label=label,
+                zorder=2,
+            )
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        axis.set_title(f"Standardized reward covariance: {pair.replace('__', ' + ')}")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Prompt-local standardized covariance")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+        figure.tight_layout()
+        filename = f"{_filename_component(pair)}.{plot_format}"
+        path = output_path / _filename_component(dataset) / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
         plt.close(figure)
@@ -150,15 +224,15 @@ def plot_per_reward_disagreement_trajectories(
     plot_format: str = "png",
 ) -> None:
     """Write one per-reward disagreement-rate trajectory figure for each reward."""
-    by_combination_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_dataset_reward: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row["metric"] != "per_reward_disagreement":
             continue
         reward = str(row["reward"])
         if reward:
-            by_combination_reward[(str(row["reward_combination"]), reward)].append(row)
+            by_dataset_reward[(str(row.get("dataset", "unknown_dataset")), reward)].append(row)
 
-    for (combination, reward), reward_rows in by_combination_reward.items():
+    for (dataset, reward), reward_rows in by_dataset_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
         for label, line_rows in sorted(_group_by_run(reward_rows).items()):
             raw_steps, raw_values = _series(line_rows)
@@ -181,7 +255,7 @@ def plot_per_reward_disagreement_trajectories(
                 zorder=2,
             )
         axis.set_ylim(0.0, 1.0)
-        axis.set_title(f"{reward} disagreement: {combination.replace('__', ' + ')}")
+        axis.set_title(f"{reward} disagreement [{dataset}]")
         axis.set_xlabel("Training step")
         axis.set_ylabel("Per-reward disagreement rate")
         axis.grid(alpha=0.25)
@@ -189,7 +263,7 @@ def plot_per_reward_disagreement_trajectories(
         figure.tight_layout()
         path = (
             Path(output_dir)
-            / combination
+            / _filename_component(dataset)
             / "per_reward_disagreement"
             / f"{_filename_component(reward)}.{plot_format}"
         )

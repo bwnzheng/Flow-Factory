@@ -93,18 +93,37 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 - `per_reward_disagreement` is the prompt-group fraction of samples whose
   centered reward direction opposes the weighted scalar direction for each
   active reward. Exact zero products are treated as non-conflicting.
+- `standardized_reward_covariance` is the prompt-local population covariance
+  between each pair of standardized rewards, macro-averaged over prompt groups
+  at each step. It is computed independently for each active reward combination;
+  SRC probabilities are not used.
 - `reward_concordance_lower_bound` is the prompt-group mean of each sample's
   weakest standardized conflict score. It is the sample-wise reward-concordance lower
   bound under the frozen uniform reference.
 
-The output directory also contains `metadata.json`,
-`per_reward_conflict_score/<reward>.png` for every active reward combination,
-`per_reward_disagreement/<reward>.png` for every active reward combination,
-and `reward_concordance_lower_bound.<plot_format>` for the overall lower-bound
-curve. Set `output.plot_format` to `png` (default) or `pdf` to choose the
+The output directory also contains `metadata.json`, followed by one directory
+per dataset:
+
+```text
+<dataset>/
+  per_reward_conflict_score/<reward>.png
+  per_reward_disagreement/<reward>.png
+  standardized_reward_covariance/<reward_pair>.png
+  reward_concordance_lower_bound.<plot_format>
+```
+
+The dataset directory is recovered from the saved run context source (for
+example, `pickscore` or `ocr`), so the fixed reward combination for each
+dataset is unambiguous. Runs without saved source provenance are placed under
+`unknown_dataset`. Set `output.plot_format` to `png` (default) or `pdf` to choose the
 format for all generated figures.
 When multiple runs are configured, every figure overlays their `run_label`
 trajectories. All runs use exactly the same raw-reward calculation.
+Each covariance figure contains only one reward pair and overlays all configured
+run trajectories. The reward combination is intentionally omitted from the
+filename and title because it is fixed by the dataset directory. The diagonal
+is omitted because covariance after per-group standardization is one by
+definition.
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
 the average uses the available in-range points. The original unsmoothed curve

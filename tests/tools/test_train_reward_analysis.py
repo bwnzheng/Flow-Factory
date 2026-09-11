@@ -38,6 +38,7 @@ from tools.train_reward_analysis.plots import (
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
+    plot_standardized_reward_covariance_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
@@ -50,6 +51,9 @@ def test_group_metrics_report_raw_conflict_scores_and_lower_bound() -> None:
 
     np.testing.assert_allclose(metrics["per_reward_conflict_score"], [1.0, -0.25])
     np.testing.assert_allclose(metrics["per_reward_disagreement"], [0.0, 2.0 / 3.0])
+    np.testing.assert_allclose(
+        metrics["standardized_reward_covariance"], [[1.0, -1.0], [-1.0, 1.0]]
+    )
     assert metrics["reward_concordance_lower_bound"] == pytest.approx(-0.25)
 
 
@@ -123,6 +127,7 @@ def test_analysis_uses_only_saved_rewards_not_saved_src_probabilities(tmp_path: 
     assert {row["metric"] for row in rows} == {
         "per_reward_conflict_score",
         "per_reward_disagreement",
+        "standardized_reward_covariance",
         "reward_concordance_lower_bound",
     }
     assert "n_effective_groups" not in metadata["runs"][0]
@@ -233,6 +238,7 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     rows = [
         {
             "run_label": "SRC-NFT",
+            "dataset": "pickscore",
             "step": step,
             "reward_combination": "clip_score__pick_score",
             "reward": reward,
@@ -245,6 +251,7 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     rows.extend(
         {
             "run_label": "SRC-NFT",
+            "dataset": "pickscore",
             "step": step,
             "reward_combination": "clip_score__pick_score",
             "reward": "",
@@ -256,6 +263,7 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     rows.extend(
         {
             "run_label": "SRC-NFT",
+            "dataset": "pickscore",
             "step": step,
             "reward_combination": "clip_score__pick_score",
             "reward": reward,
@@ -268,11 +276,27 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
 
     plot_per_reward_conflict_score_trajectories(rows, tmp_path)
     plot_per_reward_disagreement_trajectories(rows, tmp_path)
+    rows.extend(
+        {
+            "run_label": "SRC-NFT",
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": "",
+            "reward_pair": "clip_score__pick_score",
+            "metric": "standardized_reward_covariance",
+            "value": value,
+        }
+        for step, value in enumerate((0.2, 0.3))
+    )
+    plot_standardized_reward_covariance_trajectories(rows, tmp_path)
     plot_reward_concordance_lower_bound_trajectories(rows, tmp_path)
 
-    output_dir = tmp_path / "clip_score__pick_score"
+    output_dir = tmp_path / "pickscore"
     assert (output_dir / "per_reward_conflict_score" / "clip_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_conflict_score" / "pick_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_disagreement" / "clip_score.png").stat().st_size > 0
     assert (output_dir / "per_reward_disagreement" / "pick_score.png").stat().st_size > 0
+    covariance_dir = tmp_path / "standardized_reward_covariance"
+    assert (covariance_dir / "pickscore" / "clip_score__pick_score.png").stat().st_size > 0
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
