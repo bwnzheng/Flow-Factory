@@ -199,11 +199,11 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Related Constraint**: N/A
 
 ### Offline reward worker lacked the accelerator barrier contract
-- **Date**: 2026-08-27
-- **Symptom**: Standalone `tools.reward_evaluation` crashed while constructing UniReward with `AttributeError: '_AcceleratorView' object has no attribute 'wait_for_everyone'`.
-- **Root Cause**: The offline reward worker passed a minimal accelerator facade to reward models, but several model constructors unconditionally call `wait_for_everyone()` after loading their weights.
-- **Fix**: `tools/reward_evaluation/scoring.py:_AcceleratorView` now exposes a no-op `wait_for_everyone()` method because spawned offline workers are independent processes rather than members of one Accelerate process group. A regression test covers the compatibility contract.
-- **Lesson**: An offline model worker should expose every lifecycle method used by registered reward constructors, while collectives must remain explicit no-ops unless the workers share a real distributed process group.
+- **Date**: 2026-08-27 (recurred 2026-09-12 in `tools.reward_covariance_eval_analysis`)
+- **Symptom**: Standalone `tools.reward_evaluation` crashed while constructing UniReward with `AttributeError: '_AcceleratorView' object has no attribute 'wait_for_everyone'`. The same error later resurfaced in `tools.reward_covariance_eval_analysis` while constructing HPSv2, because that tool carries its own copy of the facade.
+- **Root Cause**: The offline reward worker passed a minimal accelerator facade to reward models, but several model constructors unconditionally call `wait_for_everyone()` after loading their weights. A second copy of the facade had been written without the barrier that the first copy had already gained.
+- **Fix**: `tools/reward_evaluation/scoring.py:_AcceleratorView` and `tools/reward_covariance_eval_analysis/reward_scoring.py:_AcceleratorView` both expose a no-op `wait_for_everyone()` method, because spawned offline workers are independent processes rather than members of one Accelerate process group. Regression tests cover the compatibility contract in both tools.
+- **Lesson**: An offline model worker should expose every lifecycle method used by registered reward constructors, while collectives must remain explicit no-ops unless the workers share a real distributed process group. Because this facade is duplicated per tool, a fix to one copy does not protect the others — whenever a registered reward constructor starts calling a new accelerator method, every copy must be updated.
 - **Related Constraint**: N/A
 
 ### Offline reward workers allowed automatic cross-device model placement

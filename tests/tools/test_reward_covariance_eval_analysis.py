@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from tools.reward_covariance_eval_analysis.analyze import (
     AnalysisConfig,
@@ -34,7 +35,11 @@ from tools.reward_covariance_eval_analysis.analyze import (
     load_config,
     load_prompt_records,
 )
-from tools.reward_covariance_eval_analysis.reward_scoring import _partition, _worker_device
+from tools.reward_covariance_eval_analysis.reward_scoring import (
+    _AcceleratorView,
+    _partition,
+    _worker_device,
+)
 
 
 def test_default_config_is_weight_free_and_uses_fresh_rollouts() -> None:
@@ -140,6 +145,13 @@ def test_partition_keeps_prompt_groups_on_one_worker() -> None:
     assert all(len(worker_ids) == 1 for worker_ids in owners.values())
     assert _worker_device("cuda", 1, 2) == "cuda:1"
     assert _worker_device("npu", 1, 2) == "npu:1"
+
+
+def test_offline_accelerator_view_provides_noop_barrier() -> None:
+    view = _AcceleratorView(device=torch.device("cuda:1"), local_process_index=1)
+    assert view.device == torch.device("cuda:1")
+    assert view.local_process_index == 1
+    assert view.wait_for_everyone() is None
 
 
 def test_generate_images_uses_configured_parallel_runner(
