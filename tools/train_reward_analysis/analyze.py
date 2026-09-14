@@ -183,11 +183,21 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
             if not run.src:
                 for item in sign_metrics:
+                    item.pop("weight_gt_1_adv_positive")
+                    item.pop("weight_gt_1_adv_negative")
                     item.pop("weight_lt_1_adv_positive")
                     item.pop("weight_lt_1_adv_negative")
             for metric_name in sign_metrics[0]:
+                if metric_name == "_counts":
+                    continue
                 values = np.mean([item[metric_name] for item in sign_metrics], axis=0)
                 aggregate[metric_name] = values
+            aggregate["_sign_counts"] = {
+                metric_name: np.mean(
+                    [item["_counts"][metric_name] for item in sign_metrics], axis=0
+                )
+                for metric_name in sign_metrics[0]["_counts"]
+            }
             groups_seen += len(groups)
             rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
 
@@ -451,7 +461,9 @@ def _metric_rows(
     for metric_name in ("weight_gt_1_adv_positive", "weight_gt_1_adv_negative", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "adv_positive", "adv_negative"):
         if metric_name in metrics:
             for reward_name, value in zip(reward_names, metrics[metric_name]):
-                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value)})
+                index = reward_names.index(reward_name)
+                counts = metrics.get("_sign_counts", {}).get(metric_name, ())
+                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value), "sample_count": float(counts[index]) if counts else float("nan")})
     covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
     for first_index, first_name in enumerate(reward_names):
         for second_index in range(first_index + 1, len(reward_names)):
@@ -496,6 +508,7 @@ def _write_rows(rows: list[dict[str, Any]], path: Path) -> None:
         "n_groups",
         "reward",
         "reward_pair",
+        "sample_count",
         "metric",
         "value",
     )

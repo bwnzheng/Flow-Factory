@@ -48,6 +48,7 @@ def compute_weighted_advantage_sign_metrics(
         "adv_negative": standardized < 0,
     }
     result = {}
+    counts = {}
     for name, mask in groups.items():
         result[name] = np.divide(
             np.where(mask, standardized, 0.0).sum(axis=0),
@@ -55,6 +56,8 @@ def compute_weighted_advantage_sign_metrics(
             out=np.full(matrix.shape[1], np.nan),
             where=mask.sum(axis=0) > 0,
         )
+        counts[name] = mask.sum(axis=0).astype(float)
+    result["_counts"] = counts
     return result
 
 

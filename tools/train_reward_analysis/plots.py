@@ -51,7 +51,7 @@ def plot_per_reward_conflict_score_trajectories(
 
     for (dataset, reward), reward_rows in by_dataset_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
-        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+        for run_index, (label, line_rows) in enumerate(sorted(_group_by_run(reward_rows).items())):
             raw_steps, raw_values = _series(line_rows)
             raw_line = axis.plot(
                 raw_steps,
@@ -290,8 +290,14 @@ def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoot
             for row in line_rows: by_metric[row["metric"]].append(row)
             for metric, legend in names.items():
                 if metric in by_metric:
-                    steps, values = _smoothed_series(by_metric[metric], smoothing_window)
-                    axis.plot(steps, values, marker="o", markersize=3, label=f"{label} | {legend}")
+                    metric_rows = sorted(by_metric[metric], key=lambda row: int(row["step"]))
+                    steps, values = _smoothed_series(metric_rows, smoothing_window)
+                    counts = np.asarray([float(row.get("sample_count", np.nan)) for row in metric_rows], dtype=float)
+                    size = np.clip(2.5 + 2.0 * np.sqrt(np.maximum(counts, 0.0)), 3.0, 12.0)
+                    style = ("-", "--", "-.", ":")[run_index % 4]
+                    width = 2.5 if metric.startswith("weight_gt_1") else 1.3
+                    line = axis.plot(steps, values, linestyle=style, linewidth=width, label=f"{label} | {legend}")[0]
+                    axis.scatter(steps, values, s=np.square(size), color=line.get_color(), alpha=0.85, zorder=3)
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_title(f"{reward} weighted advantage sign [{dataset}]")
         axis.set_xlabel("Training step")
