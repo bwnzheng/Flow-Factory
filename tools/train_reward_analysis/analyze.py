@@ -26,6 +26,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -150,21 +152,49 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
     """Analyze configured saved runs and return CSV rows plus audit metadata."""
     rows: list[dict[str, Any]] = []
     run_metadata: list[dict[str, Any]] = []
+    tasks = []
     for run in config.runs:
         run_dir = Path(config.save_dir) / run.name
         rewards_dir = run_dir / "logs" / "rewards"
         step_groups = load_train_reward_groups(rewards_dir)
         saved_weight_context = load_saved_reward_weight_context(run_dir)
-        groups_seen = 0
-        weight_sources: dict[str, str] = {}
-
-        by_step_combination: dict[tuple[int, tuple[str, ...]], list[RewardGroup]] = {}
         for step, groups in step_groups.items():
-            for group in groups:
-                key = (step, group.reward_names)
-                by_step_combination.setdefault(key, []).append(group)
+            tasks.append((run, step, groups, saved_weight_context, config.src_interpolation, config.src_temperature))
+        run_metadata.append({"run_name": run.name, "run_label": run.label, "reward_weights": run.reward_weights, "n_steps": len(step_groups)})
 
-        for (step, reward_names), groups in sorted(by_step_combination.items()):
+    workers = os.cpu_count() or 1
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(_analyze_run_step, tasks))
+    for result in results:
+        rows.extend(result["rows"])
+        for metadata in run_metadata:
+            if metadata["run_name"] == result["run_name"]:
+                metadata["n_groups"] = metadata.get("n_groups", 0) + result["n_groups"]
+                metadata.setdefault("reward_weight_sources", {}).update(result["weight_sources"])
+                break
+    metadata = {
+        "metric_version": 3,
+        "source": "saved_train_reward_pickles_and_optional_media_run_context",
+        "centering": "uniform_prompt_local_frozen_reward_mean",
+        "natural_aggregation": "macro_average_over_prompt_groups",
+        "plot_smoothing_window": config.smoothing_window,
+        "plot_format": config.plot_format,
+        "analysis_workers": workers,
+        "metrics": {"per_reward_conflict_score": "mean_standardized_weighted_reward_contribution", "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment", "standardized_reward_covariance": "prompt-local population covariance of standardized reward pairs", "reward_concordance_lower_bound": "mean_over_samples_of_the_minimum standardized reward contribution"},
+        "runs": run_metadata,
+    }
+    return rows, metadata
+
+
+def _analyze_run_step(task: tuple[Any, ...]) -> dict[str, Any]:
+    """Analyze one run and training step in a worker process."""
+    run, step, groups, saved_weight_context, interpolation, temperature = task
+    rows: list[dict[str, Any]] = []
+    by_combination: dict[tuple[str, ...], list[RewardGroup]] = {}
+    for group in groups:
+        by_combination.setdefault(group.reward_names, []).append(group)
+    weight_sources = {}
+    for reward_names, combination_groups in sorted(by_combination.items()):
             weights, weight_source = _weights_for_group(run, reward_names, saved_weight_context)
             weight_sources["__".join(reward_names)] = weight_source
             dataset = _dataset_from_weight_source(weight_source)
@@ -173,11 +203,11 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                     group.rewards,
                     weights,
                 )
-                for group in groups
+                for group in combination_groups
             ]
             aggregate = aggregate_group_metrics(metrics)
             sign_metrics = []
-            for group in groups:
+            for group in combination_groups:
                 sample_weights = (
                     compute_src_sample_weights(group.rewards, weights, config.src_interpolation, config.src_temperature)
                     if run.src_reweight else np.ones(group.rewards.shape[0])
@@ -218,40 +248,8 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
             }
             for metric_name, counts in aggregate["_sign_counts"].items():
                 aggregate[f"sample_count_{metric_name}"] = counts
-            groups_seen += len(groups)
             rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
-
-        run_metadata.append(
-            {
-                "run_name": run.name,
-                "run_label": run.label,
-                "reward_weights": run.reward_weights,
-                "reward_weight_sources": weight_sources,
-                "n_steps": len(step_groups),
-                "n_groups": groups_seen,
-            }
-        )
-
-    metadata = {
-        "metric_version": 3,
-        "source": "saved_train_reward_pickles_and_optional_media_run_context",
-        "centering": "uniform_prompt_local_frozen_reward_mean",
-        "natural_aggregation": "macro_average_over_prompt_groups",
-        "plot_smoothing_window": config.smoothing_window,
-        "plot_format": config.plot_format,
-        "metrics": {
-            "per_reward_conflict_score": "mean_standardized_weighted_reward_contribution",
-            "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
-            "standardized_reward_covariance": (
-                "prompt-local population covariance of standardized reward pairs"
-            ),
-            "reward_concordance_lower_bound": (
-                "mean_over_samples_of_the_minimum_standardized_reward_contribution"
-            ),
-        },
-        "runs": run_metadata,
-    }
-    return rows, metadata
+    return {"run_name": run.name, "rows": rows, "n_groups": len(groups), "weight_sources": weight_sources}
 
 
 def _parse_config(path: str | Path) -> AnalysisConfig:
