@@ -201,6 +201,10 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 for item in sign_metrics:
                     item.pop("adv_positive")
                     item.pop("adv_negative")
+                    item.pop("adv_zero")
+                    item["_counts"].pop("adv_positive")
+                    item["_counts"].pop("adv_negative")
+                    item["_counts"].pop("adv_zero")
             for metric_name in sign_metrics[0]:
                 if metric_name == "_counts":
                     continue
