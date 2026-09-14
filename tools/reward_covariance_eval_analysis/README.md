@@ -1,7 +1,8 @@
 # Fresh Reward Covariance Evaluation
 
 This tool evaluates prompt-local reward geometry on fresh images generated
-from saved LoRA checkpoints. It never reads training reward PKLs.
+from the base model and/or saved LoRA checkpoints. It never reads training
+reward PKLs.
 Prompt parsing is shared through `tools.utils` with the standalone reward
 evaluator; importing either tool does not load the other tool's CLI entrypoint.
 
@@ -36,6 +37,10 @@ prompt_metrics.jsonl
 plots/covariance_matrix.<plot_format>
 summary.json
 ```
+
+Runs may evaluate the base model directly by setting `base_model_only: true`
+instead of `checkpoint`. Base-model samples use `checkpoint_0/` and are marked
+as `base_model` in the manifest and JSON artifacts.
 
 `samples.jsonl` records every image path, prompt, seed, sample index, and reward
 vector. `prompt_metrics.jsonl` records the full reward matrix, unbiased sample

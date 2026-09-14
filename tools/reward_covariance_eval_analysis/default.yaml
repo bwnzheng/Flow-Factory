@@ -57,6 +57,8 @@ sources:
   #       reward_model: "GenEval"  # Use "geneval_ascend" on NPU.
 
 runs:
+  # For a pure base-model covariance evaluation, use base_model_only: true
+  # instead of checkpoint.
   - name: "example_run"
     checkpoint: "saves/example_run/checkpoints/checkpoint-60"
     label: "example"

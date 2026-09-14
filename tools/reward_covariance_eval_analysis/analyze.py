@@ -75,11 +75,12 @@ class SourceConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Configure one saved LoRA checkpoint."""
+    """Configure one saved LoRA checkpoint or the base model."""
 
     name: str
     label: str
-    checkpoint: str
+    checkpoint: Optional[str]
+    base_model_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,10 +206,14 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
     resolved_device = resolve_device(config.model.device)
     experiment_summaries: List[Dict[str, Any]] = []
     for run in config.runs:
-        checkpoint = Path(run.checkpoint)
-        if not checkpoint.is_dir():
-            raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint}")
-        step = _checkpoint_step(checkpoint)
+        if run.base_model_only:
+            step = 0
+        else:
+            assert run.checkpoint is not None
+            checkpoint = Path(run.checkpoint)
+            if not checkpoint.is_dir():
+                raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint}")
+            step = _checkpoint_step(checkpoint)
         for source in config.sources:
             prompt_records = load_prompt_records(
                 source.prompts_file, source.prompt_key, source.max_prompts
@@ -243,7 +248,7 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
             experiment_summaries.append(summary)
     metadata = {
         "schema_version": 1,
-        "source": "fresh_checkpoint_rollouts_and_reward_model_forward",
+        "source": "fresh_checkpoint_or_base_rollouts_and_reward_model_forward",
         "num_processes": config.model.num_processes,
         "experiments": experiment_summaries,
     }
@@ -309,7 +314,7 @@ def _write_analysis_artifacts(
             "run_name": run.name,
             "run_label": run.label,
             "checkpoint_step": step,
-            "checkpoint_path": run.checkpoint,
+            "checkpoint_path": run.checkpoint or "base_model",
             "source": source.name,
             "prompt_index": prompt_index,
             "prompt": row["prompt"],
@@ -358,6 +363,7 @@ def _write_analysis_artifacts(
         "run_name": run.name,
         "run_label": run.label,
         "checkpoint_step": step,
+        "checkpoint_path": run.checkpoint or "base_model",
         "source": source.name,
         "reward_names": reward_names,
         "n_prompts": len(prompt_metrics),
@@ -405,12 +411,25 @@ def _parse_source(value: Any, index: int) -> SourceConfig:
 def _parse_run(value: Any, index: int) -> RunConfig:
     if not isinstance(value, dict):
         raise ValueError(f"runs[{index}] must be a mapping.")
-    _reject_unknown(value, {"name", "label", "checkpoint"}, f"runs[{index}]")
+    _reject_unknown(value, {"name", "label", "checkpoint", "base_model_only"}, f"runs[{index}]")
     name = _nonempty_string(value.get("name"), f"runs[{index}].name")
+    checkpoint_value = value.get("checkpoint")
+    base_model_only = value.get("base_model_only", False)
+    if not isinstance(base_model_only, bool):
+        raise ValueError(f"runs[{index}].base_model_only must be a boolean.")
+    if bool(checkpoint_value) == base_model_only:
+        raise ValueError(
+            f"runs[{index}] must specify exactly one of checkpoint or base_model_only."
+        )
     return RunConfig(
         name=name,
         label=_nonempty_string(value.get("label", name), f"runs[{index}].label"),
-        checkpoint=_nonempty_string(value.get("checkpoint"), f"runs[{index}].checkpoint"),
+        checkpoint=(
+            _nonempty_string(checkpoint_value, f"runs[{index}].checkpoint")
+            if checkpoint_value
+            else None
+        ),
+        base_model_only=base_model_only,
     )
 
 

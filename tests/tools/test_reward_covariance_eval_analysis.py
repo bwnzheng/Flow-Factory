@@ -53,6 +53,51 @@ def test_default_config_is_weight_free_and_uses_fresh_rollouts() -> None:
     assert [source.max_prompts for source in config.sources] == [100, 100]
 
 
+def test_load_config_accepts_base_model_only_run(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        """
+model: {base_model: model}
+evaluation: {num_samples_per_prompt: 2}
+sources:
+  - name: test
+    prompts_file: prompts.txt
+    rewards:
+      - {name: a, reward_model: A}
+      - {name: b, reward_model: B}
+runs:
+  - {name: base, label: Base, base_model_only: true}
+output: {dir: output}
+""",
+        encoding="utf-8",
+    )
+    run = load_config(config_path).runs[0]
+    assert run.base_model_only is True
+    assert run.checkpoint is None
+
+
+def test_load_config_rejects_checkpoint_and_base_model_only_together(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        """
+model: {base_model: model}
+evaluation: {num_samples_per_prompt: 2}
+sources:
+  - name: test
+    prompts_file: prompts.txt
+    rewards:
+      - {name: a, reward_model: A}
+      - {name: b, reward_model: B}
+runs:
+  - {name: invalid, checkpoint: checkpoint-1, base_model_only: true}
+output: {dir: output}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        load_config(config_path)
+
+
 def test_load_prompt_records_respects_source_limit(tmp_path: Path) -> None:
     prompts_path = tmp_path / "prompts.txt"
     prompts_path.write_text("zero\none\ntwo\n", encoding="utf-8")
@@ -214,6 +259,60 @@ def test_generate_images_uses_configured_parallel_runner(
         "closed": True,
     }
     assert rows[0]["prompt"] == "prompt"
+
+
+def test_generate_images_passes_none_checkpoint_for_base_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, base_model, dtype, device):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_run_evaluation_set(**kwargs):
+        captured["checkpoints"] = kwargs["checkpoints"]
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True)
+        (output_dir / "manifest.jsonl").write_text(
+            json.dumps(
+                {
+                    "prompt_index": 0,
+                    "sample_index": 0,
+                    "seed": 42,
+                    "prompt": "prompt",
+                    "image_path": "checkpoint_0/p0_s0.png",
+                }
+            )
+            + "\n"
+        )
+
+    monkeypatch.setattr(
+        "tools.reward_covariance_eval_analysis.analyze.EvaluationRunner", FakeRunner
+    )
+    monkeypatch.setattr(
+        "tools.reward_covariance_eval_analysis.analyze.run_evaluation_set",
+        fake_run_evaluation_set,
+    )
+    config = AnalysisConfig(
+        model=ModelConfig("model", "bfloat16", "cpu", 1),
+        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
+        sources=[],
+        runs=[],
+        output_dir=str(tmp_path),
+    )
+    _generate_images(
+        config,
+        RunConfig("base", "Base", None, True),
+        0,
+        SourceConfig("source", "prompts.txt", "prompt", 0, []),
+        [PromptRecord("prompt", "{}")],
+        tmp_path / "images",
+    )
+    assert captured["checkpoints"] == [(0, None)]
 
 
 def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) -> None:
