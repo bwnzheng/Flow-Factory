@@ -63,7 +63,7 @@ class RunSpec:
     name: str
     label: str
     reward_weights: dict[str, float]
-    src: bool = False
+    src_reweight: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,10 +180,10 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
             for group in groups:
                 sample_weights = (
                     compute_src_sample_weights(group.rewards, weights, config.src_interpolation, config.src_temperature)
-                    if run.src else np.ones(group.rewards.shape[0])
+                    if run.src_reweight else np.ones(group.rewards.shape[0])
                 )
                 sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
-            if not run.src:
+            if not run.src_reweight:
                 for item in sign_metrics:
                     item.pop("weight_ge_1_adv_positive")
                     item.pop("weight_ge_1_adv_negative")
@@ -289,7 +289,7 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
                 name=name,
                 label=str(entry.get("label", name)),
                 reward_weights={**global_weights, **local_weights},
-                src=bool(entry.get("src", "src" in f"{name} {entry.get('label', '')}".lower())),
+                src_reweight=_parse_src_reweight(entry, name),
             )
         )
 
@@ -306,6 +306,18 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
         src_interpolation=float(raw.get("src_interpolation", 0.8)),
         src_temperature=float(raw.get("src_temperature", 0.5)),
     )
+
+
+def _parse_src_reweight(entry: dict[str, Any], run_name: str) -> bool:
+    """Resolve whether a run uses SRC-Reweight sample weighting."""
+    if "src_reweight" in entry:
+        return bool(entry["src_reweight"])
+    if "src" in entry:
+        return bool(entry["src"])
+    identity = f"{run_name} {entry.get('label', '')}".lower()
+    if "ga" in identity or "evolve" in identity:
+        return False
+    return "src" in identity
 
 
 def _validate_config(config: AnalysisConfig) -> None:

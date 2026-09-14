@@ -39,6 +39,9 @@ reward_weights:
   # ocr_reward: 1.0
 
 runs:
+  # Set true only for SRC-Reweight runs. GA, SRC-Evolve, and uniform runs
+  # should keep this false and are plotted without sample-weight groups.
+  # - src_reweight: true
   - name: "sd3-5_lora_nft_20260808_215750"
     label: "SRC-NFT"
 

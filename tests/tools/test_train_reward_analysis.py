@@ -127,9 +127,17 @@ def test_analysis_uses_only_saved_rewards_not_saved_src_probabilities(tmp_path: 
     assert {row["metric"] for row in rows} == {
         "per_reward_conflict_score",
         "per_reward_disagreement",
+        "per_reward_bottleneck_rate",
         "standardized_reward_covariance",
         "reward_concordance_lower_bound",
+        "adv_positive",
+        "adv_negative",
+        "adv_zero",
+        "sample_count_adv_positive",
+        "sample_count_adv_negative",
+        "sample_count_adv_zero",
     }
+    assert not any("weight_" in row["metric"] for row in rows)
     assert "n_effective_groups" not in metadata["runs"][0]
 
 
