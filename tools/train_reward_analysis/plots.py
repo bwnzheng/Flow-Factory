@@ -293,7 +293,7 @@ def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoot
                     metric_rows = sorted(by_metric[metric], key=lambda row: int(row["step"]))
                     steps, values = _smoothed_series(metric_rows, smoothing_window)
                     counts = np.asarray([float(row.get("sample_count", np.nan)) for row in metric_rows], dtype=float)
-                    size = np.clip(2.5 + 2.0 * np.sqrt(np.maximum(counts, 0.0)), 3.0, 12.0)
+                    size = np.clip(1.5 + 0.8 * np.sqrt(np.maximum(counts, 0.0)), 2.0, 6.0)
                     style = ("-", "--", "-.", ":")[run_index % 4]
                     width = 2.5 if metric.startswith("weight_gt_1") else 1.3
                     line = axis.plot(steps, values, linestyle=style, linewidth=width, label=f"{label} | {legend}")[0]
