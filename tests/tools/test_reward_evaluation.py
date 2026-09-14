@@ -35,7 +35,7 @@ from flow_factory.rewards.vision_reward import (
     _TorchRotaryEmbedding,
     compose_vision_reward_score,
 )
-from tools.reward_covariance_eval_analysis.analyze import PromptRecord
+from tools.utils import PromptRecord
 from tools.reward_evaluation import scoring as scoring_module
 from tools.reward_evaluation.evaluate import (
     EvaluationConfig,

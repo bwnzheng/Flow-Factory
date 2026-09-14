@@ -3,7 +3,9 @@
 This tool generates fresh images from one or more saved checkpoints with the
 shared `tools.model_inference` implementation, then evaluates each image with
 the reward models named in the Flow-Factory reward registry. It is independent
-of training logs and can be resumed after an interruption.
+of training logs and can be resumed after an interruption. Prompt parsing is
+provided by the shared `tools.utils` module, so this evaluator does not import
+the covariance-analysis CLI or its plotting/metrics stack.
 
 Run it with:
 

@@ -38,6 +38,7 @@ from tools.reward_covariance_eval_analysis.metrics import (
 )
 from tools.reward_covariance_eval_analysis.plots import plot_covariance_matrix
 from tools.reward_covariance_eval_analysis.reward_scoring import score_reward
+from tools.utils import PromptRecord, load_prompt_records
 
 
 @dataclass(frozen=True)
@@ -91,14 +92,6 @@ class AnalysisConfig:
     runs: List[RunConfig]
     output_dir: str
     plot_format: str = "png"
-
-
-@dataclass(frozen=True)
-class PromptRecord:
-    """Store one prompt and its JSON-encoded reward metadata."""
-
-    prompt: str
-    metadata: str
 
 
 def load_config(path: Union[str, Path]) -> AnalysisConfig:
@@ -256,48 +249,6 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
     }
     _write_json(output_root / "summary.json", metadata)
     return metadata
-
-
-def load_prompt_records(
-    path: Union[str, Path], prompt_key: str = "prompt", max_prompts: int = 0
-) -> List[PromptRecord]:
-    """Load text or JSONL prompts while preserving reward metadata.
-
-    Args:
-        path: Text or JSONL evaluation-set path.
-        prompt_key: JSONL field containing the generation prompt.
-        max_prompts: Maximum records to keep; zero keeps every record.
-
-    Returns:
-        Ordered prompt and metadata records.
-    """
-    source_path = Path(path)
-    if not source_path.is_file():
-        raise FileNotFoundError(f"Prompt file does not exist: {source_path}")
-    records: List[PromptRecord] = []
-    for line_number, line in enumerate(
-        source_path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        line = line.strip()
-        if not line:
-            continue
-        if source_path.suffix.lower() == ".jsonl":
-            value = json.loads(line)
-            prompt = value.get(prompt_key) if isinstance(value, dict) else None
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError(
-                    f"Missing non-empty {prompt_key!r} at {source_path}:{line_number}."
-                )
-            records.append(
-                PromptRecord(prompt=prompt.strip(), metadata=json.dumps(value, ensure_ascii=False))
-            )
-        else:
-            records.append(PromptRecord(prompt=line, metadata="{}"))
-        if max_prompts and len(records) >= max_prompts:
-            break
-    if not records:
-        raise ValueError(f"Prompt file contains no prompts: {source_path}")
-    return records
 
 
 def _generate_images(

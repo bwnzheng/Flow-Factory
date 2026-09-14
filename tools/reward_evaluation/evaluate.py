@@ -36,7 +36,7 @@ from tools.model_inference import (
     run_evaluation_set,
 )
 from tools.model_inference.model_types import validate_model_type
-from tools.reward_covariance_eval_analysis.analyze import PromptRecord, load_prompt_records
+from tools.utils import PromptRecord, load_prompt_records
 from tools.reward_evaluation.scoring import score_reward
 
 

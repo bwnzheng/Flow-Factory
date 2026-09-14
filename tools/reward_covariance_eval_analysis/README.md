@@ -2,6 +2,8 @@
 
 This tool evaluates prompt-local reward geometry on fresh images generated
 from saved LoRA checkpoints. It never reads training reward PKLs.
+Prompt parsing is shared through `tools.utils` with the standalone reward
+evaluator; importing either tool does not load the other tool's CLI entrypoint.
 
 ```bash
 python -m tools.reward_covariance_eval_analysis.analyze \
