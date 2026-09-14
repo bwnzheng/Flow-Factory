@@ -238,7 +238,7 @@ def plot_per_reward_disagreement_trajectories(
 
     for (dataset, reward), reward_rows in by_dataset_reward.items():
         figure, axis = plt.subplots(figsize=(8, 4.5))
-        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+        for run_index, (label, line_rows) in enumerate(sorted(_group_by_run(reward_rows).items())):
             raw_steps, raw_values = _series(line_rows)
             raw_line = axis.plot(
                 raw_steps,
@@ -285,7 +285,7 @@ def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoot
             grouped[(str(row.get("dataset", "unknown_dataset")), str(row["reward"]))].append(row)
     for (dataset, reward), reward_rows in grouped.items():
         figure, axis = plt.subplots(figsize=(9, 5))
-        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+        for run_index, (label, line_rows) in enumerate(sorted(_group_by_run(reward_rows).items())):
             by_metric = defaultdict(list)
             for row in line_rows: by_metric[row["metric"]].append(row)
             for metric, legend in names.items():

@@ -187,6 +187,10 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                     item.pop("weight_gt_1_adv_negative")
                     item.pop("weight_lt_1_adv_positive")
                     item.pop("weight_lt_1_adv_negative")
+            else:
+                for item in sign_metrics:
+                    item.pop("adv_positive")
+                    item.pop("adv_negative")
             for metric_name in sign_metrics[0]:
                 if metric_name == "_counts":
                     continue
@@ -463,7 +467,7 @@ def _metric_rows(
             for reward_name, value in zip(reward_names, metrics[metric_name]):
                 index = reward_names.index(reward_name)
                 counts = metrics.get("_sign_counts", {}).get(metric_name, ())
-                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value), "sample_count": float(counts[index]) if counts else float("nan")})
+                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value), "sample_count": float(counts[index]) if len(counts) else float("nan")})
     covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
     for first_index, first_name in enumerate(reward_names):
         for second_index in range(first_index + 1, len(reward_names)):
