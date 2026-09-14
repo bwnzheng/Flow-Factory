@@ -308,6 +308,31 @@ def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoot
         path.parent.mkdir(parents=True, exist_ok=True); figure.savefig(path, dpi=180); plt.close(figure)
 
 
+def plot_per_reward_weighted_advantage_count_trajectories(rows, output_dir, smoothing_window=5, plot_format="png"):
+    """Plot average sample counts split by sample-weight and advantage sign."""
+    names = {"sample_count_weight_ge_1_adv_positive":"weight≥1, adv>0", "sample_count_weight_ge_1_adv_negative":"weight≥1, adv<0", "sample_count_weight_ge_1_adv_zero":"weight≥1, adv=0", "sample_count_weight_lt_1_adv_positive":"weight<1, adv>0", "sample_count_weight_lt_1_adv_negative":"weight<1, adv<0", "sample_count_weight_lt_1_adv_zero":"weight<1, adv=0", "sample_count_adv_positive":"adv>0", "sample_count_adv_negative":"adv<0", "sample_count_adv_zero":"adv=0"}
+    grouped = defaultdict(list)
+    for row in rows:
+        if row["metric"] in names and row.get("reward"):
+            grouped[(str(row.get("dataset", "unknown_dataset")), str(row["reward"]))].append(row)
+    for (dataset, reward), reward_rows in grouped.items():
+        figure, axis = plt.subplots(figsize=(9, 5))
+        for run_index, (label, line_rows) in enumerate(sorted(_group_by_run(reward_rows).items())):
+            by_metric = defaultdict(list)
+            for row in line_rows: by_metric[row["metric"]].append(row)
+            for metric, legend in names.items():
+                if metric in by_metric:
+                    steps, values = _smoothed_series(by_metric[metric], smoothing_window)
+                    style = ("-", "--", "-.", ":")[run_index % 4]
+                    width = 2.5 if "weight_ge_1" in metric else 1.3
+                    axis.plot(steps, values, linestyle=style, linewidth=width, marker="o", markersize=2.5, label=f"{label} | {legend}")
+        axis.set_title(f"{reward} weighted advantage sample count [{dataset}]")
+        axis.set_xlabel("Training step"); axis.set_ylabel("Mean sample count per group"); axis.grid(alpha=0.25)
+        axis.legend(fontsize=7, loc="best"); figure.tight_layout()
+        path = Path(output_dir) / _filename_component(dataset) / "per_reward_weighted_advantage_count" / f"{_filename_component(reward)}.{plot_format}"
+        path.parent.mkdir(parents=True, exist_ok=True); figure.savefig(path, dpi=180); plt.close(figure)
+
+
 def plot_per_reward_bottleneck_rate_trajectories(
     rows: Iterable[dict[str, Any]],
     output_dir: str | Path,

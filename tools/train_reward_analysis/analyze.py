@@ -44,6 +44,7 @@ from tools.train_reward_analysis.plots import (
     plot_per_reward_disagreement_trajectories,
     plot_per_reward_bottleneck_rate_trajectories,
     plot_per_reward_weighted_advantage_sign_trajectories,
+    plot_per_reward_weighted_advantage_count_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
     plot_standardized_reward_covariance_trajectories,
 )
@@ -126,6 +127,7 @@ def main() -> None:
         rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
     )
     plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
+    plot_per_reward_weighted_advantage_count_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
     plot_standardized_reward_covariance_trajectories(
         rows,
         output_dir,
@@ -187,6 +189,8 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                     item.pop("weight_ge_1_adv_negative")
                     item.pop("weight_lt_1_adv_positive")
                     item.pop("weight_lt_1_adv_negative")
+                    item.pop("weight_ge_1_adv_zero")
+                    item.pop("weight_lt_1_adv_zero")
             else:
                 for item in sign_metrics:
                     item.pop("adv_positive")
@@ -202,6 +206,8 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 )
                 for metric_name in sign_metrics[0]["_counts"]
             }
+            for metric_name, counts in aggregate["_sign_counts"].items():
+                aggregate[f"sample_count_{metric_name}"] = counts
             groups_seen += len(groups)
             rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
 
@@ -462,12 +468,16 @@ def _metric_rows(
                 "value": float(value),
             }
         )
-    for metric_name in ("weight_ge_1_adv_positive", "weight_ge_1_adv_negative", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "adv_positive", "adv_negative"):
+    for metric_name in ("weight_ge_1_adv_positive", "weight_ge_1_adv_negative", "weight_ge_1_adv_zero", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "weight_lt_1_adv_zero", "adv_positive", "adv_negative", "adv_zero"):
         if metric_name in metrics:
             for reward_name, value in zip(reward_names, metrics[metric_name]):
                 index = reward_names.index(reward_name)
                 counts = metrics.get("_sign_counts", {}).get(metric_name, ())
                 rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value), "sample_count": float(counts[index]) if len(counts) else float("nan")})
+    for metric_name in ("sample_count_weight_ge_1_adv_positive", "sample_count_weight_ge_1_adv_negative", "sample_count_weight_ge_1_adv_zero", "sample_count_weight_lt_1_adv_positive", "sample_count_weight_lt_1_adv_negative", "sample_count_weight_lt_1_adv_zero", "sample_count_adv_positive", "sample_count_adv_negative", "sample_count_adv_zero"):
+        if metric_name in metrics:
+            for reward_name, value in zip(reward_names, metrics[metric_name]):
+                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value)})
     covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
     for first_index, first_name in enumerate(reward_names):
         for second_index in range(first_index + 1, len(reward_names)):

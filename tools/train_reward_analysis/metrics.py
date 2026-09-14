@@ -44,8 +44,11 @@ def compute_weighted_advantage_sign_metrics(
         "weight_ge_1_adv_negative": (sample_weights >= 1.0)[:, None] & (standardized < 0),
         "weight_lt_1_adv_positive": (sample_weights < 1.0)[:, None] & (standardized > 0),
         "weight_lt_1_adv_negative": (sample_weights < 1.0)[:, None] & (standardized < 0),
+        "weight_ge_1_adv_zero": (sample_weights >= 1.0)[:, None] & (standardized == 0),
+        "weight_lt_1_adv_zero": (sample_weights < 1.0)[:, None] & (standardized == 0),
         "adv_positive": standardized > 0,
         "adv_negative": standardized < 0,
+        "adv_zero": standardized == 0,
     }
     result = {}
     counts = {}
