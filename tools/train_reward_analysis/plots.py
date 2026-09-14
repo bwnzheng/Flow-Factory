@@ -276,6 +276,64 @@ def plot_per_reward_disagreement_trajectories(
         plt.close(figure)
 
 
+def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoothing_window=5, plot_format="png"):
+    """Plot standardized advantage means split by sample weight and sign."""
+    names = {"weight_gt_1_adv_positive":"weight>1, adv>0", "weight_gt_1_adv_negative":"weight>1, adv<0", "weight_lt_1_adv_positive":"weight<1, adv>0", "weight_lt_1_adv_negative":"weight<1, adv<0", "adv_positive":"adv>0", "adv_negative":"adv<0"}
+    grouped = defaultdict(list)
+    for row in rows:
+        if row["metric"] in names and row.get("reward"):
+            grouped[(str(row.get("dataset", "unknown_dataset")), str(row["reward"]))].append(row)
+    for (dataset, reward), reward_rows in grouped.items():
+        figure, axis = plt.subplots(figsize=(9, 5))
+        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+            by_metric = defaultdict(list)
+            for row in line_rows: by_metric[row["metric"]].append(row)
+            for metric, legend in names.items():
+                if metric in by_metric:
+                    steps, values = _smoothed_series(by_metric[metric], smoothing_window)
+                    axis.plot(steps, values, marker="o", markersize=3, label=f"{label} | {legend}")
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        axis.set_title(f"{reward} weighted advantage sign [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Mean standardized advantage")
+        axis.grid(alpha=0.25); axis.legend(fontsize=7, loc="best")
+        figure.tight_layout()
+        path = Path(output_dir) / _filename_component(dataset) / "per_reward_weighted_advantage_sign" / f"{_filename_component(reward)}.{plot_format}"
+        path.parent.mkdir(parents=True, exist_ok=True); figure.savefig(path, dpi=180); plt.close(figure)
+
+
+def plot_per_reward_bottleneck_rate_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one per-reward bottleneck-rate trajectory figure for each reward."""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["metric"] == "per_reward_bottleneck_rate" and row.get("reward"):
+            grouped[(str(row.get("dataset", "unknown_dataset")), str(row["reward"]))].append(row)
+    for (dataset, reward), reward_rows in grouped.items():
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for label, line_rows in sorted(_group_by_run(reward_rows).items()):
+            raw_steps, raw_values = _series(line_rows)
+            raw_line = axis.plot(raw_steps, raw_values, alpha=0.22, linewidth=1.0, label="_nolegend_")[0]
+            steps, values = _smoothed_series(line_rows, smoothing_window)
+            axis.plot(steps, values, color=raw_line.get_color(), marker="o", markersize=3, label=label)
+        axis.set_ylim(0.0, 1.0)
+        axis.set_title(f"{reward} bottleneck rate [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Per-reward bottleneck rate")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8, loc="upper right", bbox_to_anchor=(1.0, 0.90))
+        figure.tight_layout()
+        path = Path(output_dir) / _filename_component(dataset) / "per_reward_bottleneck_rate" / f"{_filename_component(reward)}.{plot_format}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+        plt.close(figure)
+
+
 def _group_by_run(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

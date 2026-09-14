@@ -27,6 +27,57 @@ from typing import Any, Sequence
 import numpy as np
 
 
+def compute_weighted_advantage_sign_metrics(
+    rewards: np.ndarray,
+    reward_weights: np.ndarray,
+    sample_weights: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Summarize standardized advantages by sample-weight and sign groups."""
+    matrix = _validate_rewards(rewards)
+    weights = _validate_reward_weights(reward_weights, matrix.shape[1])
+    sample_weights = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
+    if sample_weights.shape != (matrix.shape[0],):
+        raise ValueError("sample_weights must match the reward group size.")
+    standardized = _standardize_centered(matrix, axis=0)
+    groups = {
+        "weight_gt_1_adv_positive": (sample_weights > 1.0)[:, None] & (standardized > 0),
+        "weight_gt_1_adv_negative": (sample_weights > 1.0)[:, None] & (standardized < 0),
+        "weight_lt_1_adv_positive": (sample_weights < 1.0)[:, None] & (standardized > 0),
+        "weight_lt_1_adv_negative": (sample_weights < 1.0)[:, None] & (standardized < 0),
+        "adv_positive": standardized > 0,
+        "adv_negative": standardized < 0,
+    }
+    result = {}
+    for name, mask in groups.items():
+        result[name] = np.divide(
+            np.where(mask, standardized, 0.0).sum(axis=0),
+            mask.sum(axis=0),
+            out=np.full(matrix.shape[1], np.nan),
+            where=mask.sum(axis=0) > 0,
+        )
+    return result
+
+
+def compute_src_sample_weights(
+    rewards: np.ndarray, reward_weights: np.ndarray, interpolation: float = 0.8, temperature: float = 0.5
+) -> np.ndarray:
+    """Reconstruct SRC sample weights for one prompt group."""
+    matrix = _validate_rewards(rewards)
+    weights = _validate_reward_weights(reward_weights, matrix.shape[1])
+    if not 0.0 <= interpolation < 1.0 or temperature <= 0.0:
+        raise ValueError("interpolation must be in [0, 1) and temperature must be positive.")
+    z = _standardize_centered(matrix, axis=0)
+    scalar = matrix @ weights
+    scalar_z = _standardize_centered(scalar, axis=0)
+    scores = (weights[None, :] * z * scalar_z[:, None]).min(axis=1)
+    logits = scores / temperature
+    logits -= np.max(logits)
+    probs = np.exp(logits)
+    probs /= probs.sum()
+    probs = (1.0 - interpolation) / matrix.shape[0] + interpolation * probs
+    return matrix.shape[0] * probs
+
+
 def compute_reward_concordance_metrics(
     rewards: np.ndarray,
     reward_weights: np.ndarray,
@@ -50,12 +101,15 @@ def compute_reward_concordance_metrics(
     scalar_advantages = _standardize_centered(scalar_rewards, axis=0)
     conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
     disagreement = (centered_rewards * scalar_advantages[:, None] < 0.0).mean(axis=0)
+    bottleneck = np.argmin(conflict_scores, axis=1)
+    bottleneck_rate = np.bincount(bottleneck, minlength=n_rewards) / group_size
     standardized_covariance = centered_rewards.T @ centered_rewards / group_size
 
     return {
         "group_size": group_size,
         "per_reward_conflict_score": conflict_scores.mean(axis=0),
         "per_reward_disagreement": disagreement,
+        "per_reward_bottleneck_rate": bottleneck_rate,
         "standardized_reward_covariance": standardized_covariance,
         "reward_concordance_lower_bound": float(conflict_scores.min(axis=1).mean()),
     }
@@ -90,6 +144,9 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         ),
         "per_reward_disagreement": np.mean(
             [metrics["per_reward_disagreement"] for metrics in group_metrics], axis=0
+        ),
+        "per_reward_bottleneck_rate": np.mean(
+            [metrics["per_reward_bottleneck_rate"] for metrics in group_metrics], axis=0
         ),
         "standardized_reward_covariance": np.mean(
             [metrics["standardized_reward_covariance"] for metrics in group_metrics], axis=0

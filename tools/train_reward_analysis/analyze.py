@@ -36,10 +36,14 @@ import yaml
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
+    compute_src_sample_weights,
+    compute_weighted_advantage_sign_metrics,
 )
 from tools.train_reward_analysis.plots import (
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
+    plot_per_reward_bottleneck_rate_trajectories,
+    plot_per_reward_weighted_advantage_sign_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
     plot_standardized_reward_covariance_trajectories,
 )
@@ -58,6 +62,7 @@ class RunSpec:
     name: str
     label: str
     reward_weights: dict[str, float]
+    src: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,8 @@ class AnalysisConfig:
     output_dir: str = "analysis_output/train_reward_analysis"
     plot_format: str = "png"
     cache_mode: str = "regenerate"
+    src_interpolation: float = 0.8
+    src_temperature: float = 0.5
 
 
 def main() -> None:
@@ -115,6 +122,10 @@ def main() -> None:
         smoothing_window=config.smoothing_window,
         plot_format=config.plot_format,
     )
+    plot_per_reward_bottleneck_rate_trajectories(
+        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
+    )
+    plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
     plot_standardized_reward_covariance_trajectories(
         rows,
         output_dir,
@@ -163,6 +174,20 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 for group in groups
             ]
             aggregate = aggregate_group_metrics(metrics)
+            sign_metrics = []
+            for group in groups:
+                sample_weights = (
+                    compute_src_sample_weights(group.rewards, weights, config.src_interpolation, config.src_temperature)
+                    if run.src else np.ones(group.rewards.shape[0])
+                )
+                sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
+            if not run.src:
+                for item in sign_metrics:
+                    item.pop("weight_lt_1_adv_positive")
+                    item.pop("weight_lt_1_adv_negative")
+            for metric_name in sign_metrics[0]:
+                values = np.mean([item[metric_name] for item in sign_metrics], axis=0)
+                aggregate[metric_name] = values
             groups_seen += len(groups)
             rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
 
@@ -238,6 +263,7 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
                 name=name,
                 label=str(entry.get("label", name)),
                 reward_weights={**global_weights, **local_weights},
+                src=bool(entry.get("src", "src" in f"{name} {entry.get('label', '')}".lower())),
             )
         )
 
@@ -251,6 +277,8 @@ def _parse_config(path: str | Path) -> AnalysisConfig:
         output_dir=str(output.get("dir", "analysis_output/train_reward_analysis")),
         plot_format=_parse_plot_format(output.get("plot_format", "png")),
         cache_mode=_parse_cache_mode(output.get("cache_mode", "regenerate")),
+        src_interpolation=float(raw.get("src_interpolation", 0.8)),
+        src_temperature=float(raw.get("src_temperature", 0.5)),
     )
 
 
@@ -411,6 +439,19 @@ def _metric_rows(
                 "value": float(value),
             }
         )
+    for reward_name, value in zip(reward_names, metrics["per_reward_bottleneck_rate"]):
+        rows.append(
+            {
+                **common,
+                "reward": reward_name,
+                "metric": "per_reward_bottleneck_rate",
+                "value": float(value),
+            }
+        )
+    for metric_name in ("weight_gt_1_adv_positive", "weight_gt_1_adv_negative", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "adv_positive", "adv_negative"):
+        if metric_name in metrics:
+            for reward_name, value in zip(reward_names, metrics[metric_name]):
+                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value)})
     covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
     for first_index, first_name in enumerate(reward_names):
         for second_index in range(first_index + 1, len(reward_names)):

@@ -78,6 +78,7 @@ scalar_advantage[i] = (sum_k(w[k] * r[i, k]) - mean_i(sum_k(w[k] * r[i, k]))) / 
 conflict_score[i, k] = w[k] * reward_advantage[i, k] * scalar_advantage[i]
 sample_lower_bound[i] = min_k(conflict_score[i, k])
 per_reward_disagreement[k] = mean_i(reward_advantage[i, k] * scalar_advantage[i] < 0)
+per_reward_bottleneck_rate[k] = mean_i(argmin_j conflict_score[i, j] == k)
 ```
 
 Positive conflict scores mean the named reward supports the scalar training
@@ -93,6 +94,8 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 - `per_reward_disagreement` is the prompt-group fraction of samples whose
   centered reward direction opposes the weighted scalar direction for each
   active reward. Exact zero products are treated as non-conflicting.
+- `per_reward_bottleneck_rate` is the prompt-group fraction of samples for
+  which each reward has the minimum weighted standardized contribution.
 - `standardized_reward_covariance` is the prompt-local population covariance
   between each pair of standardized rewards, macro-averaged over prompt groups
   at each step. It is computed independently for each active reward combination;
@@ -108,6 +111,7 @@ per dataset:
 <dataset>/
   per_reward_conflict_score/<reward>.png
   per_reward_disagreement/<reward>.png
+  per_reward_bottleneck_rate/<reward>.png
   standardized_reward_covariance/<reward_pair>.png
   reward_concordance_lower_bound.<plot_format>
 ```
