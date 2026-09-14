@@ -278,7 +278,7 @@ def plot_per_reward_disagreement_trajectories(
 
 def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoothing_window=5, plot_format="png"):
     """Plot standardized advantage means split by sample weight and sign."""
-    names = {"weight_gt_1_adv_positive":"weight>1, adv>0", "weight_gt_1_adv_negative":"weight>1, adv<0", "weight_lt_1_adv_positive":"weight<1, adv>0", "weight_lt_1_adv_negative":"weight<1, adv<0", "adv_positive":"adv>0", "adv_negative":"adv<0"}
+    names = {"weight_ge_1_adv_positive":"weight≥1, adv>0", "weight_ge_1_adv_negative":"weight≥1, adv<0", "weight_lt_1_adv_positive":"weight<1, adv>0", "weight_lt_1_adv_negative":"weight<1, adv<0", "adv_positive":"adv>0", "adv_negative":"adv<0"}
     grouped = defaultdict(list)
     for row in rows:
         if row["metric"] in names and row.get("reward"):
@@ -295,7 +295,7 @@ def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoot
                     counts = np.asarray([float(row.get("sample_count", np.nan)) for row in metric_rows], dtype=float)
                     size = np.clip(1.5 + 0.8 * np.sqrt(np.maximum(counts, 0.0)), 2.0, 6.0)
                     style = ("-", "--", "-.", ":")[run_index % 4]
-                    width = 2.5 if metric.startswith("weight_gt_1") else 1.3
+                    width = 2.5 if metric.startswith("weight_ge_1") else 1.3
                     line = axis.plot(steps, values, linestyle=style, linewidth=width, label=f"{label} | {legend}")[0]
                     axis.scatter(steps, values, s=np.square(size), color=line.get_color(), alpha=0.85, zorder=3)
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)

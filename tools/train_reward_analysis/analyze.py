@@ -183,8 +183,8 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
             if not run.src:
                 for item in sign_metrics:
-                    item.pop("weight_gt_1_adv_positive")
-                    item.pop("weight_gt_1_adv_negative")
+                    item.pop("weight_ge_1_adv_positive")
+                    item.pop("weight_ge_1_adv_negative")
                     item.pop("weight_lt_1_adv_positive")
                     item.pop("weight_lt_1_adv_negative")
             else:
@@ -462,7 +462,7 @@ def _metric_rows(
                 "value": float(value),
             }
         )
-    for metric_name in ("weight_gt_1_adv_positive", "weight_gt_1_adv_negative", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "adv_positive", "adv_negative"):
+    for metric_name in ("weight_ge_1_adv_positive", "weight_ge_1_adv_negative", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "adv_positive", "adv_negative"):
         if metric_name in metrics:
             for reward_name, value in zip(reward_names, metrics[metric_name]):
                 index = reward_names.index(reward_name)

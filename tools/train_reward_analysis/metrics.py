@@ -40,8 +40,8 @@ def compute_weighted_advantage_sign_metrics(
         raise ValueError("sample_weights must match the reward group size.")
     standardized = _standardize_centered(matrix, axis=0)
     groups = {
-        "weight_gt_1_adv_positive": (sample_weights > 1.0)[:, None] & (standardized > 0),
-        "weight_gt_1_adv_negative": (sample_weights > 1.0)[:, None] & (standardized < 0),
+        "weight_ge_1_adv_positive": (sample_weights >= 1.0)[:, None] & (standardized > 0),
+        "weight_ge_1_adv_negative": (sample_weights >= 1.0)[:, None] & (standardized < 0),
         "weight_lt_1_adv_positive": (sample_weights < 1.0)[:, None] & (standardized > 0),
         "weight_lt_1_adv_negative": (sample_weights < 1.0)[:, None] & (standardized < 0),
         "adv_positive": standardized > 0,
