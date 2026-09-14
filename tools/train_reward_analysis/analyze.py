@@ -191,6 +191,12 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                     item.pop("weight_lt_1_adv_negative")
                     item.pop("weight_ge_1_adv_zero")
                     item.pop("weight_lt_1_adv_zero")
+                    item["_counts"].pop("weight_ge_1_adv_positive")
+                    item["_counts"].pop("weight_ge_1_adv_negative")
+                    item["_counts"].pop("weight_ge_1_adv_zero")
+                    item["_counts"].pop("weight_lt_1_adv_positive")
+                    item["_counts"].pop("weight_lt_1_adv_negative")
+                    item["_counts"].pop("weight_lt_1_adv_zero")
             else:
                 for item in sign_metrics:
                     item.pop("adv_positive")
