@@ -430,6 +430,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
     comparison_names = section.get("comparison_runs", [])
     if reference_name not in {run.name for run in config.runs}:
         raise ValueError(f"jsr.reference_run does not match any configured run: {reference_name}")
+    all_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for source in config.sources:
         by_name: Dict[str, List[Dict[str, Any]]] = {}
         for run_name in [reference_name, *comparison_names]:
@@ -441,6 +442,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
                 for line in sample_path.read_text(encoding="utf-8").splitlines()
                 if line
             ]
+        all_rows[source.name] = by_name
         rewards = [str(item["name"]) for item in source.rewards]
         q_grid = section.get("q_grid", [i / 100 for i in range(101)])
         thresholds = build_reference_thresholds(by_name[reference_name], rewards, q_grid)
@@ -462,6 +464,66 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             q_grid,
             out_dir / f"jsr_curves.{config.plot_format}",
         )
+    if section.get("overall", False):
+        _write_overall_jsr(config, all_rows, section)
+
+
+def _write_overall_jsr(
+    config: AnalysisConfig,
+    source_rows: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    section: Dict[str, Any],
+) -> None:
+    """Write an all-source JSR panel with missing rewards treated as success."""
+    reference_name = section["reference_run"]
+    comparison_names = section["comparison_runs"]
+    rewards = sorted({str(item["name"]) for source in config.sources for item in source.rewards})
+    q_grid = section.get("q_grid", [i / 100 for i in range(101)])
+    names = [reference_name, *comparison_names]
+    combined: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+    for source in config.sources:
+        for name, rows in source_rows[source.name].items():
+            for index, row in enumerate(rows):
+                copied = dict(row)
+                copied["prompt_id"] = (
+                    f"{source.name}:{row.get('prompt_id', row.get('prompt_index'))}"
+                )
+                copied["image_id"] = (
+                    f"{source.name}:{row.get('image_id', row.get('sample_index', index))}"
+                )
+                copied["rewards"] = dict(row.get("rewards", {}))
+                combined[name].append(copied)
+    thresholds = {}
+    for reward in rewards:
+        available = [row for row in combined[reference_name] if reward in row["rewards"]]
+        if not available:
+            raise ValueError(f"Overall JSR reward has no reference values: {reward}")
+        thresholds[reward] = build_reference_thresholds(available, [reward], q_grid)[reward]
+    curves = {}
+    for name in comparison_names:
+        rows = []
+        for row in combined[name]:
+            copied = dict(row)
+            copied["rewards"] = {
+                reward: row["rewards"].get(reward, float("inf")) for reward in rewards
+            }
+            rows.append(copied)
+        curves[name] = compute_jsr(rows, rewards, thresholds, q_grid, allow_positive_inf=True)
+    out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / "overall"
+    result = {
+        "reference_run": reference_name,
+        "q": q_grid,
+        "rewards": rewards,
+        "missing_reward_policy": "default_success",
+        "thresholds": thresholds,
+        "models": curves,
+    }
+    _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
+    plot_jsr_curves(
+        {name: data["jsr"] for name, data in curves.items()},
+        q_grid,
+        out_dir / f"jsr_curves.{config.plot_format}",
+        title="Overall Joint Success Rate",
+    )
 
 
 def _parse_source(value: Any, index: int) -> SourceConfig:
@@ -505,6 +567,7 @@ def _parse_jsr(value: Any) -> Dict[str, Any]:
         value,
         {
             "enabled",
+            "overall",
             "reference_run",
             "comparison_runs",
             "reference",
@@ -524,6 +587,7 @@ def _parse_jsr(value: Any) -> Dict[str, Any]:
             raise ValueError("jsr.comparison_runs must be a non-empty list.")
         return {
             "enabled": True,
+            "overall": bool(value.get("overall", False)),
             "reference_run": _nonempty_string(value["reference_run"], "jsr.reference_run"),
             "comparison_runs": [
                 _nonempty_string(item, "jsr.comparison_runs item") for item in comparison_runs

@@ -67,9 +67,10 @@ def compute_jsr(
     rewards: Sequence[str],
     thresholds: Mapping[str, Sequence[float]],
     q_grid: Sequence[float],
+    allow_positive_inf: bool = False,
 ) -> Dict[str, Any]:
     """Compute image-then-prompt-then-seed equally weighted JSR curves."""
-    _validate_records(records, rewards)
+    _validate_records(records, rewards, allow_positive_inf=allow_positive_inf)
     _validate_q_grid(q_grid)
     if any(len(thresholds[r]) != len(q_grid) for r in rewards):
         raise ValueError("Threshold vectors must match q_grid length.")
@@ -186,7 +187,11 @@ def _group(records: Iterable[Mapping[str, Any]]) -> Dict[str, List[Mapping[str, 
     return grouped
 
 
-def _validate_records(records: Sequence[Mapping[str, Any]], rewards: Sequence[str]) -> None:
+def _validate_records(
+    records: Sequence[Mapping[str, Any]],
+    rewards: Sequence[str],
+    allow_positive_inf: bool = False,
+) -> None:
     if not rewards:
         raise ValueError("rewards must not be empty.")
     if not records:
@@ -202,7 +207,12 @@ def _validate_records(records: Sequence[Mapping[str, Any]], rewards: Sequence[st
         values = row.get("rewards")
         if not isinstance(values, Mapping) or any(r not in values for r in rewards):
             raise ValueError("Every record must contain all declared rewards.")
-        if not np.isfinite([float(values[r]) for r in rewards]).all():
+        numeric = np.asarray([float(values[r]) for r in rewards], dtype=float)
+        if allow_positive_inf:
+            valid = np.isfinite(numeric) | np.isposinf(numeric)
+        else:
+            valid = np.isfinite(numeric)
+        if not valid.all() or np.isneginf(numeric).any():
             raise ValueError("Reward values must be finite.")
 
 
