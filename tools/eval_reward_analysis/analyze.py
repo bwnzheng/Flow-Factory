@@ -238,7 +238,7 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
             output_root / f"jsr_curves.{config.plot_format}",
         )
         result["plot"] = f"jsr_curves.{config.plot_format}"
-        _write_json(output_root / "jsr_results.json", result)
+        _write_json(output_root / "jsr_results.json", _json_safe_jsr(result))
         return {"schema_version": 1, "source": "cached_reward_records", "jsr": result}
     output_root = Path(config.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -456,7 +456,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             "models": curves,
         }
         out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / source.name
-        _write_json(out_dir / "jsr_results.json", result)
+        _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
         plot_jsr_curves(
             {name: data["jsr"] for name, data in curves.items()},
             q_grid,
@@ -636,6 +636,21 @@ def _write_json(path: Path, value: Dict[str, Any]) -> None:
     )
 
 
+def _json_safe_jsr(value: Any) -> Any:
+    """Encode the JSR-defined negative-infinity endpoint for strict JSON."""
+    if isinstance(value, float):
+        if np.isneginf(value):
+            return "-inf"
+        if not np.isfinite(value):
+            raise ValueError("JSR output contains an invalid non-finite value.")
+        return value
+    if isinstance(value, dict):
+        return {key: _json_safe_jsr(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_jsr(item) for item in value]
+    return value
+
+
 def _mapping(raw: Dict[str, Any], key: str) -> Dict[str, Any]:
     value = raw.get(key)
     if not isinstance(value, dict):
@@ -730,7 +745,7 @@ def main() -> None:
             args.bootstrap_replicates,
             args.bootstrap_seed,
         )
-        rendered = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+        rendered = json.dumps(_json_safe_jsr(result), ensure_ascii=False, indent=2, allow_nan=False)
         if args.jsr_output:
             output_path = Path(args.jsr_output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
