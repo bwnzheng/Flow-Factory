@@ -445,12 +445,6 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             ]
         all_rows[source.name] = by_name
         out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / source.name
-        if (
-            (out_dir / "jsr_results.json").is_file()
-            and (out_dir / f"jsr_curves.{config.plot_format}").is_file()
-            and not section.get("force", False)
-        ):
-            continue
         rewards = [str(item["name"]) for item in source.rewards]
         q_grid = section.get("q_grid", [i / 100 for i in range(101)])
         thresholds = build_reference_thresholds(by_name[reference_name], rewards, q_grid)
@@ -472,12 +466,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             out_dir / f"jsr_curves.{config.plot_format}",
         )
     if section.get("overall", False):
-        overall_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / "overall"
-        if section.get("force", False) or not (
-            (overall_dir / "jsr_results.json").is_file()
-            and (overall_dir / f"jsr_curves.{config.plot_format}").is_file()
-        ):
-            _write_overall_jsr(config, all_rows, section)
+        _write_overall_jsr(config, all_rows, section)
 
 
 def _write_overall_jsr(
@@ -583,7 +572,6 @@ def _parse_jsr(value: Any) -> Dict[str, Any]:
         {
             "enabled",
             "overall",
-            "force",
             "reference_run",
             "comparison_runs",
             "reference",
@@ -604,7 +592,6 @@ def _parse_jsr(value: Any) -> Dict[str, Any]:
         return {
             "enabled": True,
             "overall": bool(value.get("overall", False)),
-            "force": bool(value.get("force", False)),
             "reference_run": _nonempty_string(value["reference_run"], "jsr.reference_run"),
             "comparison_runs": [
                 _nonempty_string(item, "jsr.comparison_runs item") for item in comparison_runs
