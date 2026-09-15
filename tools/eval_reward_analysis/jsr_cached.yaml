@@ -35,5 +35,6 @@ jsr:
   bootstrap_seed: 123
 
 output:
-  dir: "analysis_output/eval_reward_analysis/jsr_cached"
+  cache_dir: "analysis_cache/eval_reward_analysis/jsr_cached"
+  jsr_dir: "analysis_output/eval_reward_analysis/jsr_cached"
   plot_format: "png"

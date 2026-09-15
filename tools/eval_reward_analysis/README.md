@@ -53,6 +53,11 @@ standardized covariance matrix; raw covariance remains available in the JSONL
 artifacts. Set `output.plot_format` to `png` (default) or `pdf` to choose the
 output format. No scalarization weights are used.
 
+Use separate `output.cache_dir` and `output.jsr_dir` values when running the
+run-based workflow. `cache_dir` contains generated images, manifests, reward
+caches, and per-run summaries; `jsr_dir` contains only JSR result tables and
+plots. The legacy `output.dir` key remains an alias for `cache_dir`.
+
 Cached JSR records contain `prompt_id` (or `prompt_index`), `image_id` (or
 `sample_index`), and a `rewards` mapping. The reference file is shared by all
 comparison models. Thresholds use a prompt-equally-weighted empirical

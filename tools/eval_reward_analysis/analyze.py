@@ -100,6 +100,7 @@ class AnalysisConfig:
     plot_format: str = "png"
     jsr: Optional[Dict[str, Any]] = None
     covariance: Optional[Dict[str, Any]] = None
+    jsr_output_dir: Optional[str] = None
 
 
 def load_config(path: Union[str, Path]) -> AnalysisConfig:
@@ -128,7 +129,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         if covariance_raw is not None
         else {"enabled": True}
     )
-    _reject_unknown(output, {"dir", "plot_format"}, "output")
+    _reject_unknown(output, {"dir", "cache_dir", "jsr_dir", "plot_format"}, "output")
     _reject_unknown(model, {"base_model", "dtype", "device", "num_processes"}, "model")
     _reject_unknown(
         evaluation,
@@ -206,10 +207,15 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         ),
         sources=sources,
         runs=runs,
-        output_dir=_nonempty_string(output.get("dir"), "output.dir"),
+        output_dir=_nonempty_string(output.get("cache_dir", output.get("dir")), "output.cache_dir"),
         plot_format=_plot_format(output.get("plot_format", "png")),
         jsr=jsr,
         covariance=covariance,
+        jsr_output_dir=(
+            _nonempty_string(output["jsr_dir"], "output.jsr_dir")
+            if output.get("jsr_dir") is not None
+            else None
+        ),
     )
 
 
@@ -224,7 +230,7 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
     """
     if config.jsr is not None and "reference" in config.jsr:
         result = analyze_cached_results(**config.jsr)
-        output_root = Path(config.output_dir)
+        output_root = Path(config.jsr_output_dir or config.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
         plot_jsr_curves(
             {name: values["jsr"] for name, values in result["models"].items()},
@@ -288,7 +294,6 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
         "num_processes": config.model.num_processes,
         "experiments": experiment_summaries,
     }
-    _write_json(output_root / "summary.json", metadata)
     return metadata
 
 
@@ -450,7 +455,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             "thresholds": thresholds,
             "models": curves,
         }
-        out_dir = Path(config.output_dir) / "jsr" / source.name
+        out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / source.name
         _write_json(out_dir / "jsr_results.json", result)
         plot_jsr_curves(
             {name: data["jsr"] for name, data in curves.items()},
