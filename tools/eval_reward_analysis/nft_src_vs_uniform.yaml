@@ -46,5 +46,5 @@ runs:
     label: "SRC-NFT"
     checkpoint: "saves/sd3-5_lora_nft_20260808_215750/checkpoints/checkpoint-60"
 output:
-  dir: "analysis_output/reward_covariance_eval_analysis/nft_src_vs_uniform"
+  dir: "analysis_output/eval_reward_analysis/nft_src_vs_uniform"
   plot_format: "png"  # Covariance heatmap format: png or pdf.

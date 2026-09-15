@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import torch
 
-from tools.reward_covariance_eval_analysis.analyze import (
+from tools.eval_reward_analysis.analyze import (
     AnalysisConfig,
     EvaluationConfig,
     ModelConfig,
@@ -35,7 +35,7 @@ from tools.reward_covariance_eval_analysis.analyze import (
     load_config,
     load_prompt_records,
 )
-from tools.reward_covariance_eval_analysis.reward_scoring import (
+from tools.eval_reward_analysis.reward_scoring import (
     _AcceleratorView,
     _partition,
     _worker_device,
@@ -44,7 +44,7 @@ from tools.reward_covariance_eval_analysis.reward_scoring import (
 
 def test_default_config_is_weight_free_and_uses_fresh_rollouts() -> None:
     root = Path(__file__).parents[2]
-    config = load_config(root / "tools/reward_covariance_eval_analysis/default.yaml")
+    config = load_config(root / "tools/eval_reward_analysis/default.yaml")
     assert config.evaluation.num_samples_per_prompt == 16
     assert config.model.num_processes == 1
     assert config.model.device is None
@@ -229,11 +229,11 @@ def test_generate_images_uses_configured_parallel_runner(
         (output_dir / "manifest.jsonl").write_text(json.dumps(row) + "\n")
 
     monkeypatch.setattr(
-        "tools.reward_covariance_eval_analysis.analyze.ParallelEvaluationRunner",
+        "tools.eval_reward_analysis.analyze.ParallelEvaluationRunner",
         FakeParallelRunner,
     )
     monkeypatch.setattr(
-        "tools.reward_covariance_eval_analysis.analyze.run_evaluation_set",
+        "tools.eval_reward_analysis.analyze.run_evaluation_set",
         fake_run_evaluation_set,
     )
     config = AnalysisConfig(
@@ -290,11 +290,9 @@ def test_generate_images_passes_none_checkpoint_for_base_model(
             + "\n"
         )
 
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze.EvaluationRunner", FakeRunner)
     monkeypatch.setattr(
-        "tools.reward_covariance_eval_analysis.analyze.EvaluationRunner", FakeRunner
-    )
-    monkeypatch.setattr(
-        "tools.reward_covariance_eval_analysis.analyze.run_evaluation_set",
+        "tools.eval_reward_analysis.analyze.run_evaluation_set",
         fake_run_evaluation_set,
     )
     config = AnalysisConfig(

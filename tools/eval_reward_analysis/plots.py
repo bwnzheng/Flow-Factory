@@ -77,3 +77,35 @@ def plot_covariance_matrix(
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path)
     plt.close(figure)
+
+
+def plot_jsr_curves(
+    curves: dict[str, Sequence[float]],
+    q_grid: Sequence[float],
+    output_path: Union[str, Path],
+    title: str = "Joint Success Rate",
+) -> None:
+    """Write JSR curves against the reference-model percentile axis."""
+    q = np.asarray(q_grid, dtype=float)
+    if q.ndim != 1 or not len(q) or np.any((q < 0) | (q > 1)):
+        raise ValueError("q_grid must contain values in [0, 1].")
+    figure, axis = plt.subplots(figsize=(7, 4.5))
+    for name, values in curves.items():
+        y = np.asarray(values, dtype=float)
+        if y.shape != q.shape or not np.isfinite(y).all() or np.any((y < 0) | (y > 1)):
+            raise ValueError(f"Invalid JSR curve for {name!r}.")
+        axis.plot(q, y, label=name)
+    axis.set(
+        xlim=(0, 1),
+        ylim=(0, 1),
+        xlabel="Base-model reference percentile q",
+        ylabel="Joint Success Rate",
+        title=title,
+    )
+    axis.grid(alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path)
+    plt.close(figure)

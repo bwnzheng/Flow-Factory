@@ -26,18 +26,23 @@ from typing import Any, Dict, List, Optional, Set, Union
 import numpy as np
 import yaml
 
+from tools.eval_reward_analysis.jsr import (
+    analyze_cached_results,
+    build_reference_thresholds,
+    compute_jsr,
+)
+from tools.eval_reward_analysis.metrics import (
+    aggregate_group_metrics,
+    compute_group_metrics,
+)
+from tools.eval_reward_analysis.plots import plot_covariance_matrix, plot_jsr_curves
+from tools.eval_reward_analysis.reward_scoring import score_reward
 from tools.model_inference import (
     EvaluationRunner,
     ParallelEvaluationRunner,
     resolve_device,
     run_evaluation_set,
 )
-from tools.reward_covariance_eval_analysis.metrics import (
-    aggregate_group_metrics,
-    compute_group_metrics,
-)
-from tools.reward_covariance_eval_analysis.plots import plot_covariance_matrix
-from tools.reward_covariance_eval_analysis.reward_scoring import score_reward
 from tools.utils import PromptRecord, load_prompt_records
 
 
@@ -93,6 +98,8 @@ class AnalysisConfig:
     runs: List[RunConfig]
     output_dir: str
     plot_format: str = "png"
+    jsr: Optional[Dict[str, Any]] = None
+    covariance: Optional[Dict[str, Any]] = None
 
 
 def load_config(path: Union[str, Path]) -> AnalysisConfig:
@@ -107,10 +114,20 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError("Analysis config must be a YAML mapping.")
-    _reject_unknown(raw, {"model", "evaluation", "sources", "runs", "output"}, "root")
+    _reject_unknown(
+        raw, {"model", "evaluation", "sources", "runs", "output", "jsr", "covariance"}, "root"
+    )
     model = _mapping(raw, "model")
     evaluation = _mapping(raw, "evaluation")
     output = _mapping(raw, "output")
+    jsr_raw = raw.get("jsr")
+    jsr = _parse_jsr(jsr_raw) if jsr_raw is not None else None
+    covariance_raw = raw.get("covariance")
+    covariance = (
+        _parse_toggle(covariance_raw, "covariance")
+        if covariance_raw is not None
+        else {"enabled": True}
+    )
     _reject_unknown(output, {"dir", "plot_format"}, "output")
     _reject_unknown(model, {"base_model", "dtype", "device", "num_processes"}, "model")
     _reject_unknown(
@@ -141,10 +158,12 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         raise ValueError("model.num_processes > 1 requires CUDA or NPU accelerators.")
     sources_raw = raw.get("sources")
     runs_raw = raw.get("runs")
-    if not isinstance(sources_raw, list) or not sources_raw:
+    if jsr is None and (not isinstance(sources_raw, list) or not sources_raw):
         raise ValueError("sources must be a non-empty list.")
-    if not isinstance(runs_raw, list) or not runs_raw:
+    if jsr is None and (not isinstance(runs_raw, list) or not runs_raw):
         raise ValueError("runs must be a non-empty list.")
+    sources_raw = sources_raw or []
+    runs_raw = runs_raw or []
     sources = [_parse_source(item, index) for index, item in enumerate(sources_raw)]
     runs = [_parse_run(item, index) for index, item in enumerate(runs_raw)]
     _require_unique([source.name for source in sources], "source names")
@@ -189,6 +208,8 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         runs=runs,
         output_dir=_nonempty_string(output.get("dir"), "output.dir"),
         plot_format=_plot_format(output.get("plot_format", "png")),
+        jsr=jsr,
+        covariance=covariance,
     )
 
 
@@ -201,6 +222,18 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
     Returns:
         Top-level experiment metadata and summaries.
     """
+    if config.jsr is not None and "reference" in config.jsr:
+        result = analyze_cached_results(**config.jsr)
+        output_root = Path(config.output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        plot_jsr_curves(
+            {name: values["jsr"] for name, values in result["models"].items()},
+            result["q"],
+            output_root / f"jsr_curves.{config.plot_format}",
+        )
+        result["plot"] = f"jsr_curves.{config.plot_format}"
+        _write_json(output_root / "jsr_results.json", result)
+        return {"schema_version": 1, "source": "cached_reward_records", "jsr": result}
     output_root = Path(config.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     resolved_device = resolve_device(config.model.device)
@@ -244,8 +277,11 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                 manifest_rows,
                 reward_values,
                 experiment_dir,
+                write_covariance=(config.covariance or {"enabled": True}).get("enabled", True),
             )
             experiment_summaries.append(summary)
+    if config.jsr is not None:
+        _write_run_jsr_results(config, experiment_summaries)
     metadata = {
         "schema_version": 1,
         "source": "fresh_checkpoint_or_base_rollouts_and_reward_model_forward",
@@ -303,6 +339,7 @@ def _write_analysis_artifacts(
     manifest_rows: List[Dict[str, Any]],
     reward_values: Dict[str, Dict[str, float]],
     experiment_dir: Path,
+    write_covariance: bool = True,
 ) -> Dict[str, Any]:
     reward_names = [str(reward["name"]) for reward in source.rewards]
     rows_by_prompt: Dict[int, List[Dict[str, Any]]] = {}
@@ -352,13 +389,15 @@ def _write_analysis_artifacts(
         )
     _write_jsonl(experiment_dir / "prompt_metrics.jsonl", prompt_metrics)
     aggregate = aggregate_group_metrics(group_metrics)
-    covariance_plot_path = experiment_dir / "plots" / f"covariance_matrix.{config.plot_format}"
-    plot_covariance_matrix(
-        covariance=np.asarray(aggregate["standardized_covariance"]),
-        reward_names=reward_names,
-        output_path=covariance_plot_path,
-        title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
-    )
+    covariance_plot_path = None
+    if write_covariance:
+        covariance_plot_path = experiment_dir / "plots" / f"covariance_matrix.{config.plot_format}"
+        plot_covariance_matrix(
+            covariance=np.asarray(aggregate["standardized_covariance"]),
+            reward_names=reward_names,
+            output_path=covariance_plot_path,
+            title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
+        )
     summary = {
         "run_name": run.name,
         "run_label": run.label,
@@ -368,11 +407,56 @@ def _write_analysis_artifacts(
         "reward_names": reward_names,
         "n_prompts": len(prompt_metrics),
         "samples_per_prompt": config.evaluation.num_samples_per_prompt,
-        "covariance_plot": str(covariance_plot_path.relative_to(experiment_dir)),
+        "covariance_plot": (
+            str(covariance_plot_path.relative_to(experiment_dir)) if covariance_plot_path else None
+        ),
         **_json_metrics(aggregate),
     }
     _write_json(experiment_dir / "summary.json", summary)
     return summary
+
+
+def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any]]) -> None:
+    """Compute JSR from generated run caches selected by the config section."""
+    section = config.jsr or {}
+    if not section.get("enabled", True):
+        return
+    reference_name = section.get("reference_run")
+    comparison_names = section.get("comparison_runs", [])
+    if reference_name not in {run.name for run in config.runs}:
+        raise ValueError(f"jsr.reference_run does not match any configured run: {reference_name}")
+    for source in config.sources:
+        by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for run_name in [reference_name, *comparison_names]:
+            sample_path = Path(config.output_dir) / run_name / source.name / "samples.jsonl"
+            if not sample_path.is_file():
+                raise FileNotFoundError(f"JSR requires complete run output: {sample_path}")
+            by_name[run_name] = [
+                json.loads(line)
+                for line in sample_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+        rewards = [str(item["name"]) for item in source.rewards]
+        q_grid = section.get("q_grid", [i / 100 for i in range(101)])
+        thresholds = build_reference_thresholds(by_name[reference_name], rewards, q_grid)
+        curves = {
+            name: compute_jsr(rows, rewards, thresholds, q_grid)
+            for name, rows in by_name.items()
+            if name != reference_name
+        }
+        result = {
+            "reference_run": reference_name,
+            "q": q_grid,
+            "thresholds": thresholds,
+            "models": curves,
+        }
+        out_dir = Path(config.output_dir) / "jsr" / source.name
+        _write_json(out_dir / "jsr_results.json", result)
+        plot_jsr_curves(
+            {name: data["jsr"] for name, data in curves.items()},
+            q_grid,
+            out_dir / f"jsr_curves.{config.plot_format}",
+        )
 
 
 def _parse_source(value: Any, index: int) -> SourceConfig:
@@ -406,6 +490,81 @@ def _parse_source(value: Any, index: int) -> SourceConfig:
         max_prompts=_minimum_int(value.get("max_prompts", 0), 0, f"sources[{index}].max_prompts"),
         rewards=normalized,
     )
+
+
+def _parse_jsr(value: Any) -> Dict[str, Any]:
+    """Validate the cached JSR analysis configuration."""
+    if not isinstance(value, dict):
+        raise ValueError("jsr must be a mapping.")
+    _reject_unknown(
+        value,
+        {
+            "enabled",
+            "reference_run",
+            "comparison_runs",
+            "reference",
+            "models",
+            "rewards",
+            "q_grid",
+            "bootstrap_replicates",
+            "bootstrap_seed",
+        },
+        "jsr",
+    )
+    if value.get("enabled", True) is False:
+        return {"enabled": False}
+    if "reference_run" in value:
+        comparison_runs = value.get("comparison_runs")
+        if not isinstance(comparison_runs, list) or not comparison_runs:
+            raise ValueError("jsr.comparison_runs must be a non-empty list.")
+        return {
+            "enabled": True,
+            "reference_run": _nonempty_string(value["reference_run"], "jsr.reference_run"),
+            "comparison_runs": [
+                _nonempty_string(item, "jsr.comparison_runs item") for item in comparison_runs
+            ],
+            "q_grid": [float(item) for item in value.get("q_grid", [i / 100 for i in range(101)])],
+            "bootstrap_replicates": _minimum_int(
+                value.get("bootstrap_replicates", 0), 0, "jsr.bootstrap_replicates"
+            ),
+            "bootstrap_seed": _integer(value.get("bootstrap_seed", 0), "jsr.bootstrap_seed"),
+        }
+    reference = _nonempty_string(value.get("reference"), "jsr.reference")
+    models = value.get("models")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("jsr.models must be a non-empty mapping of name to JSONL path.")
+    models = {
+        str(name): _nonempty_string(path, f"jsr.models[{name}]") for name, path in models.items()
+    }
+    rewards = value.get("rewards")
+    if (
+        not isinstance(rewards, list)
+        or not rewards
+        or not all(isinstance(item, str) and item.strip() for item in rewards)
+    ):
+        raise ValueError("jsr.rewards must be a non-empty list of names.")
+    q_grid = value.get("q_grid", [i / 100 for i in range(101)])
+    if not isinstance(q_grid, list) or not q_grid:
+        raise ValueError("jsr.q_grid must be a non-empty list.")
+    return {
+        "reference_path": reference,
+        "model_paths": models,
+        "rewards": [item.strip() for item in rewards],
+        "q_grid": [float(item) for item in q_grid],
+        "bootstrap_replicates": _minimum_int(
+            value.get("bootstrap_replicates", 0), 0, "jsr.bootstrap_replicates"
+        ),
+        "bootstrap_seed": _integer(value.get("bootstrap_seed", 0), "jsr.bootstrap_seed"),
+    }
+
+
+def _parse_toggle(value: Any, field: str) -> Dict[str, bool]:
+    if not isinstance(value, dict) or set(value) - {"enabled"}:
+        raise ValueError(f"{field} must contain only an enabled boolean.")
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{field}.enabled must be a boolean.")
+    return {"enabled": enabled}
 
 
 def _parse_run(value: Any, index: int) -> RunConfig:
@@ -529,7 +688,51 @@ def main() -> None:
         default=str(Path(__file__).with_name("default.yaml")),
         help="Path to the analysis YAML configuration.",
     )
-    config = load_config(parser.parse_args().config)
+    parser.add_argument(
+        "--cached-reference", help="JSONL reward records for the shared reference model."
+    )
+    parser.add_argument(
+        "--cached-model",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Cached comparison records; repeatable.",
+    )
+    parser.add_argument("--jsr-rewards", nargs="+", help="Reward names for cached JSR analysis.")
+    parser.add_argument(
+        "--q-grid", nargs="+", type=float, help="Reference percentile grid for cached JSR."
+    )
+    parser.add_argument("--bootstrap-replicates", type=int, default=0)
+    parser.add_argument("--bootstrap-seed", type=int, default=0)
+    parser.add_argument("--jsr-output", help="Write cached JSR result JSON to this path.")
+    args = parser.parse_args()
+    if args.cached_reference:
+        if not args.cached_model or not args.jsr_rewards or not args.q_grid:
+            parser.error("cached JSR requires --cached-model, --jsr-rewards, and --q-grid")
+        model_paths = {}
+        for item in args.cached_model:
+            if "=" not in item:
+                parser.error("--cached-model must use NAME=PATH")
+            name, path = item.split("=", 1)
+            if not name or not path:
+                parser.error("--cached-model must use NAME=PATH")
+            model_paths[name] = path
+        result = analyze_cached_results(
+            args.cached_reference,
+            model_paths,
+            args.jsr_rewards,
+            args.q_grid,
+            args.bootstrap_replicates,
+            args.bootstrap_seed,
+        )
+        rendered = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+        if args.jsr_output:
+            output_path = Path(args.jsr_output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
+        return
+    config = load_config(args.config)
     result = run_analysis(config)
     print(
         "[Reward covariance evaluation] "

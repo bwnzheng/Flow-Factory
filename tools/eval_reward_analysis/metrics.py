@@ -20,6 +20,13 @@ from typing import Dict, List, Union
 
 import numpy as np
 
+from .jsr import (
+    build_reference_thresholds,
+    compute_jsr,
+    paired_prompt_bootstrap,
+    reference_quantile,
+)
+
 
 def compute_group_metrics(rewards: np.ndarray) -> Dict[str, Union[np.ndarray, float]]:
     """Compute covariance geometry for one prompt's repeated rollouts.

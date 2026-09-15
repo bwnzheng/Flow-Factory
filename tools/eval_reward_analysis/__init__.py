@@ -12,4 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prompt-local reward covariance analysis."""
+"""Reward covariance and Joint Success Rate evaluation analysis."""
+
+from .jsr import (
+    analyze_cached_results,
+    build_reference_thresholds,
+    compute_jsr,
+    paired_prompt_bootstrap,
+    reference_quantile,
+)
+
+__all__ = [
+    "analyze_cached_results",
+    "build_reference_thresholds",
+    "compute_jsr",
+    "paired_prompt_bootstrap",
+    "reference_quantile",
+]

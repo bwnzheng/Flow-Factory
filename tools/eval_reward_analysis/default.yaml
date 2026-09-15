@@ -64,5 +64,5 @@ runs:
     label: "example"
 
 output:
-  dir: "analysis_output/reward_covariance_eval_analysis"
+  dir: "analysis_output/eval_reward_analysis"
   plot_format: "png"  # Covariance heatmap format: png or pdf.
