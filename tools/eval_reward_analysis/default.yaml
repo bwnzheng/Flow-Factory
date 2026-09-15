@@ -1,4 +1,4 @@
-# Fresh checkpoint-rollout reward covariance analysis.
+# Fresh checkpoint-rollout reward analysis (covariance and optional JSR).
 #
 # This tool never reads training reward PKLs.  It generates repeated samples
 # from one or more saved LoRA checkpoints, scores every generated image with
