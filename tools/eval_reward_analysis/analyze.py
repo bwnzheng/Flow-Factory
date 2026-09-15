@@ -428,6 +428,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
         return
     reference_name = section.get("reference_run")
     comparison_names = section.get("comparison_runs", [])
+    labels = {run.name: run.label for run in config.runs}
     if reference_name not in {run.name for run in config.runs}:
         raise ValueError(f"jsr.reference_run does not match any configured run: {reference_name}")
     all_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -460,7 +461,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
         out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / source.name
         _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
         plot_jsr_curves(
-            {name: data["jsr"] for name, data in curves.items()},
+            {labels.get(name, name): data["jsr"] for name, data in curves.items()},
             q_grid,
             out_dir / f"jsr_curves.{config.plot_format}",
         )
@@ -519,7 +520,10 @@ def _write_overall_jsr(
     }
     _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
     plot_jsr_curves(
-        {name: data["jsr"] for name, data in curves.items()},
+        {
+            {run.name: run.label for run in config.runs}.get(name, name): data["jsr"]
+            for name, data in curves.items()
+        },
         q_grid,
         out_dir / f"jsr_curves.{config.plot_format}",
         title="Overall Joint Success Rate",
