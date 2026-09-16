@@ -177,13 +177,68 @@ class DataArguments(ArgABC):
             object.__setattr__(self, '_source_name_to_id_cache', cached)
         return cached
 
+    # ------------------------------------------------------------------
+    # Per-source feature gates (`data.datasets[*].train` opt-outs).
+    # Both follow the `source_id_to_name` contract: indexable by
+    # `source_id`, `[]` in legacy single-source mode.
+    # ------------------------------------------------------------------
+
+    @property
+    def sample_weighting_by_source_id(self) -> List[bool]:
+        """Per-source gate for SRC-Reweight (``train.sample_weighting: src``).
+
+        ``True`` at index ``source_id`` means the source's prompt groups may be
+        reweighted; ``False`` keeps them on the uniform fallback.  Read by
+        ``AdvantageProcessor``; inert while ``sample_weighting`` is ``none``.
+        """
+        return self._train_flag_by_source_id("sample_reweight")
+
+    @property
+    def ga_by_source_id(self) -> List[bool]:
+        """Per-source gate for the genetic algorithm (``train.ga.enabled``).
+
+        ``True`` at index ``source_id`` means the source's prompt groups run
+        through genetic evolution; ``False`` trains them on their original
+        rollout samples.  Read by the GA trainers; inert elsewhere.
+        """
+        return self._train_flag_by_source_id("ga")
+
+    def _train_flag_by_source_id(self, attr: str) -> List[bool]:
+        """Collect one per-dataset training flag into a source-id indexable list."""
+        if self.datasets is None:
+            return []
+        return [getattr(d.train, attr) if d.is_training_source else True for d in self.datasets]
+
     def to_dict(self) -> dict[str, Any]:
         return super().to_dict()
 
     def __str__(self) -> str:
         """Pretty print configuration as YAML."""
         return yaml.dump(self.to_dict(), default_flow_style=False, sort_keys=False, indent=2)
-    
+
     def __repr__(self) -> str:
         """Same as __str__ for consistency."""
         return self.__str__()
+
+
+def source_flag_enabled(flags: List[bool], source_id: Optional[int]) -> bool:
+    """Resolve one per-source feature flag, defaulting to enabled.
+
+    The single home for the per-source gate fallback rule, shared by the
+    advantage path and the GA trainers.  It mirrors the fallbacks the source-id
+    space already relies on (``AdvantageProcessor.collect_group_rewards`` maps
+    an unstamped source to ``-1``; ``build_source_aware_matrices`` treats an
+    unknown id as "applies everywhere"): an empty flag list (legacy
+    single-source mode), an unstamped id, or an out-of-range id all mean
+    "enabled".
+
+    Args:
+        flags: Per-source flags indexed by ``source_id`` (may be empty).
+        source_id: Sample's source id, or ``None``/``-1`` when unstamped.
+
+    Returns:
+        Whether the feature is enabled for that source.
+    """
+    if not flags or source_id is None or source_id < 0 or source_id >= len(flags):
+        return True
+    return bool(flags[source_id])

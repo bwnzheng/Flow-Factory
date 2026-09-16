@@ -76,11 +76,16 @@ class GANFTTrainer(DiffusionNFTTrainer):
                 offspring_mode=offspring_mode,
                 reward_weights=self.advantage_processor.reward_weights,
                 seed=self.training_args.seed,
+                ga_enabled_by_source_id=self.config.data_args.ga_by_source_id,
             )
             self.advantage_processor._ga_enabled = True
             self.advantage_processor._child_in_norm = True
+            gated_sources = [
+                d.name for d in self.config.data_args.training_datasets if not d.train.ga
+            ]
             logger.info(
                 f"GA NFT: offspring_mode={offspring_mode} "
+                f"gated_sources({gated_sources or 'none'}) "
                 f"strategy={cxo_args.strategy} "
                 f"advantage_aggregation({self._ga._advantage_aggregation}) "
                 f"ga.survivor_score({self._ga._survivor_score}) "

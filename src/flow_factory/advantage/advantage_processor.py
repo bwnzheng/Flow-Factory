@@ -35,6 +35,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
+from ..hparams.data_args import source_flag_enabled
 from ..rewards import RewardProcessor
 from ..samples import BaseSample
 from ..utils.logger_utils import setup_logger
@@ -92,6 +93,7 @@ class AdvantageProcessor:
         sample_weighting_consumer: Literal["linear_advantage", "nft"] = "linear_advantage",
         src_score_type: Literal["raw", "saturated"] = "saturated",
         src_reweight_max_multiplier: Optional[float] = None,
+        sample_weighting_enabled_by_source_id: Optional[List[bool]] = None,
     ):
         self.accelerator = accelerator
         self.reward_weights = reward_weights
@@ -120,6 +122,11 @@ class AdvantageProcessor:
         self.src_reweight_max_multiplier = src_reweight_max_multiplier
         self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
+        # Per-source SRC-Reweight gate (`data.datasets[*].train.sample_reweight`).
+        # Empty list = legacy single-source mode = every source reweighted.
+        self._sample_weighting_enabled_by_source_id = list(
+            sample_weighting_enabled_by_source_id or []
+        )
 
         self.group_on_same_rank = sampler_type == "group_contiguous"
         self._pending_advantage_metrics: Optional[Dict[str, Any]] = None
@@ -484,6 +491,22 @@ class AdvantageProcessor:
                     matrix[r_idx, s_idx] = default_w
         return matrix
 
+    def _reweight_enabled_mask(self, source_ids: np.ndarray) -> Optional[np.ndarray]:
+        """Expand the per-source SRC gate onto the gathered sample axis.
+
+        Returns ``None`` when every source is reweighted (legacy mode or no
+        opt-outs), so ``compute_src_reweight`` keeps its all-enabled default.
+        The per-source fallback rule lives in
+        :func:`flow_factory.hparams.data_args.source_flag_enabled`.
+        """
+        flags = self._sample_weighting_enabled_by_source_id
+        if not flags or all(flags):
+            return None
+        return np.array(
+            [source_flag_enabled(flags, int(source_id)) for source_id in source_ids],
+            dtype=bool,
+        )
+
     def _to_local(
         self,
         values: np.ndarray,
@@ -779,6 +802,7 @@ class AdvantageProcessor:
                 degeneracy_threshold=self.src_reweight_degeneracy_threshold,
                 score_type=self.src_score_type,
                 max_multiplier=self.src_reweight_max_multiplier,
+                reweight_enabled=self._reweight_enabled_mask(source_ids),
             )
             if self.sample_weighting_consumer == "nft":
                 if self.global_std:
@@ -884,6 +908,12 @@ class AdvantageProcessor:
             key: self._to_local(value).float() for key, value in src_diagnostics.items()
         }
         if store_to_samples:
+            # Materialize the per-source gate once instead of syncing per sample.
+            local_reweight_applied = (
+                (local_src_diagnostics["reweight_applied"] > 0.5).tolist()
+                if src_result is not None
+                else None
+            )
             for sample_index, (sample, adv) in enumerate(zip(samples, advantages)):
                 sample.extra_kwargs["advantage"] = adv
                 if src_result is not None:
@@ -894,6 +924,9 @@ class AdvantageProcessor:
                         sample_index
                     ]
                     sample.extra_kwargs["src_score"] = local_src_diagnostics["score"][sample_index]
+                    sample.extra_kwargs["sample_reweight_applied"] = local_reweight_applied[
+                        sample_index
+                    ]
 
         # Mark dominated local samples
         if pareto_mask is not None:
@@ -1066,6 +1099,7 @@ class AdvantageProcessor:
     ) -> Dict[str, np.ndarray]:
         """Flatten SRC diagnostics for the existing float32 logging gather."""
         diagnostics = {
+            "reweight_applied": result.reweight_applied.astype(np.float64),
             "score": result.scores,
             "raw_score": result.raw_scores,
             "saturated_score": result.saturated_scores,
@@ -1111,6 +1145,20 @@ class AdvantageProcessor:
                 "std": float(finite.std()),
             }
 
+        # Groups whose source opted out of SRC (`train.sample_reweight: false`)
+        # stay out of the SRC statistics: the logged distribution then describes
+        # exactly the groups the multiplier acted on.  A step can be entirely
+        # gated, so every reduction below needs an empty-safe default.
+        applied = diagnostics["reweight_applied"] > 0.5
+
+        def group_mean(values: np.ndarray) -> float:
+            """Mean over the applied groups, with an empty-safe default.
+
+            A training step can be served entirely by gated sources, in which
+            case there is no applied group to average over.
+            """
+            return float(values.mean()) if len(values) else 0.0
+
         log_data: Dict[str, Any] = {}
         for diagnostic_key, metric_name in (
             ("score", "src_score"),
@@ -1122,10 +1170,11 @@ class AdvantageProcessor:
             ("uniform_advantage", "src_uniform_advantage"),
             ("weighted_advantage", "src_weighted_advantage"),
         ):
-            for stat_name, value in stats(diagnostics[diagnostic_key]).items():
+            for stat_name, value in stats(diagnostics[diagnostic_key][applied]).items():
                 log_data[f"train/{metric_name}_{stat_name}"] = value
 
-        unique_groups = np.unique(group_indices)
+        all_groups = np.unique(group_indices)
+        unique_groups = np.unique(group_indices[applied])
         first_indices = np.array(
             [np.flatnonzero(group_indices == group_id)[0] for group_id in unique_groups],
             dtype=np.int64,
@@ -1138,31 +1187,34 @@ class AdvantageProcessor:
         ess_ratio = ess / group_sizes
         log_data.update(
             {
-                "train/src_ess_mean": float(ess.mean()),
-                "train/src_ess_min": float(ess.min()),
-                "train/src_ess_max": float(ess.max()),
-                "train/src_ess_ratio_mean": float(ess_ratio.mean()),
-                "train/src_ess_ratio_min": float(ess_ratio.min()),
-                "train/src_degenerate_scalar_contrast_ratio": float(
-                    diagnostics["degenerate"][first_indices].mean()
+                "train/src_reweight_applied_group_ratio": (
+                    float(len(unique_groups)) / float(len(all_groups)) if len(all_groups) else 0.0
                 ),
-                "train/src_scalar_variance_mean": float(
-                    diagnostics["scalar_variance"][first_indices].mean()
+                "train/src_ess_mean": group_mean(ess),
+                "train/src_ess_min": float(ess.min()) if len(ess) else 0.0,
+                "train/src_ess_max": float(ess.max()) if len(ess) else 0.0,
+                "train/src_ess_ratio_mean": group_mean(ess_ratio),
+                "train/src_ess_ratio_min": float(ess_ratio.min()) if len(ess_ratio) else 0.0,
+                "train/src_degenerate_scalar_contrast_ratio": group_mean(
+                    diagnostics["degenerate"][first_indices]
                 ),
-                "train/src_weighted_variance_mean": float(
-                    diagnostics["weighted_variance"][first_indices].mean()
+                "train/src_scalar_variance_mean": group_mean(
+                    diagnostics["scalar_variance"][first_indices]
                 ),
-                "train/src_lower_bound_uniform_mean": float(
-                    diagnostics["lower_bound_uniform"][first_indices].mean()
+                "train/src_weighted_variance_mean": group_mean(
+                    diagnostics["weighted_variance"][first_indices]
                 ),
-                "train/src_lower_bound_reweighted_mean": float(
-                    diagnostics["lower_bound_reweighted"][first_indices].mean()
+                "train/src_lower_bound_uniform_mean": group_mean(
+                    diagnostics["lower_bound_uniform"][first_indices]
                 ),
-                "train/src_lower_bound_gain_mean": float(
+                "train/src_lower_bound_reweighted_mean": group_mean(
+                    diagnostics["lower_bound_reweighted"][first_indices]
+                ),
+                "train/src_lower_bound_gain_mean": group_mean(
                     (
                         diagnostics["lower_bound_reweighted"][first_indices]
                         - diagnostics["lower_bound_uniform"][first_indices]
-                    ).mean()
+                    )
                 ),
             }
         )
@@ -1171,18 +1223,24 @@ class AdvantageProcessor:
         uniform_centering_errors = []
         weighted_centering_errors = []
         src_groups = []
-        for group_id in unique_groups:
+        # Every group is recorded, gated ones included: their invariants still
+        # hold (uniform mass, unit multiplier), and `reweight_applied` is what
+        # tells an opt-out apart from a degenerate fallback.
+        for group_id in all_groups:
             indices = np.flatnonzero(group_indices == group_id)
             probability = diagnostics["probability"][indices]
             uniform_advantage = diagnostics["uniform_advantage"][indices]
             weighted_advantage = diagnostics["weighted_advantage"][indices]
-            probability_sum_errors.append(abs(float(probability.sum()) - 1.0))
-            uniform_centering_errors.append(abs(float(uniform_advantage.mean())))
-            weighted_centering_errors.append(abs(float(probability @ weighted_advantage)))
+            group_applied = bool(applied[indices[0]])
+            if group_applied:
+                probability_sum_errors.append(abs(float(probability.sum()) - 1.0))
+                uniform_centering_errors.append(abs(float(uniform_advantage.mean())))
+                weighted_centering_errors.append(abs(float(probability @ weighted_advantage)))
             first_index = indices[0]
             src_groups.append(
                 {
                     "group_id": int(group_id),
+                    "reweight_applied": group_applied,
                     "scores": diagnostics["score"][indices].tolist(),
                     "raw_scores": diagnostics["raw_score"][indices].tolist(),
                     "saturated_scores": diagnostics["saturated_score"][indices].tolist(),
@@ -1238,7 +1296,7 @@ class AdvantageProcessor:
             weighted_centering_errors, default=0.0
         )
         for reward_key in reward_keys:
-            contribution = diagnostics[f"contribution::{reward_key}"]
+            contribution = diagnostics[f"contribution::{reward_key}"][applied]
             finite = contribution[np.isfinite(contribution)]
             reward_stats = stats(finite)
             log_data[f"train/src_contribution_{reward_key}_mean"] = reward_stats["mean"]
@@ -1246,7 +1304,7 @@ class AdvantageProcessor:
             log_data[f"train/src_conflict_ratio_{reward_key}"] = (
                 float((finite < 0.0).mean()) if len(finite) > 0 else 0.0
             )
-            weighted_contribution = diagnostics[f"weighted_contribution::{reward_key}"]
+            weighted_contribution = diagnostics[f"weighted_contribution::{reward_key}"][applied]
             finite_weighted = weighted_contribution[np.isfinite(weighted_contribution)]
             weighted_reward_stats = stats(finite_weighted)
             log_data[f"train/src_weighted_contribution_{reward_key}_mean"] = weighted_reward_stats[

@@ -19,6 +19,8 @@ data:
       train:  # Training participation config
         weight: 1  # Mixing weight (integer); ratio with other sources determines batch allocation
         max_dataset_size: 1024  # Cap on number of training samples for this source
+        sample_reweight: true  # Options: true, false; false keeps this source on the uniform SRC fallback
+        ga: true  # Options: true, false; false trains this source on its original rollouts
       eval: {}  # Eval participation (inherits shared `eval:` section settings)
   preprocessing_batch_size: 8  # Batch size for preprocessing
   dataloader_num_workers: 16  # Number of workers for DataLoader

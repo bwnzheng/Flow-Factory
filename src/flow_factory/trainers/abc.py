@@ -368,6 +368,9 @@ class BaseTrainer(ABC):
             sample_weighting_consumer=(
                 "nft" if trainer_type in {"nft", "ga_nft"} else "linear_advantage"
             ),
+            sample_weighting_enabled_by_source_id=(
+                self.config.data_args.sample_weighting_by_source_id
+            ),
         )
 
         if self.training_args.sample_weighting == "src":
@@ -379,8 +382,14 @@ class BaseTrainer(ABC):
                 if trainer_type in {"nft", "ga_nft"}
                 else "The configured global_std is not used by SRC-Reweight."
             )
+            gated_sources = [
+                d.name
+                for d in self.config.data_args.training_datasets
+                if not d.train.sample_reweight
+            ]
             logger.info(
                 "SRC-Reweight enabled: sample_weighting(src), "
+                f"gated_sources({gated_sources or 'none'}), "
                 f"src_score_type({self.training_args.src_score_type}), "
                 f"src_reweight_interpolation({self.training_args.src_reweight_interpolation}), "
                 f"src_reweight_temperature({self.training_args.src_reweight_temperature}), "

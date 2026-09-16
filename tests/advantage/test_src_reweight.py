@@ -12,11 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
 
-from flow_factory.advantage import AdvantageProcessor, compute_src_reweight
+from flow_factory.advantage import (
+    AdvantageProcessor,
+    SRCReweightResult,
+    compute_src_reweight,
+)
 from flow_factory.hparams import Arguments
 from flow_factory.samples import BaseSample
 
@@ -29,6 +35,7 @@ def _compute(
     score_type: str = "saturated",
     epsilon: float = 1e-8,
     max_multiplier: float | None = None,
+    enabled: np.ndarray | None = None,
 ):
     num_rewards, num_samples = rewards.shape
     if groups is None:
@@ -44,7 +51,134 @@ def _compute(
         degeneracy_threshold=1e-12,
         score_type=score_type,
         max_multiplier=max_multiplier,
+        reweight_enabled=enabled,
     )
+
+
+# Two prompt groups: samples 0-2 carry real scalar contrast, samples 3-5 have a
+# constant scalar reward (degenerate fallback territory).
+_TWO_GROUP_REWARDS = np.array(
+    [
+        [0.0, 0.2, 0.9, 1.0, 1.0, 1.0],
+        [0.0, 0.8, 0.7, 2.0, 2.0, 2.0],
+    ]
+)
+_TWO_GROUP_INDICES = np.array([0, 0, 0, 1, 1, 1])
+# Two prompt groups that both carry real scalar contrast, so a gated group can
+# be told apart from a degenerate one.
+_CONTRAST_REWARDS = np.array(
+    [
+        [0.0, 0.2, 0.9, 0.1, 0.5, 0.95],
+        [0.0, 0.8, 0.7, 0.2, 0.3, 0.6],
+    ]
+)
+
+
+def test_src_all_enabled_is_bit_identical_to_the_default_path():
+    default = _compute(_TWO_GROUP_REWARDS, groups=_TWO_GROUP_INDICES, max_multiplier=1.5)
+    explicit = _compute(
+        _TWO_GROUP_REWARDS,
+        groups=_TWO_GROUP_INDICES,
+        max_multiplier=1.5,
+        enabled=np.ones(_TWO_GROUP_REWARDS.shape[1], dtype=bool),
+    )
+
+    for field in dataclasses.fields(SRCReweightResult):
+        np.testing.assert_array_equal(
+            getattr(default, field.name),
+            getattr(explicit, field.name),
+            err_msg=f"SRC field {field.name!r} changed under an all-True gate",
+        )
+
+
+def test_src_gate_keeps_a_disabled_group_on_uniform_mass():
+    enabled = np.array([False, False, False, True, True, True])
+
+    result = _compute(_CONTRAST_REWARDS, groups=_TWO_GROUP_INDICES, enabled=enabled)
+
+    assert result.reweight_applied.tolist() == enabled.tolist()
+    np.testing.assert_allclose(result.loss_multipliers[:3], np.ones(3))
+    np.testing.assert_allclose(result.probabilities[:3], np.full(3, 1 / 3))
+    np.testing.assert_allclose(result.effective_sample_sizes[:3], np.full(3, 3.0))
+    np.testing.assert_allclose(result.effective_advantages[:3], result.uniform_advantages[:3])
+    # A gated group still carries real contrast: it is not a degenerate group.
+    assert not result.degenerate_scalar_contrast[:3].any()
+    assert not result.degenerate_scalar_contrast[3:].any()
+
+
+def test_src_gate_leaves_enabled_groups_untouched():
+    enabled = np.array([True, True, True, False, False, False])
+
+    gated = _compute(_CONTRAST_REWARDS, groups=_TWO_GROUP_INDICES, enabled=enabled)
+    solo = _compute(_CONTRAST_REWARDS[:, :3], groups=np.zeros(3, dtype=np.int64))
+
+    np.testing.assert_array_equal(gated.reweight_applied[:3], solo.reweight_applied)
+    np.testing.assert_array_equal(gated.loss_multipliers[:3], solo.loss_multipliers)
+    np.testing.assert_array_equal(gated.probabilities[:3], solo.probabilities)
+    np.testing.assert_array_equal(gated.scores[:3], solo.scores)
+    np.testing.assert_array_equal(gated.effective_advantages[:3], solo.effective_advantages)
+
+
+def test_src_gate_never_splits_a_group_with_mixed_flags():
+    rewards = np.array([[0.0, 0.2, 0.9], [0.0, 0.8, 0.7]])
+
+    result = _compute(rewards, enabled=np.array([True, False, True]))
+
+    assert not result.reweight_applied.any()
+    np.testing.assert_allclose(result.loss_multipliers, np.ones(3))
+    np.testing.assert_allclose(result.probabilities, np.full(3, 1 / 3))
+
+
+def test_src_gate_never_clamps_a_disabled_group_under_max_multiplier():
+    enabled = np.array([True, True, True, False, False, False])
+
+    result = _compute(
+        _TWO_GROUP_REWARDS,
+        groups=_TWO_GROUP_INDICES,
+        max_multiplier=0.5,
+        enabled=enabled,
+    )
+
+    np.testing.assert_allclose(result.loss_multipliers[3:], np.ones(3))
+
+
+def test_src_gate_exempts_a_disabled_group_from_the_two_reward_requirement():
+    rewards = np.array([[0.0, 1.0, 2.0]])
+    weight_matrix = np.ones_like(rewards)
+    applicable = np.ones_like(rewards, dtype=bool)
+    group_indices = np.zeros(3, dtype=np.int64)
+
+    with pytest.raises(ValueError, match="at least two active rewards"):
+        compute_src_reweight(
+            reward_matrix=rewards,
+            weight_matrix=weight_matrix,
+            applicable=applicable,
+            group_indices=group_indices,
+            interpolation=0.5,
+            temperature=1.0,
+            epsilon=1e-8,
+            degeneracy_threshold=1e-12,
+        )
+
+    result = compute_src_reweight(
+        reward_matrix=rewards,
+        weight_matrix=weight_matrix,
+        applicable=applicable,
+        group_indices=group_indices,
+        interpolation=0.5,
+        temperature=1.0,
+        epsilon=1e-8,
+        degeneracy_threshold=1e-12,
+        reweight_enabled=np.zeros(3, dtype=bool),
+    )
+
+    assert not result.reweight_applied.any()
+    np.testing.assert_allclose(result.loss_multipliers, np.ones(3))
+
+
+def test_src_gate_rejects_a_mismatched_mask_shape():
+    with pytest.raises(ValueError, match="reweight_enabled"):
+        _compute(np.ones((2, 3)), enabled=np.ones(2, dtype=bool))
 
 
 def test_src_probabilities_and_weighted_advantages_satisfy_group_invariants():
@@ -342,6 +476,65 @@ def _src_config(trainer_type: str = "grpo", reward_count: int = 2):
     }
 
 
+def test_src_config_gates_a_single_reward_source():
+    config = _src_config(reward_count=2)
+    config["data"]["datasets"] = [
+        {"name": "kept", "dataset_dir": "data/a", "train": {"weight": 1}},
+        {
+            "name": "gated",
+            "dataset_dir": "data/b",
+            "train": {"weight": 1, "sample_reweight": False},
+        },
+    ]
+    # Only one reward stays active for the gated source: SRC would reject that
+    # source if it were reweighted, and accepts the opt-out instead.
+    config["rewards"][1]["weight"] = {"kept": 1.0, "gated": 0.0}
+
+    args = Arguments.from_dict(config)
+
+    assert args.data_args.sample_weighting_by_source_id == [True, False]
+    assert args.training_args.sample_weighting == "src"
+
+
+def test_src_config_rejects_gating_every_training_source():
+    config = _src_config()
+    config["data"]["datasets"][0]["train"]["sample_reweight"] = False
+
+    with pytest.raises(ValueError, match="every training source sets"):
+        Arguments.from_dict(config)
+
+
+def test_src_config_resolves_gates_by_source_id():
+    config = _src_config()
+    config["data"]["datasets"] = [
+        {"name": "kept", "dataset_dir": "data/a", "train": {"weight": 1}},
+        {
+            "name": "gated",
+            "dataset_dir": "data/b",
+            "train": {"weight": 1, "sample_reweight": False, "ga": False},
+        },
+        {"name": "eval_only", "dataset_dir": "data/c", "eval": {}},
+    ]
+
+    args = Arguments.from_dict(config)
+
+    assert args.data_args.source_id_to_name == ["kept", "gated", "eval_only"]
+    # Eval-only entries have no training behaviour to gate.
+    assert args.data_args.sample_weighting_by_source_id == [True, False, True]
+    assert args.data_args.ga_by_source_id == [True, False, True]
+
+
+def test_src_config_keeps_legacy_single_dataset_mode_working():
+    config = _src_config()
+    del config["data"]["datasets"]
+    config["data"]["dataset_dir"] = "data"
+
+    args = Arguments.from_dict(config)
+
+    assert args.data_args.sample_weighting_by_source_id == []
+    assert args.data_args.ga_by_source_id == []
+
+
 def test_src_config_accepts_shared_linear_advantage_trainer():
     args = Arguments.from_dict(_src_config())
 
@@ -491,6 +684,80 @@ def test_advantage_processor_stores_src_weights_and_logs_without_rank_reduce(sam
     assert "raw_scores" in metrics["train/src_groups"][0]
     assert "saturated_scores" in metrics["train/src_groups"][0]
     assert "train/src_conflict_ratio_quality" in metrics
+
+
+def test_advantage_processor_gates_src_for_an_opted_out_source():
+    samples = [
+        BaseSample(
+            prompt="prompt",
+            _unique_id=7,
+            source_id=0,
+            applicable_rewards={"quality", "safety"},
+        )
+        for _ in range(3)
+    ]
+    processor = AdvantageProcessor(
+        accelerator=NoReduceAccelerator(),
+        reward_weights={"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        group_size=3,
+        global_std=True,
+        sampler_type="group_contiguous",
+        verbose=False,
+        sample_weighting="src",
+        src_reweight_interpolation=0.6,
+        src_reweight_temperature=0.7,
+        sample_weighting_enabled_by_source_id=[False],
+    )
+    rewards = {
+        "quality": torch.tensor([0.0, 0.4, 1.0]),
+        "safety": torch.tensor([0.0, 0.8, 0.9]),
+    }
+
+    advantages = processor.compute_advantages(samples, rewards, aggregation_func="sum")
+    metrics = processor.pop_advantage_metrics()
+    expected = _compute(
+        np.array([[0.0, 0.4, 1.0], [0.0, 0.8, 0.9]]),
+        enabled=np.zeros(3, dtype=bool),
+    )
+
+    assert all(sample.extra_kwargs["sample_reweight_applied"] is False for sample in samples)
+    np.testing.assert_allclose(
+        [sample.extra_kwargs["sample_weight"].item() for sample in samples], np.ones(3)
+    )
+    np.testing.assert_allclose(
+        advantages.cpu().numpy(), expected.uniform_advantages, rtol=1e-6, atol=1e-6
+    )
+    # A fully gated step leaves no group for the SRC statistics to describe.
+    assert metrics["train/src_reweight_applied_group_ratio"] == pytest.approx(0.0)
+    assert metrics["train/sample_weight_mean"] == pytest.approx(0.0)
+    assert len(metrics["train/src_groups"]) == 1
+    assert metrics["train/src_groups"][0]["reweight_applied"] is False
+
+
+def test_advantage_processor_keeps_unstamped_sources_reweighted():
+    samples = [BaseSample(prompt="prompt", _unique_id=7) for _ in range(3)]
+    processor = AdvantageProcessor(
+        accelerator=NoReduceAccelerator(),
+        reward_weights={"quality": {"default": 1.0}, "safety": {"default": 1.0}},
+        group_size=3,
+        global_std=True,
+        sampler_type="group_contiguous",
+        verbose=False,
+        sample_weighting="src",
+        src_reweight_interpolation=0.6,
+        src_reweight_temperature=0.7,
+        sample_weighting_enabled_by_source_id=[False],
+    )
+
+    processor.compute_advantages(
+        samples,
+        {"quality": torch.tensor([0.0, 0.4, 1.0]), "safety": torch.tensor([0.0, 0.8, 0.9])},
+        aggregation_func="sum",
+    )
+    metrics = processor.pop_advantage_metrics()
+
+    assert all(sample.extra_kwargs["sample_reweight_applied"] is True for sample in samples)
+    assert metrics["train/src_reweight_applied_group_ratio"] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("consumer", ["linear_advantage", "nft"])

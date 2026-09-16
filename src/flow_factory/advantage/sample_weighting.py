@@ -21,11 +21,16 @@ from typing import Literal, Optional
 
 import numpy as np
 
+from ..utils.logger_utils import setup_logger
+
+logger = setup_logger(__name__)
+
 
 @dataclass(frozen=True)
 class SRCReweightResult:
     """SRC-Reweight outputs aligned with the input sample axis."""
 
+    reweight_applied: np.ndarray
     contributions: np.ndarray
     weighted_contributions: np.ndarray
     scores: np.ndarray
@@ -58,6 +63,7 @@ def compute_src_reweight(
     degeneracy_threshold: float,
     score_type: Literal["raw", "saturated"] = "saturated",
     max_multiplier: Optional[float] = None,
+    reweight_enabled: Optional[np.ndarray] = None,
 ) -> SRCReweightResult:
     """Compute frozen-group SRC probabilities and effective advantages.
 
@@ -78,7 +84,16 @@ def compute_src_reweight(
         max_multiplier: Optional positive upper bound on the outer sample mass
             ``group_size * p_i``. ``None`` leaves the multiplier unbounded in
             ``[(1 - interpolation), (1 - interpolation) + interpolation * group_size]``.
-            A set value clamps every multiplier to that bound.
+            A set value clamps every multiplier to that bound. Gated groups are
+            never clamped: their mass is exactly ``1``, so a bound below ``1``
+            would invert the opt-out instead of limiting an SRC tail.
+        reweight_enabled: Optional ``(S,)`` boolean mask selecting which samples
+            may be reweighted (set from each dataset's ``train.sample_reweight``).
+            ``None`` means every sample. A group is reweighted only when the mask
+            is True for *all* of its samples; a group is otherwise never split, so
+            a mixed group falls back conservatively to uniform mass. Gated groups
+            take the uniform fallback, are exempt from the "at least two active
+            rewards" requirement, and are reported in ``reweight_applied``.
 
     Returns:
         SRC diagnostics, probabilities, and effective advantages aligned with samples.
@@ -94,11 +109,19 @@ def compute_src_reweight(
         does not renormalize, so a group's total mass falls below ``group_size``
         whenever the bound binds, which shrinks that group's share of the loss
         instead of redistributing it onto other samples.
+
+        A gated group keeps the unapplied SRC score and contribution just like a
+        degeneracy-threshold fallback does — ``reweight_applied`` is what
+        distinguishes "opted out" from "no contrast to weight by".
     """
     rewards = np.asarray(reward_matrix, dtype=np.float64)
     weights = np.asarray(weight_matrix, dtype=np.float64)
     applicable_mask = np.asarray(applicable, dtype=bool)
     groups = np.asarray(group_indices, dtype=np.int64)
+    if reweight_enabled is None:
+        enabled_mask = np.ones(rewards.shape[1], dtype=bool)
+    else:
+        enabled_mask = np.asarray(reweight_enabled, dtype=bool)
 
     if rewards.ndim != 2:
         raise ValueError(f"reward_matrix must have shape (R, S), got {rewards.shape}.")
@@ -111,6 +134,10 @@ def compute_src_reweight(
     if groups.shape != (rewards.shape[1],):
         raise ValueError(
             f"group_indices must have shape ({rewards.shape[1]},), got {groups.shape}."
+        )
+    if enabled_mask.shape != (rewards.shape[1],):
+        raise ValueError(
+            f"reweight_enabled must have shape ({rewards.shape[1]},), got {enabled_mask.shape}."
         )
     if not 0.0 <= interpolation < 1.0:
         raise ValueError(f"interpolation must be in [0, 1), got {interpolation}.")
@@ -128,6 +155,7 @@ def compute_src_reweight(
         raise ValueError("SRC-Reweight requires nonnegative active reward weights.")
 
     num_rewards, num_samples = rewards.shape
+    reweight_applied = np.zeros(num_samples, dtype=bool)
     contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
     weighted_contributions = np.full((num_rewards, num_samples), np.nan, dtype=np.float64)
     scores = np.zeros(num_samples, dtype=np.float64)
@@ -147,6 +175,7 @@ def compute_src_reweight(
     lower_bound_uniform = np.zeros(num_samples, dtype=np.float64)
     lower_bound_reweighted = np.zeros(num_samples, dtype=np.float64)
     degenerate = np.zeros(num_samples, dtype=bool)
+    mixed_flag_groups = 0
 
     for group_id in np.unique(groups):
         sample_indices = np.flatnonzero(groups == group_id)
@@ -172,10 +201,29 @@ def compute_src_reweight(
 
         reward_weights = group_weights[:, 0]
         active = group_applicable[:, 0] & (reward_weights > 0.0)
-        if int(active.sum()) < 2:
+
+        # A group is reweighted only when every sample asks for it.  Prompt
+        # groups are keyed by prompt content, which does not encode the source,
+        # so two sources that share a prompt string can meet in one group; such
+        # a group keeps uniform mass rather than being split or failing.
+        group_flags = enabled_mask[sample_indices]
+        group_enabled = bool(group_flags.all())
+        if not group_enabled and bool(group_flags.any()):
+            # Some samples of this group opted out, the rest did not.
+            mixed_flag_groups += 1
+        if int(active.sum()) < 2 and group_enabled:
             raise ValueError(
                 "SRC-Reweight requires at least two active rewards with positive weights in every "
                 f"prompt group; group {int(group_id)} has {int(active.sum())}."
+            )
+        if int(active.sum()) < 1:
+            # Gated groups are exempt from the two-reward rule (a single-reward
+            # source may opt out) but still need the uniform baseline to be
+            # defined. The caller's per-sample weight-sum guard rejects this
+            # earlier; failing loudly here beats a raw NumPy reduction error.
+            raise ValueError(
+                "SRC-Reweight requires at least one active reward with positive weight in every "
+                f"prompt group; group {int(group_id)} has none."
             )
 
         group_rewards = rewards[:, sample_indices]
@@ -211,7 +259,11 @@ def compute_src_reweight(
         uniform_means[sample_indices] = uniform_mean
 
         is_degenerate = scalar_variance <= degeneracy_threshold
-        if is_degenerate:
+        # A gated group reuses the degeneracy fallback: uniform mass, unit
+        # multiplier, and the ordinary uniform prompt baseline. ``degenerate``
+        # keeps reporting the actual scalar contrast, so the two fallbacks stay
+        # distinguishable through ``reweight_applied``.
+        if is_degenerate or not group_enabled:
             group_probabilities = np.full(group_size, 1.0 / group_size, dtype=np.float64)
             group_normalized_scores = np.zeros(group_size, dtype=np.float64)
         else:
@@ -246,10 +298,12 @@ def compute_src_reweight(
         group_uniform_advantages = uniform_centered / np.sqrt(scalar_variance + epsilon)
         group_weighted_advantages = centered_weighted / np.sqrt(weighted_variance + epsilon)
         group_multipliers = group_size * group_probabilities
-        if max_multiplier is not None:
+        if max_multiplier is not None and group_enabled:
             # Bound the outer sample mass without renormalizing: the scoring
             # ordering is direction-agnostic, so an uncapped multiplier lets a
-            # single extreme sample dominate its group's loss.
+            # single extreme sample dominate its group's loss. Gated groups are
+            # excluded: their mass is exactly 1, so a bound below 1 would shrink
+            # an opt-out instead of trimming an SRC tail.
             group_multipliers = np.minimum(group_multipliers, max_multiplier)
 
         normalized_scores[sample_indices] = group_normalized_scores
@@ -269,8 +323,18 @@ def compute_src_reweight(
         lower_bound_uniform[sample_indices] = float(group_scores.mean())
         lower_bound_reweighted[sample_indices] = float(group_probabilities @ group_scores)
         degenerate[sample_indices] = is_degenerate
+        reweight_applied[sample_indices] = group_enabled
+
+    if mixed_flag_groups:
+        logger.warning(
+            f"SRC-Reweight found {mixed_flag_groups} prompt group(s) whose samples disagree on "
+            "`train.sample_reweight`. Groups are keyed by prompt content, which does not encode "
+            "the source, so two datasets sharing a prompt string can land in one group. Those "
+            "groups kept uniform mass; give the sources distinct prompts to reweight either one."
+        )
 
     return SRCReweightResult(
+        reweight_applied=reweight_applied,
         contributions=contributions,
         weighted_contributions=weighted_contributions,
         scores=scores,

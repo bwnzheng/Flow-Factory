@@ -661,6 +661,147 @@ def test_survivor_score_controls_pareto_trimming():
     assert extreme_rewards["quality"].tolist() == [2.0, -10.0]
 
 
+def _ga_source_config(*, survivor_score: str = "advantage", ga_enabled: bool = True):
+    """Two training sources; `special` rewards only the first of them."""
+    return {
+        "data": {
+            "datasets": [
+                {"name": "source_a", "dataset_dir": "data/a", "train": {"weight": 1}},
+                {"name": "source_b", "dataset_dir": "data/b", "train": {"weight": 1}},
+            ]
+        },
+        "train": {
+            "trainer_type": "ga_nft",
+            "advantage_aggregation": "sum",
+            "per_device_batch_size": 1,
+            "group_size": 4,
+            "unique_sample_num_per_epoch": 48,
+            "gradient_step_per_epoch": 2,
+            "ga": {"enabled": ga_enabled, "survivor_score": survivor_score},
+        },
+        "rewards": [
+            {"name": "shared", "reward_model": "CLIP", "weight": 1.0},
+            {
+                "name": "special",
+                "reward_model": "CLIP",
+                "weight": {"source_a": 1.0, "source_b": 0.0},
+            },
+        ],
+    }
+
+
+def test_ga_config_rejects_gating_every_training_source():
+    config = _ga_source_config()
+    for dataset in config["data"]["datasets"]:
+        dataset["train"]["ga"] = False
+
+    with pytest.raises(ValueError, match="no group would ever be evolved"):
+        Arguments.from_dict(config)
+
+
+def test_ga_config_requires_two_rewards_on_every_evolved_source_for_src_selection():
+    config = _ga_source_config(survivor_score="src")
+
+    with pytest.raises(ValueError, match="for every evolved source"):
+        Arguments.from_dict(config)
+
+
+def test_ga_config_accepts_gating_a_single_reward_source():
+    config = _ga_source_config(survivor_score="src")
+    config["data"]["datasets"][1]["train"]["ga"] = False
+
+    args = Arguments.from_dict(config)
+
+    assert args.data_args.ga_by_source_id == [True, False]
+    assert args.training_args.ga.survivor_score == "src"
+
+
+def test_ga_config_ignores_gates_for_non_ga_trainers():
+    config = _ga_source_config(ga_enabled=False)
+    config["train"]["trainer_type"] = "grpo"
+    for dataset in config["data"]["datasets"]:
+        dataset["train"]["ga"] = False
+
+    args = Arguments.from_dict(config)
+
+    assert args.data_args.ga_by_source_id == [False, False]
+
+
+def test_ga_evolve_skips_groups_from_gated_sources():
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._accelerator = SimpleNamespace(device=torch.device("cpu"), process_index=0)
+    ga._n_generations = 2
+    ga._survivor_score = "advantage"
+    ga._training_args = SimpleNamespace(ga=SimpleNamespace(strategy="uniform"))
+    ga._ga_enabled_by_source_id = [False]
+
+    samples = [
+        BaseSample(
+            prompt=prompt,
+            _unique_id=unique_id,
+            source_id=0,
+            all_latents=torch.zeros(3, 1, 2, 2),
+        )
+        for prompt, unique_id in [("a", 1), ("a", 1), ("b", 2), ("b", 2)]
+    ]
+    rewards = {"quality": torch.tensor([0.1, 0.2, 0.3, 0.4])}
+
+    # No adapter / reward buffer is touched: a fully gated run never denoises.
+    evolved, evolved_rewards, acc, events, media = ga.evolve(
+        parent_samples=samples,
+        parent_rewards=rewards,
+        epoch=0,
+        applicable=None,
+        verbose=False,
+    )
+
+    assert all(evolved_sample is sample for evolved_sample, sample in zip(evolved, samples))
+    torch.testing.assert_close(evolved_rewards["quality"], rewards["quality"])
+    assert acc["n_groups"] == 2
+    assert acc["n_groups_skipped"] == 2
+    assert not acc["gen0_count"]
+    assert events == []
+    assert media == {0: [], 1: []}
+
+
+def test_ga_evolve_keeps_unstamped_sources_evolving():
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._ga_enabled_by_source_id = [False]
+
+    assert ga._group_enabled(None) is True
+    assert ga._group_enabled(-1) is True
+    assert ga._group_enabled(5) is True
+    assert ga._group_enabled(0) is False
+
+
+def test_ga_evolve_evolves_when_the_source_id_space_is_absent():
+    ga = GeneticAlgorithm.__new__(GeneticAlgorithm)
+    ga._ga_enabled_by_source_id = []
+
+    assert ga._group_enabled(0) is True
+
+
+def test_ga_distributed_stats_report_gated_groups():
+    stats = GeneticAlgorithm.reduce_stats(
+        ga_acc={"n_groups": 5, "n_groups_skipped": 2, "gen0_count": 3},
+        ga_selection_events=[],
+        accelerator=SimpleNamespace(num_processes=1, device=torch.device("cpu")),
+    )
+
+    assert stats["ga/n_groups"] == 5
+    assert stats["ga/n_groups_skipped"] == 2
+
+
+def test_ga_distributed_stats_tolerate_a_missing_skip_counter():
+    stats = GeneticAlgorithm.reduce_stats(
+        ga_acc={"n_groups": 5, "gen0_count": 3},
+        ga_selection_events=[],
+        accelerator=SimpleNamespace(num_processes=1, device=torch.device("cpu")),
+    )
+
+    assert stats["ga/n_groups_skipped"] == 0
+
+
 def test_ga_distributed_stats_reduce_uses_float32():
     class DtypeCheckingAccelerator:
         num_processes = 2

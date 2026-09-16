@@ -15,7 +15,7 @@
 # src/flow_factory/hparams/__init__.py
 
 from .args import Arguments
-from .data_args import DataArguments
+from .data_args import DataArguments, source_flag_enabled
 from .dataset_args import DatasetArguments, DatasetEvalSpec, DatasetTrainSpec
 from .log_args import LogArguments
 from .model_args import ModelArguments
@@ -62,5 +62,6 @@ __all__ = [
     "DatasetArguments",
     "DatasetTrainSpec",
     "DatasetEvalSpec",
+    "source_flag_enabled",
     "LogArguments",
 ]

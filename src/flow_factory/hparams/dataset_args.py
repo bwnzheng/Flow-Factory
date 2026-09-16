@@ -39,6 +39,10 @@ YAML example::
           dataset_dir: dataset/pickscore
           train: { weight: 3.0, max_dataset_size: 5000 }
           eval:  null            # not used for eval
+        - name: ocr
+          dataset_dir: dataset/ocr
+          # Per-source opt-outs for the two globally enabled mechanisms.
+          train: { weight: 1.0, sample_reweight: false, ga: false }
 
 Reward routing references each dataset by ``name`` via
 ``RewardArguments.applicable_datasets``.  The ``__source__`` carried on every sample
@@ -83,6 +87,18 @@ class DatasetTrainSpec(ArgABC):
             floats raise.
         max_dataset_size: Per-source cap on number of training samples
             (None = inherit ``DataArguments.max_dataset_size``).
+        sample_reweight: Whether SRC-Reweight (``train.sample_weighting: src``)
+            may reweight prompt groups from this source.  When False those
+            groups keep the uniform fallback: unit loss multiplier and the
+            ordinary prompt-local advantage.  The source is then also exempt
+            from SRC's "two active rewards" requirement, so a single-reward
+            source can opt out instead of being unconfigurable.  Inert while
+            ``sample_weighting`` is ``none``.
+        ga: Whether the genetic algorithm (``train.ga.enabled`` with a
+            ``ga_nft`` / ``ga_grpo_guard`` trainer) may evolve prompt groups
+            from this source.  When False the group trains on its original
+            rollout samples: no parent selection, crossover, offspring
+            denoising, or survivor trimming.  Inert for non-GA trainers.
     """
 
     enabled: bool = field(
@@ -106,6 +122,26 @@ class DatasetTrainSpec(ArgABC):
         default=None,
         metadata={
             "help": "Cap on training samples for this source (None = inherit DataArguments.max_dataset_size)."
+        },
+    )
+    sample_reweight: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Apply SRC-Reweight (train.sample_weighting: src) to this source. False keeps its "
+                "prompt groups uniform (unit loss multiplier) and exempts them from SRC's "
+                "'two active rewards' requirement. Inert when sample_weighting is 'none'."
+            )
+        },
+    )
+    ga: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run the genetic algorithm (train.ga.enabled) on this source's prompt groups. "
+                "False trains them on their original rollout samples with no crossover. "
+                "Inert for non-GA trainers."
+            )
         },
     )
 
@@ -271,7 +307,7 @@ class DatasetArguments(ArgABC):
               eval:  { num_inference_steps: 28, guidance_scale: 5.0 }
             - name: pickscore
               dataset_dir: dataset/pickscore
-              train: { weight: 3.0, max_dataset_size: 5000 }
+              train: { weight: 3.0, max_dataset_size: 5000, sample_reweight: false }
               eval:  null
     """
 

@@ -52,13 +52,14 @@ import hashlib
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import tqdm as tqdm_
 from accelerate.utils.operations import gather_object
 
+from ...hparams.data_args import source_flag_enabled
 from ...logger import prepare_sample_for_media
 from ...samples import BaseSample
 from ...utils.base import filter_kwargs, move_tensors_to_device
@@ -219,6 +220,10 @@ class GeneticAlgorithm:
         training_args: Training arguments (for num_inference_steps, etc.).
         reward_buffer: Reward buffer for computing child rewards.
         seed: Base random seed.
+        ga_enabled_by_source_id: Optional per-source GA gate indexed by
+            ``source_id`` (from ``data.datasets[*].train.ga``).  A group whose
+            source is disabled keeps its original rollout population.  Empty /
+            ``None`` evolves every group.
     """
 
     def __init__(
@@ -237,6 +242,7 @@ class GeneticAlgorithm:
         seed: int = 42,
         denoise_kwargs: Optional[Dict[str, Any]] = None,
         child_factory: Optional[callable] = None,
+        ga_enabled_by_source_id: Optional[Sequence[bool]] = None,
     ) -> None:
         # Strategy
         self._strategy = crossover_strategy
@@ -296,6 +302,19 @@ class GeneticAlgorithm:
         # Denoising and child creation
         self._denoise_kwargs = denoise_kwargs or {}
         self._child_factory = child_factory or self._default_child_factory
+
+        # Per-source GA gate (`data.datasets[*].train.ga`).  Empty list means
+        # "no source-id space defined" (legacy single-source) → every group
+        # evolves.
+        self._ga_enabled_by_source_id: List[bool] = list(ga_enabled_by_source_id or [])
+
+    def _group_enabled(self, source_id: Optional[int]) -> bool:
+        """Whether this group's source participates in genetic evolution.
+
+        The fallback rule lives in
+        :func:`flow_factory.hparams.data_args.source_flag_enabled`.
+        """
+        return source_flag_enabled(self._ga_enabled_by_source_id, source_id)
 
     # ------------------------------------------------------------------
     # Public API
@@ -406,7 +425,7 @@ class GeneticAlgorithm:
         all_evolved_rewards: Dict[str, List[float]] = {k: [] for k in reward_keys}
 
         # Accumulate stats locally on this rank.
-        acc: Dict[str, Any] = {"n_groups": 0}
+        acc: Dict[str, Any] = {"n_groups": 0, "n_groups_skipped": 0}
         for gen in range(self._n_generations):
             acc[f"gen{gen}_count"] = 0
             acc[f"gen{gen}_n_pop"] = 0
@@ -446,6 +465,17 @@ class GeneticAlgorithm:
             population = [parent_samples[i] for i in indices]
             pop_rewards = {k: local_g_rewards[k][indices].copy() for k in reward_keys}
             acc["n_groups"] += 1
+
+            if not self._group_enabled(population[0].source_id):
+                # Gated source (`train.ga: false`): the group trains on its
+                # original rollout samples.  No parent selection, offspring,
+                # denoising, or survivor trimming — and no selection event, so
+                # the GA statistics describe exactly the evolved population.
+                acc["n_groups_skipped"] += 1
+                all_evolved.extend(population)
+                for k in reward_keys:
+                    all_evolved_rewards[k].extend(pop_rewards[k].tolist())
+                continue
 
             # ---- Determine valid reward keys for this group -------------
             # All samples in a group share the same source, so we consult
@@ -1460,7 +1490,7 @@ class GeneticAlgorithm:
             }
         )
 
-        count_keys = ["n_groups"]
+        count_keys = ["n_groups", "n_groups_skipped"]
         for gen in range(max_gen):
             count_keys.append(f"gen{gen}_count")
             for key in [
@@ -1508,7 +1538,11 @@ class GeneticAlgorithm:
         for i, k in enumerate(count_keys):
             reduced[k] = t[i].item()
 
-        stats: Dict[str, Any] = {"ga/n_groups": int(reduced["n_groups"])}
+        stats: Dict[str, Any] = {
+            "ga/n_groups": int(reduced["n_groups"]),
+            # Groups whose source opted out of GA (`data.datasets[*].train.ga`).
+            "ga/n_groups_skipped": int(reduced.get("n_groups_skipped", 0.0)),
+        }
         for gen in range(max_gen):
             count = reduced[f"gen{gen}_count"]
             if count == 0:

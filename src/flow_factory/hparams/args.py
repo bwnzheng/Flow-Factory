@@ -174,6 +174,10 @@ class Arguments(ArgABC):
         # (so `applicable_datasets` is concrete).
         self._resolve_reward_weights()
         self._validate_sample_weighting()
+        # Per-source GA opt-outs (`data.datasets[*].train.ga`): an all-gated GA
+        # run is a silent no-op, and `survivor_score: src` needs the same
+        # two-reward contrast as SRC-Reweight on every evolved source.
+        self._validate_ga_by_source()
         # With routing concrete, fail-fast when a training source has NO
         # applicable training reward — the user almost certainly meant
         # to add the source name to some reward's `applicable_datasets` list.
@@ -272,6 +276,7 @@ class Arguments(ArgABC):
                 f"trainer_type={trainer_type!r} has `off_policy: true`."
             )
 
+        enabled_sources = []
         for dataset in self.data_args.training_datasets:
             active_rewards = []
             for reward in self.reward_args:
@@ -286,11 +291,75 @@ class Arguments(ArgABC):
                     )
                 if weight > 0.0:
                     active_rewards.append(reward.name)
+            if not dataset.train.sample_reweight:
+                # Gated source: SRC never scores it, so it is not required to
+                # carry the two-reward contrast SRC is built from.  This is what
+                # lets a single-reward source (e.g. an OCR-only dataset) opt out
+                # instead of being unconfigurable.
+                continue
+            enabled_sources.append(dataset.name)
             if len(active_rewards) < 2:
                 raise ValueError(
                     "`sample_weighting: src` requires at least two active rewards with positive "
-                    f"weights for every training source; dataset={dataset.name!r} has "
-                    f"active_rewards={active_rewards}."
+                    f"weights for every reweighted training source; dataset={dataset.name!r} has "
+                    f"active_rewards={active_rewards}. Set `train.sample_reweight: false` on that "
+                    "dataset to keep it on the uniform fallback."
+                )
+
+        # Legacy / eval-only configs have no per-source training space to gate.
+        if self.data_args.training_datasets and not enabled_sources:
+            names = [d.name for d in self.data_args.training_datasets]
+            raise ValueError(
+                "`sample_weighting: src` is enabled but every training source sets "
+                f"`train.sample_reweight: false` {names} — SRC would never fire. Remove the "
+                "opt-outs or set `sample_weighting: none`."
+            )
+
+    def _validate_ga_by_source(self) -> None:
+        """Validate the per-source GA gate (`data.datasets[*].train.ga`).
+
+        Only meaningful for the GA trainers with the algorithm switched on; for
+        every other configuration the flags are inert and ignored.  Mirrors
+        :meth:`_validate_sample_weighting`: an all-gated configuration is a
+        silent no-op, and the GA's SRC survivor selection needs the same
+        two-reward contrast SRC-Reweight requires.
+        """
+        ta = self.training_args
+        trainer_type = str(ta.trainer_type).lower()
+        ga_args = getattr(ta, "ga", None)
+        if trainer_type not in {"ga_nft", "ga_grpo_guard"} or not getattr(
+            ga_args, "enabled", False
+        ):
+            return
+        if not self.data_args.training_datasets:
+            return
+
+        enabled_sources = [d for d in self.data_args.training_datasets if d.train.ga]
+        if not enabled_sources:
+            names = [d.name for d in self.data_args.training_datasets]
+            raise ValueError(
+                "`ga.enabled: true` is set but every training source sets `train.ga: false` "
+                f"{names} — no group would ever be evolved. Remove the opt-outs or set "
+                "`ga.enabled: false`."
+            )
+
+        if getattr(ga_args, "survivor_score", None) != "src":
+            return
+        name_to_id = self.data_args.source_name_to_id
+        for dataset in enabled_sources:
+            active_rewards = []
+            for reward in self.reward_args:
+                reward_weights = reward.weight
+                if not isinstance(reward_weights, dict):
+                    continue
+                if float(reward_weights.get(dataset.name, 0.0)) > 0.0:
+                    active_rewards.append(reward.name)
+            if len(active_rewards) < 2:
+                raise ValueError(
+                    "`ga.survivor_score: src` requires at least two active rewards with positive "
+                    f"weights for every evolved source; dataset={dataset.name!r} (source_id="
+                    f"{name_to_id.get(dataset.name)}) has active_rewards={active_rewards}. Set "
+                    "`train.ga: false` on that dataset or use a non-SRC survivor score."
                 )
 
     def _assign_source_ids(self) -> None:

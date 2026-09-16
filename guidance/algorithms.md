@@ -187,10 +187,50 @@ train:
   src_reweight_epsilon: 1.0e-8
   src_reweight_degeneracy_threshold: 1.0e-12
   src_reweight_max_multiplier: null  # Optional positive cap on K * p_i; null = unbounded
+
+data:
+  datasets:
+    - name: pickscore
+      dataset_dir: dataset/pickscore
+      train: { weight: 1, sample_reweight: true }   # Options: true, false
+    - name: ocr
+      dataset_dir: dataset/ocr
+      train: { weight: 1, sample_reweight: false }  # keep this source uniform
 ```
 
+#### Per-source opt-out (`train.sample_reweight`)
+
+A dataset that sets `train.sample_reweight: false` is excluded from SRC for the
+whole run: its prompt groups take the uniform fallback, i.e. `sample_weight = 1`
+(so NFT's outer multiplier is exactly `1`) and the ordinary prompt-local
+uniform baseline, so that source trains as if SRC were off while every other
+source is reweighted. Two consequences follow:
+
+- The opt-out **narrows, never widens**: it is inert unless
+  `sample_weighting: src`, and `sample_weighting: none` remains the way to turn
+  SRC off globally.
+- A gated source is exempt from SRC's two-active-reward requirement, so a
+  single-reward source (an OCR-only dataset, say) can be gated rather than
+  breaking the run. Gating every training source is rejected at config time.
+
+The logged `src_*` and `sample_weight_*` metrics describe **only the reweighted
+groups**; `train/src_reweight_applied_group_ratio` reports the coverage, so a
+partly gated run is not misread as a fully reweighted one. `train/src_groups`
+records every group with a `reweight_applied` flag, and each sample carries
+`sample_reweight_applied` next to its `sample_weight`. Two caveats: a gated
+group is *not* clamped by `src_reweight_max_multiplier` (its mass is already
+exactly 1), and "gated" is not the same as "SRC never existed" — with
+`sample_weighting: src` the GRPO-style consumers always use the prompt-local
+uniform baseline, so gating removes the multiplier without restoring the
+`global_std` normalizer. `ga.survivor_score: src` is a GA selection rule, not a
+loss multiplier; it is governed by `train.ga` alone.
+
+Prompt groups are keyed by prompt content, which does not encode the source. If
+two datasets share a prompt string, the resulting mixed group is conservatively
+kept uniform (with a warning) instead of being split or failing.
+
 SRC requires at least two active rewards with positive, nonnegative fixed
-weights for every training source. GRPO-style consumers use the ordinary
+weights for every reweighted training source. GRPO-style consumers use the ordinary
 uniform prompt baseline and apply SRC only as an outer sample multiplier.
 NFT preserves its declared normalizer contract while retaining the ordinary
 uniform prompt mean: `global_std: true` uses the baseline unweighted global
@@ -284,7 +324,35 @@ train:
     survivor_score: src  # Options: advantage, abs_advantage, src
 scheduler:
   dynamics_type: Flow-SDE
+
+data:
+  datasets:
+    - name: pickscore
+      dataset_dir: dataset/pickscore
+      train: { weight: 1, ga: true }    # Options: true, false
+    - name: ocr
+      dataset_dir: dataset/ocr
+      train: { weight: 1, ga: false }   # skip evolution for this source
 ```
+
+`train.ga: false` on a dataset excludes its prompt groups from every stage of
+the genetic algorithm: no parent selection, no crossover/mutation offspring, no
+offspring denoising or rescoring, no Pareto/survivor trimming, and no selection
+event. Those groups train on their original `group_size` rollouts and, because
+the GA path enables `_child_in_norm`, they participate in the ordinary group
+mean/std — i.e. the source behaves exactly as it would under the plain trainer.
+The flag narrows a globally enabled GA only: it is inert for non-GA trainers and
+when `ga.enabled: false`, and gating every training source is rejected at config
+time. `ga/n_groups` still counts every group; `ga/n_groups_skipped` reports how
+many were gated, and the per-generation `ga/gen*/...` population statistics
+describe only the evolved groups. Crossover-step latents are still stored for
+gated sources during sampling (trajectory length is one epoch-level constant, so
+per-source pruning would give samples ragged `all_latents`), which costs memory
+but no extra denoising.
+
+The GA's own machinery is unaffected by `train.sample_reweight`: that flag gates
+only the SRC-Reweight loss multiplier. A source can therefore evolve under
+`survivor_score: src` and still contribute to the loss without SRC reweighting.
 
 `survivor_score: advantage` prefers high-fitness candidates when the Pareto set
 must be trimmed or filled. `abs_advantage` also preserves strongly negative
@@ -620,7 +688,10 @@ train:
 setting, but keeps NFT's decoupled matching objective. When
 `off_policy: true`, both parent and offspring denoising use the EMA sampling
 policy. Like the GRPO-Guard variant, it currently requires pointwise rewards
-and complete prompt groups on one rank (`group_contiguous`).
+and complete prompt groups on one rank (`group_contiguous`). Per-source gating
+(`data.datasets[*].train.ga`) works identically to the GRPO-Guard variant: a
+gated source keeps its original rollout population and skips evolution
+entirely.
 
 ## AWM: Advantage Weighted Matching
 
