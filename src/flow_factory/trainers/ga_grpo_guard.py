@@ -94,7 +94,7 @@ class GAGRPOGuardTrainer(GRPOGuardTrainer):
             self.advantage_processor._ga_enabled = True
             self.advantage_processor._child_in_norm = True
             gated_sources = [
-                d.name for d in self.config.data_args.training_datasets if not d.train.ga
+                d.name for d in self.config.data_args.training_datasets if not d.train.allow_ga
             ]
             logger.info(
                 f"GA GRPO-Guard: offspring_mode={offspring_mode} "

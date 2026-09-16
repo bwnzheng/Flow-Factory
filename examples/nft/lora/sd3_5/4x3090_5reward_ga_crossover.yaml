@@ -15,9 +15,10 @@
 #   - geneval   — compositional prompts with metadata (GenEval + general)
 #   - ocr       — text-rendering prompts with quoted target text (OCR + general)
 #
-# Per-source opt-outs: `train.ga: false` on a dataset keeps its prompt groups on
-# their original rollouts (no crossover of any kind), and `train.sample_reweight:
-# false` keeps them out of SRC-Reweight. Both default to true.
+# Per-source opt-outs: `train.allow_ga: false` on a dataset keeps its prompt groups
+# on their original rollouts (no crossover of any kind), and
+# `train.allow_sample_reweight: false` keeps them out of SRC-Reweight. Both
+# default to true.
 #
 # Specialist rewards (GenEval, OCR) route only to their own source via
 # `applicable_datasets`.  General rewards apply to all sources.
@@ -45,8 +46,8 @@ data:
       train:
         weight: 1
         max_dataset_size: 1024
-        sample_reweight: true  # Options: true, false; false keeps this source on the uniform SRC fallback
-        ga: true  # Options: true, false; false trains this source on its original rollouts
+        allow_sample_reweight: true  # Options: true, false; false keeps this source on the uniform SRC fallback
+        allow_ga: true  # Options: true, false; false trains this source on its original rollouts
       eval: {}
 
     # - name: geneval
@@ -61,8 +62,8 @@ data:
       train:
         weight: 1
         max_dataset_size: 1024
-        sample_reweight: true  # Options: true, false; false keeps this source on the uniform SRC fallback
-        ga: true  # Options: true, false; false trains this source on its original rollouts
+        allow_sample_reweight: true  # Options: true, false; false keeps this source on the uniform SRC fallback
+        allow_ga: true  # Options: true, false; false trains this source on its original rollouts
       eval: {}
 
   preprocessing_batch_size: 8

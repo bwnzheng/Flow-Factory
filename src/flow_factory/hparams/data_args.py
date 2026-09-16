@@ -188,20 +188,22 @@ class DataArguments(ArgABC):
         """Per-source gate for SRC-Reweight (``train.sample_weighting: src``).
 
         ``True`` at index ``source_id`` means the source's prompt groups may be
-        reweighted; ``False`` keeps them on the uniform fallback.  Read by
-        ``AdvantageProcessor``; inert while ``sample_weighting`` is ``none``.
+        reweighted (``train.allow_sample_reweight``); ``False`` keeps them on
+        the uniform fallback.  Read by ``AdvantageProcessor``; inert while
+        ``sample_weighting`` is ``none``.
         """
-        return self._train_flag_by_source_id("sample_reweight")
+        return self._train_flag_by_source_id("allow_sample_reweight")
 
     @property
     def ga_by_source_id(self) -> List[bool]:
         """Per-source gate for the genetic algorithm (``train.ga.enabled``).
 
         ``True`` at index ``source_id`` means the source's prompt groups run
-        through genetic evolution; ``False`` trains them on their original
-        rollout samples.  Read by the GA trainers; inert elsewhere.
+        through genetic evolution (``train.allow_ga``); ``False`` trains them on
+        their original rollout samples.  Read by the GA trainers; inert
+        elsewhere.
         """
-        return self._train_flag_by_source_id("ga")
+        return self._train_flag_by_source_id("allow_ga")
 
     def _train_flag_by_source_id(self, attr: str) -> List[bool]:
         """Collect one per-dataset training flag into a source-id indexable list."""

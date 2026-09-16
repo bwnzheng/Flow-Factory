@@ -221,7 +221,7 @@ class GeneticAlgorithm:
         reward_buffer: Reward buffer for computing child rewards.
         seed: Base random seed.
         ga_enabled_by_source_id: Optional per-source GA gate indexed by
-            ``source_id`` (from ``data.datasets[*].train.ga``).  A group whose
+            ``source_id`` (from ``data.datasets[*].train.allow_ga``).  A group whose
             source is disabled keeps its original rollout population.  Empty /
             ``None`` evolves every group.
     """
@@ -303,7 +303,7 @@ class GeneticAlgorithm:
         self._denoise_kwargs = denoise_kwargs or {}
         self._child_factory = child_factory or self._default_child_factory
 
-        # Per-source GA gate (`data.datasets[*].train.ga`).  Empty list means
+        # Per-source GA gate (`data.datasets[*].train.allow_ga`).  Empty list means
         # "no source-id space defined" (legacy single-source) → every group
         # evolves.
         self._ga_enabled_by_source_id: List[bool] = list(ga_enabled_by_source_id or [])
@@ -467,7 +467,7 @@ class GeneticAlgorithm:
             acc["n_groups"] += 1
 
             if not self._group_enabled(population[0].source_id):
-                # Gated source (`train.ga: false`): the group trains on its
+                # Gated source (`train.allow_ga: false`): the group trains on its
                 # original rollout samples.  No parent selection, offspring,
                 # denoising, or survivor trimming — and no selection event, so
                 # the GA statistics describe exactly the evolved population.
@@ -1540,7 +1540,7 @@ class GeneticAlgorithm:
 
         stats: Dict[str, Any] = {
             "ga/n_groups": int(reduced["n_groups"]),
-            # Groups whose source opted out of GA (`data.datasets[*].train.ga`).
+            # Groups whose source opted out of GA (`data.datasets[*].train.allow_ga`).
             "ga/n_groups_skipped": int(reduced.get("n_groups_skipped", 0.0)),
         }
         for gen in range(max_gen):

@@ -122,7 +122,7 @@ class AdvantageProcessor:
         self.src_reweight_max_multiplier = src_reweight_max_multiplier
         self.max_log_samples = max_log_samples
         self._source_id_to_name = source_id_to_name or []
-        # Per-source SRC-Reweight gate (`data.datasets[*].train.sample_reweight`).
+        # Per-source SRC-Reweight gate (`data.datasets[*].train.allow_sample_reweight`).
         # Empty list = legacy single-source mode = every source reweighted.
         self._sample_weighting_enabled_by_source_id = list(
             sample_weighting_enabled_by_source_id or []
@@ -1145,7 +1145,7 @@ class AdvantageProcessor:
                 "std": float(finite.std()),
             }
 
-        # Groups whose source opted out of SRC (`train.sample_reweight: false`)
+        # Groups whose source opted out of SRC (`train.allow_sample_reweight: false`)
         # stay out of the SRC statistics: the logged distribution then describes
         # exactly the groups the multiplier acted on.  A step can be entirely
         # gated, so every reduction below needs an empty-safe default.

@@ -385,7 +385,7 @@ class BaseTrainer(ABC):
             gated_sources = [
                 d.name
                 for d in self.config.data_args.training_datasets
-                if not d.train.sample_reweight
+                if not d.train.allow_sample_reweight
             ]
             logger.info(
                 "SRC-Reweight enabled: sample_weighting(src), "

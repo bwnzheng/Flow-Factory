@@ -174,7 +174,7 @@ class Arguments(ArgABC):
         # (so `applicable_datasets` is concrete).
         self._resolve_reward_weights()
         self._validate_sample_weighting()
-        # Per-source GA opt-outs (`data.datasets[*].train.ga`): an all-gated GA
+        # Per-source GA opt-outs (`data.datasets[*].train.allow_ga`): an all-gated GA
         # run is a silent no-op, and `survivor_score: src` needs the same
         # two-reward contrast as SRC-Reweight on every evolved source.
         self._validate_ga_by_source()
@@ -291,7 +291,7 @@ class Arguments(ArgABC):
                     )
                 if weight > 0.0:
                     active_rewards.append(reward.name)
-            if not dataset.train.sample_reweight:
+            if not dataset.train.allow_sample_reweight:
                 # Gated source: SRC never scores it, so it is not required to
                 # carry the two-reward contrast SRC is built from.  This is what
                 # lets a single-reward source (e.g. an OCR-only dataset) opt out
@@ -302,7 +302,7 @@ class Arguments(ArgABC):
                 raise ValueError(
                     "`sample_weighting: src` requires at least two active rewards with positive "
                     f"weights for every reweighted training source; dataset={dataset.name!r} has "
-                    f"active_rewards={active_rewards}. Set `train.sample_reweight: false` on that "
+                    f"active_rewards={active_rewards}. Set `train.allow_sample_reweight: false` on that "
                     "dataset to keep it on the uniform fallback."
                 )
 
@@ -311,12 +311,12 @@ class Arguments(ArgABC):
             names = [d.name for d in self.data_args.training_datasets]
             raise ValueError(
                 "`sample_weighting: src` is enabled but every training source sets "
-                f"`train.sample_reweight: false` {names} — SRC would never fire. Remove the "
+                f"`train.allow_sample_reweight: false` {names} — SRC would never fire. Remove the "
                 "opt-outs or set `sample_weighting: none`."
             )
 
     def _validate_ga_by_source(self) -> None:
-        """Validate the per-source GA gate (`data.datasets[*].train.ga`).
+        """Validate the per-source GA gate (`data.datasets[*].train.allow_ga`).
 
         Only meaningful for the GA trainers with the algorithm switched on; for
         every other configuration the flags are inert and ignored.  Mirrors
@@ -334,11 +334,11 @@ class Arguments(ArgABC):
         if not self.data_args.training_datasets:
             return
 
-        enabled_sources = [d for d in self.data_args.training_datasets if d.train.ga]
+        enabled_sources = [d for d in self.data_args.training_datasets if d.train.allow_ga]
         if not enabled_sources:
             names = [d.name for d in self.data_args.training_datasets]
             raise ValueError(
-                "`ga.enabled: true` is set but every training source sets `train.ga: false` "
+                "`ga.enabled: true` is set but every training source sets `train.allow_ga: false` "
                 f"{names} — no group would ever be evolved. Remove the opt-outs or set "
                 "`ga.enabled: false`."
             )
@@ -359,7 +359,7 @@ class Arguments(ArgABC):
                     "`ga.survivor_score: src` requires at least two active rewards with positive "
                     f"weights for every evolved source; dataset={dataset.name!r} (source_id="
                     f"{name_to_id.get(dataset.name)}) has active_rewards={active_rewards}. Set "
-                    "`train.ga: false` on that dataset or use a non-SRC survivor score."
+                    "`train.allow_ga: false` on that dataset or use a non-SRC survivor score."
                 )
 
     def _assign_source_ids(self) -> None:

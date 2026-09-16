@@ -483,7 +483,7 @@ def test_src_config_gates_a_single_reward_source():
         {
             "name": "gated",
             "dataset_dir": "data/b",
-            "train": {"weight": 1, "sample_reweight": False},
+            "train": {"weight": 1, "allow_sample_reweight": False},
         },
     ]
     # Only one reward stays active for the gated source: SRC would reject that
@@ -498,7 +498,7 @@ def test_src_config_gates_a_single_reward_source():
 
 def test_src_config_rejects_gating_every_training_source():
     config = _src_config()
-    config["data"]["datasets"][0]["train"]["sample_reweight"] = False
+    config["data"]["datasets"][0]["train"]["allow_sample_reweight"] = False
 
     with pytest.raises(ValueError, match="every training source sets"):
         Arguments.from_dict(config)
@@ -511,7 +511,7 @@ def test_src_config_resolves_gates_by_source_id():
         {
             "name": "gated",
             "dataset_dir": "data/b",
-            "train": {"weight": 1, "sample_reweight": False, "ga": False},
+            "train": {"weight": 1, "allow_sample_reweight": False, "allow_ga": False},
         },
         {"name": "eval_only", "dataset_dir": "data/c", "eval": {}},
     ]

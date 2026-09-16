@@ -88,7 +88,7 @@ def compute_src_reweight(
             never clamped: their mass is exactly ``1``, so a bound below ``1``
             would invert the opt-out instead of limiting an SRC tail.
         reweight_enabled: Optional ``(S,)`` boolean mask selecting which samples
-            may be reweighted (set from each dataset's ``train.sample_reweight``).
+            may be reweighted (set from each dataset's ``train.allow_sample_reweight``).
             ``None`` means every sample. A group is reweighted only when the mask
             is True for *all* of its samples; a group is otherwise never split, so
             a mixed group falls back conservatively to uniform mass. Gated groups
@@ -328,7 +328,7 @@ def compute_src_reweight(
     if mixed_flag_groups:
         logger.warning(
             f"SRC-Reweight found {mixed_flag_groups} prompt group(s) whose samples disagree on "
-            "`train.sample_reweight`. Groups are keyed by prompt content, which does not encode "
+            "`train.allow_sample_reweight`. Groups are keyed by prompt content, which does not encode "
             "the source, so two datasets sharing a prompt string can land in one group. Those "
             "groups kept uniform mass; give the sources distinct prompts to reweight either one."
         )

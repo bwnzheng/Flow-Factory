@@ -693,7 +693,7 @@ def _ga_source_config(*, survivor_score: str = "advantage", ga_enabled: bool = T
 def test_ga_config_rejects_gating_every_training_source():
     config = _ga_source_config()
     for dataset in config["data"]["datasets"]:
-        dataset["train"]["ga"] = False
+        dataset["train"]["allow_ga"] = False
 
     with pytest.raises(ValueError, match="no group would ever be evolved"):
         Arguments.from_dict(config)
@@ -708,7 +708,7 @@ def test_ga_config_requires_two_rewards_on_every_evolved_source_for_src_selectio
 
 def test_ga_config_accepts_gating_a_single_reward_source():
     config = _ga_source_config(survivor_score="src")
-    config["data"]["datasets"][1]["train"]["ga"] = False
+    config["data"]["datasets"][1]["train"]["allow_ga"] = False
 
     args = Arguments.from_dict(config)
 
@@ -720,7 +720,7 @@ def test_ga_config_ignores_gates_for_non_ga_trainers():
     config = _ga_source_config(ga_enabled=False)
     config["train"]["trainer_type"] = "grpo"
     for dataset in config["data"]["datasets"]:
-        dataset["train"]["ga"] = False
+        dataset["train"]["allow_ga"] = False
 
     args = Arguments.from_dict(config)
 
