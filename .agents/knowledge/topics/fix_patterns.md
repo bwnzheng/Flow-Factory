@@ -310,6 +310,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Scores are per-sample state, not inherited configuration — a derived sample starts unscored and receives its own numbers from the evaluator. Because `to_dict()`/`from_dict()` alias nested objects, "inherit everything then override" must *delete* stale state keys; assigning in place would write through to the source sample.
 - **Related Constraint**: N/A (codified in `topics/sample_lifecycle.md` → "Derived Samples Must Not Inherit Score State")
 
+### Parallelized analysis worker kept a closure reference to `config`
+- **Date**: 2026-09-17
+- **Symptom**: `python -m tools.train_reward_analysis.analyze --config <cfg>` crashed in a worker process with `NameError: name 'config' is not defined` at `analyze.py:212`, only for runs with `src_reweight: true`; runs without SRC analyzed normally.
+- **Root Cause**: Commit `8d8a631` extracted the per-run loop body of `run_analysis` into the module-level `_analyze_run_step` running under `ProcessPoolExecutor` and threaded the SRC hyper-parameters through the task tuple, but one call site inside the moved body still read the old closure variable `config`, which does not exist in a worker process. The line sits in the `if run.src_reweight` branch of a conditional expression, so the SRC-free path never evaluated it and the breakage stayed hidden.
+- **Fix**: `tools/train_reward_analysis/analyze.py:212` now passes the already-unpacked task-tuple values `interpolation, temperature` instead of `config.src_interpolation, config.src_temperature`, so the YAML values actually reach `compute_src_sample_weights`.
+- **Lesson**: Moving a body out of a closure into a process-pool worker makes every free variable an undefined name — thread all of them through the task tuple and re-grep the moved body for the old names. Flag-guarded branches hide such regressions: when parallelizing, exercise each flag combination at least once, because the default configuration can leave the broken path untouched.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

@@ -209,7 +209,7 @@ def _analyze_run_step(task: tuple[Any, ...]) -> dict[str, Any]:
             sign_metrics = []
             for group in combination_groups:
                 sample_weights = (
-                    compute_src_sample_weights(group.rewards, weights, config.src_interpolation, config.src_temperature)
+                    compute_src_sample_weights(group.rewards, weights, interpolation, temperature)
                     if run.src_reweight else np.ones(group.rewards.shape[0])
                 )
                 sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
