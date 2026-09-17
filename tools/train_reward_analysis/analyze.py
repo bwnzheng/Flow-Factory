@@ -52,6 +52,7 @@ from tools.train_reward_analysis.plots import (
     plot_per_reward_weighted_advantage_count_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
     plot_standardized_reward_covariance_trajectories,
+    plot_training_progress_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
@@ -59,6 +60,11 @@ from tools.train_reward_analysis.reward_logs import (
     load_saved_reward_weight_context,
     load_train_reward_groups,
 )
+
+# Bumped whenever the emitted metric rows change shape or meaning, so a stale
+# plot-data cache is rejected instead of quietly drawing a figure with missing
+# series.
+METRIC_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,13 @@ def main() -> None:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         rows = cached["rows"]
         metadata = cached["metadata"]
+        cached_version = metadata.get("metric_version")
+        if cached_version != METRIC_VERSION:
+            raise ValueError(
+                f"Plot-data cache {cache_path} holds metric_version {cached_version!r}, but this "
+                f"tool writes {METRIC_VERSION}. Its rows are missing metrics the figures need, so "
+                "it would silently draw incomplete figures. Re-run with output.cache_mode: regenerate."
+            )
         print(f"[Reward concordance] Reusing plot-data cache: {cache_path}")
     else:
         rows, metadata = run_analysis(config)
@@ -122,6 +135,7 @@ def main() -> None:
         plot_per_reward_weighted_advantage_count_trajectories,
         plot_standardized_reward_covariance_trajectories,
         plot_reward_concordance_lower_bound_trajectories,
+        plot_training_progress_trajectories,
     )
     metadata["plot_workers"] = _plot_worker_count(plot_functions)
     (output_dir / "metadata.json").write_text(
@@ -160,7 +174,7 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 metadata.setdefault("reward_weight_sources", {}).update(result["weight_sources"])
                 break
     metadata = {
-        "metric_version": 4,
+        "metric_version": METRIC_VERSION,
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
@@ -175,6 +189,9 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
             "sample_agreement_count_distribution": "prompt-group fraction of samples whose agreeing-reward count equals each value from 0 to n_rewards",
             "mean_agreement_count": "prompt-group mean agreeing-reward count per sample, exactly n_rewards minus the summed per-reward disagreement",
             "fully_concordant_sample_rate": "prompt-group fraction of samples that agree with the weighted scalar on every active reward",
+            "positive_fully_concordant_sample_rate": "prompt-group fraction of samples above their group mean on every active reward",
+            "negative_fully_concordant_sample_rate": "prompt-group fraction of samples below their group mean on every active reward",
+            "per_reward_mean_reward": "prompt-group macro-average of the raw reward level, over the groups keeping that reward active",
         },
         "runs": run_metadata,
     }
@@ -587,6 +604,28 @@ def _metric_rows(
             "value": float(metrics["fully_concordant_sample_rate"]),
         }
     )
+    for metric_name in (
+        "positive_fully_concordant_sample_rate",
+        "negative_fully_concordant_sample_rate",
+    ):
+        rows.append(
+            {
+                **common,
+                "reward": "",
+                "reward_pair": "",
+                "metric": metric_name,
+                "value": float(metrics[metric_name]),
+            }
+        )
+    for reward_name, value in zip(reward_names, metrics["per_reward_mean_reward"]):
+        rows.append(
+            {
+                **common,
+                "reward": reward_name,
+                "metric": "per_reward_mean_reward",
+                "value": float(value),
+            }
+        )
     return rows
 
 

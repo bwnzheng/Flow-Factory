@@ -27,6 +27,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
+# Fixed-order categorical slots for the training-progress figure. This is the
+# validated reference palette, whose slot *order* is what keeps neighbouring
+# series separable under colour-vision deficiency; slots are assigned in order
+# and never cycled, because a repeated hue would make two series unreadable
+# rather than merely similar. Slots 3-5 sit below 3:1 contrast on a light
+# surface, so that figure always ships a legend and every plotted value also
+# appears in metrics.csv.
+_SERIES_PALETTE = (
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+)
+
 
 def plot_per_reward_conflict_score_trajectories(
     rows: Iterable[dict[str, Any]],
@@ -532,6 +550,190 @@ def plot_per_reward_bottleneck_rate_trajectories(
         plt.close(figure)
 
 
+def plot_training_progress_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one training-progress and full-agreement figure per dataset.
+
+    Two families share a single percent axis. Every reward contributes the
+    step's macro-averaged raw reward, mapped onto 0-100% of that reward's own
+    observed range within the run, so rewards on different scales — an OCR
+    score beside a PickScore — stay comparable in shape. The two agreement
+    curves are already shares of samples, so they are plotted at their own
+    value and are never rescaled.
+
+    Both families are bounded 0-100% by construction and neither introduces a
+    free scale parameter, so one axis carries both and no second y-scale is
+    needed. Read the reward curves for shape, not for level: normalizing to the
+    run's own range means every curve spans the full axis, and a single outlier
+    step sets the 100% mark. A reward that never moves has no range to express
+    progress against and is drawn as a flat 0%, matching the zero-variance
+    convention used elsewhere in this tool.
+    """
+    fraction_metrics = (
+        ("positive_fully_concordant_sample_rate", "positive fully-agree"),
+        ("negative_fully_concordant_sample_rate", "negative fully-agree"),
+    )
+    fraction_names = {name for name, _ in fraction_metrics}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["metric"] == "per_reward_mean_reward" or row["metric"] in fraction_names:
+            grouped[str(row.get("dataset", "unknown_dataset"))].append(row)
+
+    for dataset, dataset_rows in grouped.items():
+        _reject_mixed_reward_combinations(dataset, dataset_rows)
+        rewards = sorted(
+            {
+                str(row["reward"])
+                for row in dataset_rows
+                if row["metric"] == "per_reward_mean_reward" and row["reward"]
+            }
+        )
+        series_count = len(rewards) + len(fraction_metrics)
+        if series_count > len(_SERIES_PALETTE):
+            raise ValueError(
+                f"Dataset {dataset!r} plots {series_count} series but the validated palette holds "
+                f"{len(_SERIES_PALETTE)}. Split the reward set across figures instead of cycling "
+                "colours, which would give two series the same hue."
+            )
+        by_run: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {}
+        for label, line_rows in sorted(_group_by_run(dataset_rows).items()):
+            keyed: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            for row in line_rows:
+                keyed[(str(row["metric"]), str(row["reward"]))].append(row)
+            by_run[label] = keyed
+
+        figure, axis = plt.subplots(figsize=(9, 5))
+        legend_handles = []
+        for run_index, (label, keyed) in enumerate(by_run.items()):
+            style = ("-", "--", "-.", ":")[run_index % 4]
+            for series_index, reward in enumerate(rewards):
+                progress_rows = keyed.get(("per_reward_mean_reward", reward))
+                if not progress_rows:
+                    continue
+                color = _SERIES_PALETTE[series_index]
+                _plot_percent_series(
+                    axis,
+                    progress_rows,
+                    _percent_of_own_range,
+                    color,
+                    style,
+                    smoothing_window,
+                )
+                legend_handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color=color,
+                        linestyle=style,
+                        linewidth=1.8,
+                        label=f"{label} | {reward}",
+                    )
+                )
+            for offset, (metric, legend_name) in enumerate(fraction_metrics):
+                fraction_rows = keyed.get((metric, ""))
+                if not fraction_rows:
+                    continue
+                color = _SERIES_PALETTE[len(rewards) + offset]
+                _plot_percent_series(
+                    axis,
+                    fraction_rows,
+                    _percent_of_sample_share,
+                    color,
+                    style,
+                    smoothing_window,
+                )
+                legend_handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color=color,
+                        linestyle=style,
+                        linewidth=1.8,
+                        label=f"{label} | {legend_name}",
+                    )
+                )
+        # Both families are percentages, so the axis is fixed rather than
+        # autoscaled: a later draw would otherwise unstale the pending autoscale
+        # and widen the limits by matplotlib's default margins, which would read
+        # as data poking past 0-100%.
+        axis.set_autoscaley_on(False)
+        axis.set_ylim(0.0, 100.0)
+        axis.set_title(f"Reward progress and full-agreement rate [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Percent (reward: own min-max; agreement: sample share)")
+        axis.grid(alpha=0.25)
+        axis.legend(handles=legend_handles, fontsize=7, loc="best", ncol=2)
+        figure.tight_layout()
+        path = Path(output_dir) / _filename_component(dataset) / f"training_progress.{plot_format}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
+def _plot_percent_series(
+    axis: Any,
+    rows: Iterable[dict[str, Any]],
+    transform: Any,
+    color: str,
+    linestyle: str,
+    smoothing_window: int,
+) -> None:
+    """Draw one faint raw trace with its smoothed foreground on a percent axis."""
+    steps, values = _series(rows)
+    percent = transform(values)
+    axis.plot(
+        steps,
+        percent,
+        color=color,
+        linestyle=linestyle,
+        alpha=0.18,
+        linewidth=0.9,
+        label="_nolegend_",
+        zorder=1,
+    )
+    axis.plot(
+        steps,
+        _moving_average(percent, smoothing_window),
+        color=color,
+        linestyle=linestyle,
+        linewidth=1.8,
+        marker="o",
+        markersize=2.5,
+        # Marking every step would fill the dash gaps and hide the cue that
+        # carries run identity.
+        markevery=max(1, len(steps) // 12),
+        label="_nolegend_",
+        zorder=2,
+    )
+
+
+def _percent_of_own_range(values: np.ndarray) -> np.ndarray:
+    """Map one series onto 0-100% of its own observed range.
+
+    The mapping is defined by the raw series, before smoothing, so the smoothed
+    trace stays inside 0-100%. A constant series has no range to express
+    progress against and becomes flat 0%, following the zero-variance
+    convention used elsewhere in this tool.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return values
+    low = float(values.min())
+    high = float(values.max())
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        return np.zeros_like(values)
+    return 100.0 * (values - low) / (high - low)
+
+
+def _percent_of_sample_share(values: np.ndarray) -> np.ndarray:
+    """Show an already-normalized sample share as a percentage."""
+    return 100.0 * np.asarray(values, dtype=np.float64)
+
+
 def _reject_mixed_reward_combinations(dataset: str, rows: Iterable[dict[str, Any]]) -> None:
     """Fail fast when one dataset carries more than one reward combination.
 
@@ -568,18 +770,24 @@ def _smoothed_series(
     rows: Iterable[dict[str, Any]], smoothing_window: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return one sorted trajectory with centered moving-average smoothing."""
+    steps, values = _series(rows)
+    return steps, _moving_average(values, smoothing_window)
+
+
+def _moving_average(values: np.ndarray, smoothing_window: int) -> np.ndarray:
+    """Smooth one already-ordered series with a centered moving average."""
     if smoothing_window < 1 or smoothing_window % 2 == 0:
         raise ValueError("smoothing_window must be a positive odd integer.")
-    steps, values = _series(rows)
+    values = np.asarray(values, dtype=np.float64)
     if smoothing_window == 1 or values.size < 2:
-        return steps, values
+        return values
     radius = smoothing_window // 2
     smoothed = np.empty_like(values)
     for index in range(values.size):
         start = max(0, index - radius)
         end = min(values.size, index + radius + 1)
         smoothed[index] = values[start:end].mean()
-    return steps, smoothed
+    return smoothed
 
 
 def _filename_component(value: str) -> str:

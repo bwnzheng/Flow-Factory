@@ -98,7 +98,8 @@ def compute_reward_concordance_metrics(
         The mean standardized conflict score and disagreement rate for every
         reward, plus the mean of each sample's weakest reward score, and the
         distribution of how many rewards agree with the weighted scalar for each
-        sample.
+        sample. Also reports each reward's raw group mean and the two signed
+        halves of full concordance.
     """
     matrix = _validate_rewards(rewards)
     group_size, n_rewards = matrix.shape
@@ -118,6 +119,16 @@ def compute_reward_concordance_metrics(
     bottleneck_rate = np.bincount(bottleneck, minlength=n_rewards) / group_size
     standardized_covariance = centered_rewards.T @ centered_rewards / group_size
 
+    # Full concordance splits by sign. With strictly positive weights, a sample
+    # above its group mean on every reward is necessarily above the mean of the
+    # weighted scalar too, so "every standardized reward is positive" is already
+    # the positive-aligned case, and symmetrically for negative. The two halves
+    # are disjoint, and a degenerate reward (zero group variance, standardized
+    # to an exact zero) belongs to neither, so they can sum to less than the
+    # fully concordant rate.
+    positive_fully_concordant = (centered_rewards > 0.0).all(axis=1)
+    negative_fully_concordant = (centered_rewards < 0.0).all(axis=1)
+
     return {
         "group_size": group_size,
         "per_reward_conflict_score": conflict_scores.mean(axis=0),
@@ -128,6 +139,9 @@ def compute_reward_concordance_metrics(
         "sample_agreement_count_distribution": agreement_count_distribution,
         "mean_agreement_count": float(agreeing_counts.mean()),
         "fully_concordant_sample_rate": float(agreement_count_distribution[n_rewards]),
+        "positive_fully_concordant_sample_rate": float(positive_fully_concordant.mean()),
+        "negative_fully_concordant_sample_rate": float(negative_fully_concordant.mean()),
+        "per_reward_mean_reward": matrix.mean(axis=0),
     }
 
 
@@ -156,6 +170,8 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         if distribution.shape != (n_rewards + 1,):
             raise ValueError("All groups must report an agreement-count distribution.")
         agreement_distributions.append(distribution)
+        if np.asarray(metrics["per_reward_mean_reward"]).shape != (n_rewards,):
+            raise ValueError("All groups must report one raw mean per active reward.")
 
     return {
         "n_groups": len(group_metrics),
@@ -181,6 +197,19 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         ),
         "fully_concordant_sample_rate": float(
             np.mean([metrics["fully_concordant_sample_rate"] for metrics in group_metrics])
+        ),
+        "positive_fully_concordant_sample_rate": float(
+            np.mean([metrics["positive_fully_concordant_sample_rate"] for metrics in group_metrics])
+        ),
+        "negative_fully_concordant_sample_rate": float(
+            np.mean([metrics["negative_fully_concordant_sample_rate"] for metrics in group_metrics])
+        ),
+        # One raw mean per reward, macro-averaged over the prompt groups that
+        # keep that reward active. A reward missing from some groups (an OCR
+        # score that only applies to part of the prompt set) is therefore
+        # averaged over its own active groups only.
+        "per_reward_mean_reward": np.mean(
+            [metrics["per_reward_mean_reward"] for metrics in group_metrics], axis=0
         ),
     }
 

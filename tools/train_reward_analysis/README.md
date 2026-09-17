@@ -14,6 +14,8 @@ is standardized independently: every reward and the weighted scalar reward are
 centered with their prompt-local mean and divided by their prompt-local
 population standard deviation. Zero-variance quantities are represented by
 zero. The analysis does not use SRC probabilities or any reweighted statistic.
+Alongside the standardized quantities it reports each reward's raw per-step
+level, which the progress figure needs and no other figure uses.
 
 ## Required provenance
 
@@ -91,6 +93,9 @@ per_reward_bottleneck_rate[k] = mean_i(argmin_j conflict_score[i, j] == k)
 agreement_count[i] = sum_k(reward_advantage[i, k] * scalar_advantage[i] >= 0)
 agreement_count_distribution[c] = mean_i(agreement_count[i] == c)   for c = 0..K
 mean_agreement_count = mean_i(agreement_count[i])
+positive_fully_concordant_sample_rate = mean_i(reward_advantage[i, k] > 0 for all k)
+negative_fully_concordant_sample_rate = mean_i(reward_advantage[i, k] < 0 for all k)
+per_reward_mean_reward[k] = mean_i(r[i, k])
 ```
 
 Positive conflict scores mean the named reward supports the scalar training
@@ -132,6 +137,21 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
   agree with the weighted scalar on every active reward, i.e. the `c = K` bin of
   the agreement-count distribution. It is named separately because `K` varies
   per reward combination.
+- `positive_fully_concordant_sample_rate` and
+  `negative_fully_concordant_sample_rate` split that `c = K` bin by direction.
+  Because the weights are strictly positive, a sample above its group mean on
+  every reward is necessarily above the mean of the weighted scalar too, so
+  "every standardized reward is positive" is already the positive-aligned case,
+  and symmetrically for negative. The two halves are disjoint, and a reward
+  with no group variance standardizes to an exact zero, which agrees with the
+  scalar without being either positive or negative — so the two halves can sum
+  to less than `fully_concordant_sample_rate`, never more.
+- `per_reward_mean_reward` is the raw, unstandardized reward level at that step,
+  macro-averaged over prompt groups. A reward that some groups drop as missing
+  (an OCR score that only applies to part of the prompt set) is averaged over
+  its own active groups only, so it is not diluted by groups that never score
+  it. Unlike every other metric here it is not comparable across rewards on
+  different scales; it exists so the progress figure has an auditable source.
 
 The output directory also contains `metadata.json`, followed by one directory
 per dataset:
@@ -145,6 +165,7 @@ per dataset:
   reward_concordance_lower_bound.<plot_format>
   agreement_count.<plot_format>
   agreement_count_expectation.<plot_format>
+  training_progress.<plot_format>
 ```
 
 The dataset directory is recovered from the saved run context source (for
@@ -162,6 +183,28 @@ run trajectories. The reward combination is intentionally omitted from the
 filename and title because it is fixed by the dataset directory. The diagonal
 is omitted because covariance after per-group standardization is one by
 definition.
+`training_progress` is written once per dataset, like the agreement-count
+figures, because full agreement is a property of the whole reward set (`K`)
+rather than of one reward. It carries two families on a single 0-100% axis.
+Each reward contributes its `per_reward_mean_reward` curve mapped onto 0-100% of
+that reward's own observed range within that run, so rewards on different scales
+stay comparable in shape; read those curves for shape, never for level, since a
+single outlier step sets the 100% mark and every curve spans the full axis by
+construction. A reward that never moves has no range to express progress against
+and is drawn as a flat 0%, following the zero-variance convention above. The two
+agreement curves are already shares of samples, so they are plotted at their own
+value in percent and are never rescaled.
+
+One axis carries both families because each is bounded 0-100% by construction
+and neither leaves a free scale parameter — the normalized reward range is set
+by the data, not chosen. That is what keeps the figure off a second y-scale.
+Series identity is carried by colour and run identity by dash pattern. Colours
+are assigned in a fixed palette order and never cycled: the rewards of a dataset
+take the leading slots and the two agreement curves take the next two, so the
+agreement colours shift with the number of rewards in that dataset's reward set.
+A dataset needing more series than the palette holds is rejected rather than
+given two series that share a hue. Every plotted value is also in `metrics.csv`.
+
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
 the average uses the available in-range points. The original unsmoothed curve
@@ -170,4 +213,7 @@ foreground should equal the raw values.
 
 The final tidy rows used by all figures are stored in `plot_data.json`. Set
 `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every figure
-directly from that cache. If the cache is absent, use `regenerate` first.
+directly from that cache. If the cache is absent, use `regenerate` first. A cache
+whose `metric_version` differs from the current one is rejected, because its rows
+are missing metrics that the figures need and it would otherwise draw silently
+incomplete figures.

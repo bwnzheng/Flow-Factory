@@ -38,6 +38,9 @@ from tools.train_reward_analysis.metrics import (
     compute_reward_concordance_metrics,
 )
 from tools.train_reward_analysis.plots import (
+    _SERIES_PALETTE,
+    _percent_of_own_range,
+    _percent_of_sample_share,
     _smoothed_series,
     plot_agreement_count_distribution_trajectories,
     plot_agreement_count_expectation_trajectories,
@@ -45,6 +48,7 @@ from tools.train_reward_analysis.plots import (
     plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
     plot_standardized_reward_covariance_trajectories,
+    plot_training_progress_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
@@ -190,6 +194,95 @@ def test_aggregate_group_metrics_macro_averages_agreement_count_distribution() -
     )
 
 
+def test_signed_full_concordance_splits_full_concordance_by_direction() -> None:
+    """Positive and negative full agreement are the two halves of c = n_rewards."""
+    metrics = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 0.0], [1.0, 2.0], [2.0, 4.0], [3.0, 6.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+
+    # Both rewards rise together, so the two lowest samples sit below the group
+    # mean on both and the two highest sit above it on both.
+    assert metrics["positive_fully_concordant_sample_rate"] == pytest.approx(0.5)
+    assert metrics["negative_fully_concordant_sample_rate"] == pytest.approx(0.5)
+    assert metrics["fully_concordant_sample_rate"] == pytest.approx(1.0)
+
+
+def test_signed_full_concordance_excludes_degenerate_rewards_from_both_halves() -> None:
+    """A reward with no group variance is neither positive nor negative.
+
+    Such a reward standardizes to an exact zero, which still counts as agreeing
+    with the scalar, so it can leave full concordance above the two signed
+    halves put together.
+    """
+    metrics = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 5.0], [1.0, 5.0], [2.0, 5.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+
+    assert metrics["positive_fully_concordant_sample_rate"] == pytest.approx(0.0)
+    assert metrics["negative_fully_concordant_sample_rate"] == pytest.approx(0.0)
+    assert metrics["fully_concordant_sample_rate"] == pytest.approx(1.0)
+
+
+def test_per_reward_mean_reward_is_the_raw_group_mean() -> None:
+    """Progress curves need the raw level, not the standardized one."""
+    metrics = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 10.0], [2.0, 20.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(metrics["per_reward_mean_reward"], [1.0, 15.0])
+
+
+def test_aggregate_group_metrics_macro_averages_signed_concordance_and_raw_level() -> None:
+    """Raw levels average over prompt groups, so group size never reweights them."""
+    first = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 10.0], [2.0, 20.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+    second = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 0.0], [2.0, 0.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+
+    aggregate = aggregate_group_metrics([first, second])
+
+    np.testing.assert_allclose(aggregate["per_reward_mean_reward"], [1.0, 7.5])
+    assert aggregate["positive_fully_concordant_sample_rate"] == pytest.approx(
+        (
+            first["positive_fully_concordant_sample_rate"]
+            + second["positive_fully_concordant_sample_rate"]
+        )
+        / 2.0
+    )
+    assert aggregate["negative_fully_concordant_sample_rate"] == pytest.approx(
+        (
+            first["negative_fully_concordant_sample_rate"]
+            + second["negative_fully_concordant_sample_rate"]
+        )
+        / 2.0
+    )
+
+
+def test_percent_of_own_range_stretches_each_series_between_its_own_extremes() -> None:
+    """Rewards on different scales become comparable in shape, not in level."""
+    np.testing.assert_allclose(
+        _percent_of_own_range(np.asarray([0.25, 0.30, 0.35])),
+        [0.0, 50.0, 100.0],
+    )
+    # A reward that never moves has no range to express progress against.
+    np.testing.assert_allclose(_percent_of_own_range(np.asarray([0.7, 0.7, 0.7])), [0.0, 0.0, 0.0])
+
+
+def test_percent_of_sample_share_never_rescales_an_agreement_rate() -> None:
+    """Agreement curves are already shares of samples and are plotted as they are."""
+    np.testing.assert_allclose(
+        _percent_of_sample_share(np.asarray([0.0, 0.125, 1.0])),
+        [0.0, 12.5, 100.0],
+    )
+
+
 def test_aggregate_group_metrics_rejects_mismatched_agreement_distribution() -> None:
     metrics = compute_reward_concordance_metrics(
         np.asarray([[0.0, 1.0], [1.0, 0.0]]),
@@ -248,6 +341,9 @@ def test_analysis_uses_only_saved_rewards_not_saved_src_probabilities(tmp_path: 
         "agreement_count_c2",
         "mean_agreement_count",
         "fully_concordant_sample_rate",
+        "positive_fully_concordant_sample_rate",
+        "negative_fully_concordant_sample_rate",
+        "per_reward_mean_reward",
         "adv_positive",
         "adv_negative",
         "adv_zero",
@@ -549,6 +645,110 @@ def test_agreement_count_plots_are_written_per_dataset(tmp_path: Path) -> None:
 
     assert (tmp_path / "pickscore" / "agreement_count.png").stat().st_size > 0
     assert (tmp_path / "pickscore" / "agreement_count_expectation.png").stat().st_size > 0
+
+
+def _training_progress_rows(dataset: str = "pickscore") -> list[dict]:
+    rows = []
+    for label in ("SRC-NFT", "NFT (uniform)"):
+        for step in range(10):
+            for reward in ("clip_score", "pick_score"):
+                rows.append(
+                    {
+                        "run_label": label,
+                        "dataset": dataset,
+                        "step": step,
+                        "reward_combination": "clip_score__pick_score",
+                        "reward": reward,
+                        "reward_pair": "",
+                        "metric": "per_reward_mean_reward",
+                        "value": 0.25 + 0.01 * step,
+                    }
+                )
+            for metric, value in (
+                ("positive_fully_concordant_sample_rate", 0.15),
+                ("negative_fully_concordant_sample_rate", 0.24),
+            ):
+                rows.append(
+                    {
+                        "run_label": label,
+                        "dataset": dataset,
+                        "step": step,
+                        "reward_combination": "clip_score__pick_score",
+                        "reward": "",
+                        "reward_pair": "",
+                        "metric": metric,
+                        "value": value,
+                    }
+                )
+    return rows
+
+
+def test_training_progress_plot_is_written_per_dataset(tmp_path: Path) -> None:
+    plot_training_progress_trajectories(_training_progress_rows(), tmp_path)
+
+    assert (tmp_path / "pickscore" / "training_progress.png").stat().st_size > 0
+
+
+def test_training_progress_plot_keeps_both_families_on_one_percent_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reward progress and agreement rates share one axis, never two y-scales.
+
+    Each reward is normalized to its own min-max, so it spans 0-100% by
+    construction, and an agreement rate is a share of samples, so it already
+    does. Neither leaves a free scale parameter to choose, which is the only
+    reason a second y-scale would be needed.
+    """
+    limits: list[tuple[float, float]] = []
+    original_set_ylim = matplotlib.axes.Axes.set_ylim
+
+    def recording_set_ylim(self, *args, **kwargs):
+        limits.append(tuple(args))
+        return original_set_ylim(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", recording_set_ylim)
+
+    plot_training_progress_trajectories(_training_progress_rows(), tmp_path)
+
+    assert limits == [(0.0, 100.0)], f"expected one shared percent axis, got {limits}"
+
+
+def test_training_progress_plot_stops_before_reusing_a_series_colour(tmp_path: Path) -> None:
+    """Past the palette's slots two series would share a hue; fail rather than cycle."""
+    rows = [
+        {
+            "run_label": "SRC-NFT",
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": f"reward_{index}",
+            "reward_pair": "",
+            "metric": "per_reward_mean_reward",
+            "value": 0.5 + 0.01 * step,
+        }
+        for index in range(len(_SERIES_PALETTE))
+        for step in range(4)
+    ]
+    rows.extend(
+        {
+            "run_label": "SRC-NFT",
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": "",
+            "reward_pair": "",
+            "metric": metric,
+            "value": 0.2,
+        }
+        for metric in (
+            "positive_fully_concordant_sample_rate",
+            "negative_fully_concordant_sample_rate",
+        )
+        for step in range(4)
+    )
+
+    with pytest.raises(ValueError, match="validated palette"):
+        plot_training_progress_trajectories(rows, tmp_path)
 
 
 def test_agreement_count_plots_reject_a_dataset_with_two_reward_sets(tmp_path: Path) -> None:
