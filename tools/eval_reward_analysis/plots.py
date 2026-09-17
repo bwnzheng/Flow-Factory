@@ -80,100 +80,36 @@ def plot_covariance_matrix(
 
 
 def plot_agreement_count_distribution(
-    distributions: dict[str, Sequence[float]],
+    distribution: Sequence[float],
     output_path: Union[str, Path],
-    title: str = "Agreement-count distribution",
+    title: str,
 ) -> None:
-    """Write grouped bars of the agreeing-count distribution, one bar per run.
+    """Write one run's agreeing-count distribution as a bar chart.
 
     Args:
-        distributions: Label to per-count sample fractions, indexed by agreeing
-            count and sharing one reward count.
+        distribution: Sample fraction per agreeing count, indexed by count.
         output_path: PNG or PDF path to write.
-        title: Figure title identifying the source.
+        title: Figure title identifying the checkpoint and source.
     """
-    if not distributions:
-        raise ValueError("Cannot plot an empty set of agreement-count distributions.")
-    labels = list(distributions)
-    expected = len(np.asarray(distributions[labels[0]], dtype=np.float64))
-    for label in labels:
-        values = np.asarray(distributions[label], dtype=np.float64)
-        if values.shape != (expected,):
-            raise ValueError(
-                f"Agreement-count distribution for {label!r} has shape {values.shape}."
-            )
-        if not np.isfinite(values).all() or np.any(values < 0.0):
-            raise ValueError(f"Agreement-count distribution for {label!r} must be finite and >= 0.")
+    values = np.asarray(distribution, dtype=np.float64)
+    if values.ndim != 1 or values.size < 3:
+        raise ValueError(f"distribution must list counts 0..n_rewards, got shape {values.shape}.")
+    if not np.isfinite(values).all() or np.any(values < 0.0):
+        raise ValueError("distribution must be finite and non-negative.")
     # A sample below the prompt mean on every reward is also below the mean of the
     # weighted scalar, so c = 0 is unreachable and its bin is always empty.
-    counts = [
-        count
-        for count in range(1, expected)
-        if any(np.asarray(distributions[label], dtype=np.float64)[count] > 0.0 for label in labels)
-    ]
-    figure, axis = plt.subplots(figsize=(max(6.0, 1.1 * len(labels) + 3.0), 4.5))
-    positions = np.arange(len(counts), dtype=np.float64)
-    width = 0.8 / len(labels)
-    for index, label in enumerate(labels):
-        values = np.asarray(distributions[label], dtype=np.float64)
-        axis.bar(
-            positions + index * width - 0.4 + width / 2,
-            [values[count] for count in counts],
-            width=width,
-            label=label,
-        )
-    axis.set_xticks(positions, [f"c={count}" for count in counts])
+    counts = [count for count in range(1, values.size) if values[count] > 0.0]
+    figure, axis = plt.subplots(figsize=(max(4.5, 1.0 * len(counts) + 3.0), 4.5))
+    axis.bar(
+        np.arange(len(counts), dtype=np.float64),
+        [values[count] for count in counts],
+        width=0.7,
+    )
+    axis.set_xticks(np.arange(len(counts), dtype=np.float64), [f"c={count}" for count in counts])
     axis.set_xlabel("Agreeing rewards per sample")
     axis.set_ylabel("Sample fraction")
     axis.set_title(title)
     axis.grid(alpha=0.25, axis="y")
-    axis.legend(fontsize=8)
-    figure.tight_layout()
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path)
-    plt.close(figure)
-
-
-def plot_agreement_count_expectation(
-    curves: dict[str, Sequence[tuple[int, float]]],
-    reward_count: int,
-    output_path: Union[str, Path],
-    title: str = "Mean agreement count",
-) -> None:
-    """Write mean agreeing-count curves against the checkpoint step.
-
-    Args:
-        curves: Label to ``(checkpoint_step, mean_agreement_count)`` pairs.
-        reward_count: Number of rewards, drawn as the full-concordance ceiling.
-        output_path: PNG or PDF path to write.
-        title: Figure title identifying the source.
-    """
-    if not curves:
-        raise ValueError("Cannot plot an empty set of agreement-count curves.")
-    if reward_count < 2:
-        raise ValueError(f"reward_count must be at least 2, got {reward_count}.")
-    figure, axis = plt.subplots(figsize=(8, 4.5))
-    for label, points in curves.items():
-        ordered = sorted(points, key=lambda point: point[0])
-        steps = np.asarray([step for step, _ in ordered], dtype=np.float64)
-        values = np.asarray([value for _, value in ordered], dtype=np.float64)
-        if not values.size or not np.isfinite(values).all():
-            raise ValueError(f"Agreement-count curve for {label!r} must contain finite values.")
-        axis.plot(steps, values, marker="o", markersize=3, label=label)
-    axis.axhline(
-        reward_count,
-        color="black",
-        linewidth=0.8,
-        alpha=0.4,
-        linestyle="--",
-        label=f"all {reward_count} rewards agree",
-    )
-    axis.set_xlabel("Checkpoint step")
-    axis.set_ylabel("Mean agreeing reward count per sample")
-    axis.set_title(title)
-    axis.grid(alpha=0.25)
-    axis.legend(fontsize=8)
     figure.tight_layout()
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)

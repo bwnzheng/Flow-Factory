@@ -37,7 +37,6 @@ from tools.eval_reward_analysis.metrics import (
 )
 from tools.eval_reward_analysis.plots import (
     plot_agreement_count_distribution,
-    plot_agreement_count_expectation,
     plot_covariance_matrix,
     plot_jsr_curves,
 )
@@ -296,7 +295,6 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                 write_covariance=(config.covariance or {"enabled": True}).get("enabled", True),
             )
             experiment_summaries.append(summary)
-    _write_agreement_count_plots(config, experiment_summaries)
     if config.jsr is not None:
         _write_run_jsr_results(config, experiment_summaries)
     metadata = {
@@ -418,6 +416,14 @@ def _write_analysis_artifacts(
             output_path=covariance_plot_path,
             title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
         )
+    # Fresh rollouts are not shaped by the training-time sample selector, so this
+    # figure shows the agreement structure the checkpoint actually produces.
+    agreement_count_plot_path = experiment_dir / "plots" / f"agreement_count.{config.plot_format}"
+    plot_agreement_count_distribution(
+        distribution=np.asarray(aggregate["agreement_count_distribution"]),
+        output_path=agreement_count_plot_path,
+        title=f"Agreement count: {run.label} checkpoint-{step} ({source.name})",
+    )
     summary = {
         "run_name": run.name,
         "run_label": run.label,
@@ -432,53 +438,11 @@ def _write_analysis_artifacts(
         "covariance_plot": (
             str(covariance_plot_path.relative_to(experiment_dir)) if covariance_plot_path else None
         ),
+        "agreement_count_plot": str(agreement_count_plot_path.relative_to(experiment_dir)),
         **_json_metrics(aggregate),
     }
     _write_json(experiment_dir / "summary.json", summary)
     return summary
-
-
-def _write_agreement_count_plots(
-    config: AnalysisConfig, summaries: List[Dict[str, Any]]
-) -> None:
-    """Write per-source fresh-sample agreement-count figures for every run.
-
-    One bar chart compares the agreeing-count distributions of the runs, and one
-    curve tracks each run's expected count against its checkpoint step. Both use
-    freshly generated samples, so they answer whether training moved the policy's
-    agreement structure, unlike training-batch statistics that the sample
-    selector shapes by construction.
-    """
-    by_source: Dict[str, List[Dict[str, Any]]] = {}
-    for summary in summaries:
-        by_source.setdefault(str(summary["source"]), []).append(summary)
-    output_root = Path(config.output_dir)
-    for source_name, source_summaries in sorted(by_source.items()):
-        reward_count = len(source_summaries[0]["reward_names"])
-        output_dir = output_root / "agreement_count" / source_name
-        distributions = {}
-        curves: Dict[str, List[tuple[int, float]]] = {}
-        for summary in sorted(
-            source_summaries, key=lambda item: (str(item["run_label"]), int(item["checkpoint_step"]))
-        ):
-            label = str(summary["run_label"])
-            step = int(summary["checkpoint_step"])
-            distributions[f"{label} ckpt-{step}"] = summary["agreement_count_distribution"]
-            curves.setdefault(label, []).append((step, float(summary["mean_agreement_count"])))
-        plot_agreement_count_distribution(
-            distributions,
-            output_dir / f"distribution.{config.plot_format}",
-            title=f"Agreement-count distribution of fresh samples ({source_name})",
-        )
-        # A single checkpoint per label has no trajectory to draw.
-        stepped_curves = {label: points for label, points in curves.items() if len(points) > 1}
-        if stepped_curves:
-            plot_agreement_count_expectation(
-                stepped_curves,
-                reward_count,
-                output_dir / f"expectation.{config.plot_format}",
-                title=f"Mean agreement count over checkpoints ({source_name})",
-            )
 
 
 def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any]]) -> None:

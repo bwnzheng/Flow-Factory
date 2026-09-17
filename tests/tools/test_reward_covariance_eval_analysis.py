@@ -32,11 +32,11 @@ from tools.eval_reward_analysis.analyze import (
     SourceConfig,
     _generate_images,
     _resolve_reward_weights,
-    _write_agreement_count_plots,
     _write_analysis_artifacts,
     load_config,
     load_prompt_records,
 )
+from tools.eval_reward_analysis.plots import plot_agreement_count_distribution
 from tools.eval_reward_analysis.reward_scoring import (
     _AcceleratorView,
     _partition,
@@ -367,6 +367,7 @@ def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) ->
     np.testing.assert_allclose(metric_rows[0]["standardized_covariance"], [[1.0, 1.0], [1.0, 1.0]])
     assert summary["n_prompts"] == 2
     assert (tmp_path / summary["covariance_plot"]).is_file()
+    assert (tmp_path / summary["agreement_count_plot"]).is_file()
     assert summary["reward_weights"] == {"a": 1.0, "b": 1.0}
     assert summary["reward_weight_source"] == "run_config"
     # Two rewards, two samples: each prompt's c = 0 bin is structurally empty.
@@ -480,55 +481,18 @@ output: {dir: output}
         load_config(config_path)
 
 
-def test_agreement_count_figures_are_written_per_source(tmp_path: Path) -> None:
-    config = AnalysisConfig(
-        model=ModelConfig("model", "bfloat16", "cpu", 1),
-        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
-        sources=[],
-        runs=[],
-        output_dir=str(tmp_path),
+def test_agreement_count_plot_writes_one_run_distribution(tmp_path: Path) -> None:
+    plot_agreement_count_distribution(
+        [0.0, 0.183, 0.421, 0.396],
+        tmp_path / "plots" / "agreement_count.png",
+        title="Agreement count: SRC checkpoint-60 (ocr)",
     )
-    summaries = [
-        {
-            "run_label": label,
-            "source": "ocr",
-            "checkpoint_step": step,
-            "reward_names": ["a", "b", "c"],
-            "agreement_count_distribution": [0.0, 0.1 + 0.01 * step, 0.4, 0.5 - 0.01 * step],
-            "mean_agreement_count": 2.4 + 0.01 * step,
-        }
-        for label in ("SRC", "uniform")
-        for step in (0, 20)
-    ]
 
-    _write_agreement_count_plots(config, summaries)
-
-    output_dir = tmp_path / "agreement_count" / "ocr"
-    assert (output_dir / "distribution.png").stat().st_size > 0
-    assert (output_dir / "expectation.png").stat().st_size > 0
+    assert (tmp_path / "plots" / "agreement_count.png").stat().st_size > 0
 
 
-def test_agreement_count_expectation_is_skipped_without_a_trajectory(tmp_path: Path) -> None:
-    config = AnalysisConfig(
-        model=ModelConfig("model", "bfloat16", "cpu", 1),
-        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
-        sources=[],
-        runs=[],
-        output_dir=str(tmp_path),
-    )
-    summaries = [
-        {
-            "run_label": "SRC",
-            "source": "ocr",
-            "checkpoint_step": 0,
-            "reward_names": ["a", "b", "c"],
-            "agreement_count_distribution": [0.0, 0.1, 0.4, 0.5],
-            "mean_agreement_count": 2.4,
-        }
-    ]
-
-    _write_agreement_count_plots(config, summaries)
-
-    output_dir = tmp_path / "agreement_count" / "ocr"
-    assert (output_dir / "distribution.png").stat().st_size > 0
-    assert not (output_dir / "expectation.png").exists()
+def test_agreement_count_plot_rejects_a_negative_fraction(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        plot_agreement_count_distribution(
+            [0.0, -0.1, 0.6, 0.5], tmp_path / "agreement_count.png", title="bad"
+        )

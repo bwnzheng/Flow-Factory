@@ -38,14 +38,14 @@ plots/covariance_matrix.<plot_format>
 summary.json
 ```
 
-Each source additionally gets two cross-run figures under
-`agreement_count/<source>/`: `distribution.<plot_format>` compares the runs'
-agreeing-count distributions as grouped bars, and `expectation.<plot_format>`
-tracks each run's expected agreeing count against its checkpoint step (written
-only when a label has more than one checkpoint). The agreeing count is how many
-rewards point the same way as the weighted scalar for one sample, computed
-exactly as the training-side reward-concordance tool computes it, so fresh-sample
-figures here and training-batch figures there share one definition.
+`plots/agreement_count.<plot_format>` additionally shows that run's
+agreeing-count distribution: the fraction of its fresh samples whose count of
+rewards pointing the same way as the weighted scalar equals each value from 1 to
+``n_rewards``. The count is computed exactly as the training-side
+reward-concordance tool computes it, so fresh-sample numbers here and
+training-batch numbers there share one definition. Figures stay inside each
+run's own directory; compare runs by reading their `summary.json`
+(`mean_agreement_count`, `fully_concordant_sample_rate`) side by side.
 
 Runs may evaluate the base model directly by setting `base_model_only: true`
 instead of `checkpoint`. Base-model samples use `checkpoint_0/` and are marked
@@ -73,7 +73,7 @@ use the same weights as the runs it is compared against. Every `summary.json`
 records `reward_weights` and `reward_weight_source` for auditing.
 
 Because fresh rollouts are not shaped by the training-time sample selector, the
-agreement-count figures here are the ones that show what fine-tuning moved; the
+agreement-count numbers here are the ones that show what fine-tuning moved; the
 training-side tool's figures describe the selected batch instead.
 
 Use separate `output.cache_dir` and `output.jsr_dir` values when running the
