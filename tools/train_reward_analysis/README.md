@@ -70,6 +70,12 @@ python -m tools.train_reward_analysis.analyze \
   -c tools/train_reward_analysis/nft_src_vs_uniform.yaml
 ```
 
+Both stages use worker processes: the per-run/step metric computation runs on
+`os.cpu_count()` workers, and the figure stages are spread over at most one
+worker per stage (`metadata.json` records both as `analysis_workers` and
+`plot_workers`). Figure workers are spawned rather than forked, because
+matplotlib is already imported in the parent process.
+
 ## Metrics
 
 For each prompt-local frozen reward matrix `r` and positive scalarization

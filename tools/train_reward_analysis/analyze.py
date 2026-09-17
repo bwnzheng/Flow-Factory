@@ -26,11 +26,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import yaml
@@ -111,45 +112,23 @@ def main() -> None:
         )
         print(f"[Reward concordance] Wrote plot-data cache: {cache_path}")
     _write_rows(rows, output_dir / "metrics.csv")
+    plot_functions = (
+        plot_per_reward_conflict_score_trajectories,
+        plot_per_reward_disagreement_trajectories,
+        plot_per_reward_bottleneck_rate_trajectories,
+        plot_agreement_count_distribution_trajectories,
+        plot_agreement_count_expectation_trajectories,
+        plot_per_reward_weighted_advantage_sign_trajectories,
+        plot_per_reward_weighted_advantage_count_trajectories,
+        plot_standardized_reward_covariance_trajectories,
+        plot_reward_concordance_lower_bound_trajectories,
+    )
+    metadata["plot_workers"] = _plot_worker_count(plot_functions)
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    plot_per_reward_conflict_score_trajectories(
-        rows,
-        output_dir,
-        smoothing_window=config.smoothing_window,
-        plot_format=config.plot_format,
-    )
-    plot_per_reward_disagreement_trajectories(
-        rows,
-        output_dir,
-        smoothing_window=config.smoothing_window,
-        plot_format=config.plot_format,
-    )
-    plot_per_reward_bottleneck_rate_trajectories(
-        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
-    )
-    plot_agreement_count_distribution_trajectories(
-        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
-    )
-    plot_agreement_count_expectation_trajectories(
-        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
-    )
-    plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
-    plot_per_reward_weighted_advantage_count_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
-    plot_standardized_reward_covariance_trajectories(
-        rows,
-        output_dir,
-        smoothing_window=config.smoothing_window,
-        plot_format=config.plot_format,
-    )
-    plot_reward_concordance_lower_bound_trajectories(
-        rows,
-        output_dir,
-        smoothing_window=config.smoothing_window,
-        plot_format=config.plot_format,
-    )
+    _render_figures(config, rows, output_dir, plot_functions)
     print(
         "[Reward concordance] "
         f"runs={len(config.runs)} metric_rows={len(rows)} output={output_dir}"
@@ -200,6 +179,48 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         "runs": run_metadata,
     }
     return rows, metadata
+
+
+def _render_plot_stage(task: tuple[Any, ...]) -> None:
+    """Render one figure stage inside a worker process.
+
+    Each stage writes its own files and shares no state with the others, so the
+    only thing crossing the process boundary is the metric rows.
+    """
+    function, rows, output_dir, smoothing_window, plot_format = task
+    function(rows, output_dir, smoothing_window=smoothing_window, plot_format=plot_format)
+
+
+def _plot_worker_count(plot_functions: Sequence[Callable[..., None]]) -> int:
+    """Pick how many worker processes the figure stage should use."""
+    return max(1, min(len(plot_functions), os.cpu_count() or 1))
+
+
+def _render_figures(
+    config: AnalysisConfig,
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    plot_functions: Sequence[Callable[..., None]],
+) -> None:
+    """Render every figure stage, spreading the stages over worker processes.
+
+    Matplotlib is imported by this module and keeps global state, so the pool is
+    spawned rather than forked: forking a process that already loaded extension
+    modules and started threads risks deadlocking the children. Worker startup
+    costs a fresh interpreter import, which the parallel stages amortize.
+    """
+    tasks = [
+        (function, rows, str(output_dir), config.smoothing_window, config.plot_format)
+        for function in plot_functions
+    ]
+    workers = _plot_worker_count(plot_functions)
+    if workers == 1:
+        for task in tasks:
+            _render_plot_stage(task)
+        return
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        list(executor.map(_render_plot_stage, tasks))
 
 
 def _analyze_run_step(task: tuple[Any, ...]) -> dict[str, Any]:

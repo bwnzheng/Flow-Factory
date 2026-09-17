@@ -24,10 +24,12 @@ import matplotlib.axes
 import numpy as np
 import pytest
 
+from tools.train_reward_analysis import analyze
 from tools.train_reward_analysis.analyze import (
     AnalysisConfig,
     RunSpec,
     _parse_config,
+    _render_figures,
     run_analysis,
 )
 from tools.train_reward_analysis.metrics import (
@@ -423,6 +425,38 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     covariance_dir = tmp_path / "pickscore" / "standardized_reward_covariance"
     assert (covariance_dir / "clip_score__pick_score.png").stat().st_size > 0
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
+
+
+def _write_stage_marker(rows, output_dir, smoothing_window, plot_format) -> None:
+    """Picklable figure-stage stand-in for the rendering-plumbing test."""
+    Path(output_dir, f"stage_{smoothing_window}_{plot_format}.txt").write_text(
+        str(len(rows)), encoding="utf-8"
+    )
+
+
+def test_render_figures_forwards_arguments_to_worker_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stages receive rows, output directory, smoothing and format in workers."""
+    rows = [{"value": 1.0}, {"value": 2.0}]
+    config = AnalysisConfig(smoothing_window=3, plot_format="pdf")
+    monkeypatch.setattr(analyze, "_plot_worker_count", lambda functions: 2)
+
+    _render_figures(config, rows, tmp_path, (_write_stage_marker,))
+
+    assert (tmp_path / "stage_3_pdf.txt").read_text(encoding="utf-8") == "2"
+
+
+def test_render_figures_renders_in_process_when_only_one_worker_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [{"value": 1.0}]
+    config = AnalysisConfig(smoothing_window=5, plot_format="png")
+    monkeypatch.setattr(analyze, "_plot_worker_count", lambda functions: 1)
+
+    _render_figures(config, rows, tmp_path, (_write_stage_marker,))
+
+    assert (tmp_path / "stage_5_png.txt").read_text(encoding="utf-8") == "1"
 
 
 def _agreement_count_rows() -> list[dict]:
