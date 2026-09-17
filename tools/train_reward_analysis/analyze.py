@@ -29,7 +29,7 @@ import json
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -67,6 +67,10 @@ from tools.train_reward_analysis.reward_logs import (
 # series.
 METRIC_VERSION = 5
 
+# The one source of truth for accepted cache modes: the YAML parser and the
+# command-line override both validate against it, so the two cannot drift apart.
+CACHE_MODES = ("regenerate", "reuse")
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -92,12 +96,38 @@ class AnalysisConfig:
     src_temperature: float = 0.5
 
 
-def main() -> None:
-    """Parse CLI arguments and write the experiment artifacts."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Describe the command-line interface."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-c", "--config", required=True, help="Path to an analysis YAML file.")
-    args = parser.parse_args()
-    config = _parse_config(args.config)
+    parser.add_argument(
+        "--cache-mode",
+        choices=CACHE_MODES,
+        default=None,
+        help=(
+            "Override output.cache_mode for this invocation, so redrawing from an existing "
+            "plot-data.json needs no edit to the config file. Omit to use the config value."
+        ),
+    )
+    return parser
+
+
+def _apply_overrides(config: AnalysisConfig, args: argparse.Namespace) -> AnalysisConfig:
+    """Layer command-line overrides on top of the parsed YAML configuration.
+
+    Every override defaults to ``None``, meaning "not given on the command line",
+    so an omitted flag leaves the config file's value untouched rather than
+    silently replacing it with a default.
+    """
+    if args.cache_mode is not None:
+        return replace(config, cache_mode=args.cache_mode)
+    return config
+
+
+def main() -> None:
+    """Parse CLI arguments and write the experiment artifacts."""
+    args = _build_parser().parse_args()
+    config = _apply_overrides(_parse_config(args.config), args)
     _validate_config(config)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +135,8 @@ def main() -> None:
     if config.cache_mode == "reuse":
         if not cache_path.is_file():
             raise FileNotFoundError(
-                f"Plot-data cache not found: {cache_path}. Use output.cache_mode: regenerate first."
+                f"Plot-data cache not found: {cache_path}. Re-run with output.cache_mode "
+                "regenerate in the config, or --cache-mode regenerate on the command line."
             )
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         rows = cached["rows"]
@@ -397,8 +428,8 @@ def _parse_plot_format(value: Any) -> str:
 
 def _parse_cache_mode(value: Any) -> str:
     """Validate whether plot data should be regenerated or reused."""
-    if not isinstance(value, str) or value.lower() not in {"regenerate", "reuse"}:
-        raise ValueError("output.cache_mode must be either 'regenerate' or 'reuse'.")
+    if not isinstance(value, str) or value.lower() not in CACHE_MODES:
+        raise ValueError(f"output.cache_mode must be one of {list(CACHE_MODES)}.")
     return value.lower()
 
 

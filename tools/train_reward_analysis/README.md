@@ -72,6 +72,18 @@ python -m tools.train_reward_analysis.analyze \
   -c tools/train_reward_analysis/nft_src_vs_uniform.yaml
 ```
 
+`--cache-mode {regenerate,reuse}` overrides `output.cache_mode` for one
+invocation, so redrawing from an existing `plot_data.json` needs no edit to the
+config file:
+
+```bash
+python -m tools.train_reward_analysis.analyze \
+  -c tools/train_reward_analysis/nft_src_vs_uniform.yaml --cache-mode reuse
+```
+
+Omitting the flag leaves the config file's value in charge; the override applies
+on top of it, and applies to nothing else.
+
 Both stages use worker processes: the per-run/step metric computation runs on
 `os.cpu_count()` workers, and the figure stages are spread over at most one
 worker per stage (`metadata.json` records both as `analysis_workers` and

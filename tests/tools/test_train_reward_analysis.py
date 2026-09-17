@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import pickle
+import sys
 from pathlib import Path
 
 import matplotlib.axes
@@ -27,8 +29,11 @@ from matplotlib.lines import Line2D
 
 from tools.train_reward_analysis import analyze
 from tools.train_reward_analysis.analyze import (
+    CACHE_MODES,
     AnalysisConfig,
     RunSpec,
+    _apply_overrides,
+    _build_parser,
     _parse_config,
     _render_figures,
     run_analysis,
@@ -413,6 +418,62 @@ def test_analysis_rejects_removed_neutral_threshold_configuration(tmp_path: Path
 
     with pytest.raises(ValueError, match="analysis is no longer supported"):
         _parse_config(config_path)
+
+
+def test_cache_mode_flag_defaults_to_leaving_the_config_alone() -> None:
+    """An omitted override must not replace the config value with a default."""
+    parser = _build_parser()
+
+    assert parser.parse_args(["-c", "analysis.yaml"]).cache_mode is None
+    for mode in CACHE_MODES:
+        assert parser.parse_args(["-c", "analysis.yaml", "--cache-mode", mode]).cache_mode == mode
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-c", "analysis.yaml", "--cache-mode", "refresh"])
+
+
+def test_cache_mode_flag_overrides_the_config_value() -> None:
+    config = AnalysisConfig(cache_mode="regenerate")
+
+    overridden = _apply_overrides(config, argparse.Namespace(cache_mode="reuse"))
+    assert overridden.cache_mode == "reuse"
+    # The rest of the configuration survives the override untouched.
+    assert overridden.output_dir == config.output_dir
+    assert overridden.smoothing_window == config.smoothing_window
+
+    assert _apply_overrides(config, argparse.Namespace(cache_mode=None)).cache_mode == "regenerate"
+
+
+def test_cache_mode_flag_is_honoured_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag reaches the run loop, not just the parser.
+
+    The config asks to regenerate, so a reuse that never happens would mean the
+    override was dropped somewhere between parsing and use. Asserting on the
+    failure that reuse must produce when no cache exists is what proves the
+    command line won.
+    """
+    rewards_dir = tmp_path / "saves" / "run" / "logs" / "rewards"
+    rewards_dir.mkdir(parents=True)
+    _write_train_pickle(rewards_dir / "train_step_000007.pkl", step=7)
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        "save_dir: {save_dir}\n"
+        "runs:\n  - name: run\n    reward_weights:\n      pick_score: 1.0\n      clip_score: 1.0\n"
+        "output:\n  dir: {output_dir}\n  cache_mode: regenerate\n".format(
+            save_dir=tmp_path / "saves", output_dir=tmp_path / "output"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["analyze", "-c", str(config_path), "--cache-mode", "reuse"],
+    )
+
+    with pytest.raises(FileNotFoundError, match="Plot-data cache not found"):
+        analyze.main()
 
 
 def test_plot_smoothing_window_is_configurable_and_requires_an_odd_integer(tmp_path: Path) -> None:
