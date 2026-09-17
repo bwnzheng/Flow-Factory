@@ -25,6 +25,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 
 def plot_per_reward_conflict_score_trajectories(
@@ -325,31 +326,40 @@ def plot_agreement_count_distribution_trajectories(
             )
         ]
         figure, axis = plt.subplots(figsize=(9, 5))
+        legend_handles = []
         for run_index, (label, bins) in enumerate(by_run.items()):
             style = ("-", "--", "-.", ":")[run_index % 4]
             for position, agreeing_count in enumerate(active_counts):
                 count_rows = bins.get(f"count_{agreeing_count}")
                 if not count_rows:
                     continue
+                color = f"C{position % 10}"
+                legend_label = f"{label} | c={agreeing_count}"
                 steps, values = _smoothed_series(count_rows, smoothing_window)
                 axis.plot(
                     steps,
                     values,
                     linestyle=style,
-                    color=f"C{position % 10}",
+                    color=color,
                     marker="o",
                     markersize=2.5,
                     # Series share a color within one agreeing count, so run
                     # index is carried by the dash pattern alone. Marking every
                     # step would fill the dash gaps and erase that cue.
                     markevery=max(1, len(steps) // 12),
-                    label=f"{label} | c={agreeing_count}",
+                    label="_nolegend_",
+                )
+                legend_handles.append(
+                    Line2D([], [], linestyle=style, color=color, linewidth=1.5, label=legend_label)
                 )
         axis.set_title(f"Sample agreement-count distribution [{dataset}]")
         axis.set_xlabel("Training step")
         axis.set_ylabel("Sample fraction")
         axis.grid(alpha=0.25)
-        axis.legend(fontsize=7, loc="best")
+        # Marker-free handles with a longer line: a handle copied from the series
+        # carries its centre marker, which covers the single dash gap that fits
+        # in a short handle, so both runs would look identical in the legend.
+        axis.legend(handles=legend_handles, fontsize=7, loc="best", handlelength=2.8)
         figure.tight_layout()
         path = Path(output_dir) / _filename_component(dataset) / f"agreement_count.{plot_format}"
         path.parent.mkdir(parents=True, exist_ok=True)

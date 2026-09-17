@@ -23,6 +23,7 @@ from pathlib import Path
 import matplotlib.axes
 import numpy as np
 import pytest
+from matplotlib.lines import Line2D
 
 from tools.train_reward_analysis import analyze
 from tools.train_reward_analysis.analyze import (
@@ -496,26 +497,35 @@ def _agreement_count_rows(steps: int = 24) -> list[dict]:
 def test_agreement_count_distribution_plot_draws_each_bin_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each run/bin pair is drawn exactly once, with a distinct dash pattern.
+    """Each run/bin pair is drawn exactly once, and the legend keeps the runs apart.
 
     Series sharing one agreeing count also share a color, so the dash pattern is
-    the only cue separating the runs: markers must stay sparse enough to leave
-    the dashes visible.
+    the only cue separating the runs: the plotted series must keep sparse markers,
+    and the legend handles must carry no marker at all, since the centre marker
+    would cover the single dash gap that fits inside a short handle.
     """
-    drawn: list[tuple[str, str, int]] = []
-    original = matplotlib.axes.Axes.plot
+    drawn: list[tuple[str, int]] = []
+    handles: list[Line2D] = []
+    original_plot = matplotlib.axes.Axes.plot
+    original_legend = matplotlib.axes.Axes.legend
 
     def counting_plot(self, *args, **kwargs):
-        drawn.append(
-            (str(kwargs.get("label")), str(kwargs.get("linestyle")), int(kwargs.get("markevery")))
-        )
-        return original(self, *args, **kwargs)
+        drawn.append((str(kwargs.get("linestyle")), int(kwargs.get("markevery"))))
+        return original_plot(self, *args, **kwargs)
+
+    def capturing_legend(self, *args, **kwargs):
+        handles.extend(kwargs.get("handles") or [])
+        return original_legend(self, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capturing_legend)
 
     plot_agreement_count_distribution_trajectories(_agreement_count_rows(), tmp_path)
 
-    labels = [label for label, _, _ in drawn]
+    assert len(drawn) == 4, "each run/bin pair is drawn exactly once"
+    assert all(markevery > 1 for _, markevery in drawn)
+
+    labels = [handle.get_label() for handle in handles]
     assert sorted(labels) == sorted(
         f"{label} | c={agreeing_count}"
         for label in ("SRC-NFT", "NFT (uniform)")
@@ -523,10 +533,12 @@ def test_agreement_count_distribution_plot_draws_each_bin_once(
     )
     for agreeing_count in (1, 2):
         styles = {
-            style for label, style, _ in drawn if label.endswith(f"| c={agreeing_count}")
+            str(handle.get_linestyle())
+            for handle in handles
+            if handle.get_label().endswith(f"| c={agreeing_count}")
         }
         assert len(styles) == 2, f"runs share one dash pattern for c={agreeing_count}: {styles}"
-    assert all(markevery > 1 for _, _, markevery in drawn)
+    assert all(handle.get_marker() in ("", "None", None) for handle in handles)
 
 
 def test_agreement_count_plots_are_written_per_dataset(tmp_path: Path) -> None:
