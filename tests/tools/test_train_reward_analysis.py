@@ -784,31 +784,71 @@ def test_agreement_figure_distinguishes_runs_by_dash_and_marker(
     )
 
 
-def test_training_progress_figures_lock_their_axis_to_one_hundred_percent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every series is a percentage, so each figure keeps a single 0-100% axis.
+def _record_axis_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[float, float]], list[object]]:
+    """Record every y-limit written and every twin axis created.
 
-    A reward normalized to its own min-max spans 0-100% by construction, and an
-    agreement rate is a share of samples, so it already does. Neither leaves a
-    free scale parameter to choose, which is the only reason a second y-scale
-    would ever be needed.
+    Matplotlib's autoscale writes limits through this same call, so the
+    recordings hold both explicit pins and autoscaled ranges.
     """
-    limits: list[tuple[float, float]] = []
+    written: list[tuple[float, float]] = []
+    twins: list[object] = []
     original_set_ylim = matplotlib.axes.Axes.set_ylim
+    original_twinx = matplotlib.axes.Axes.twinx
 
     def recording_set_ylim(self, *args, **kwargs):
-        limits.append(tuple(args))
+        # Autoscale passes one sequence; explicit pins pass two bounds.
+        bounds = (
+            args[0] if len(args) == 1 and isinstance(args[0], (list, tuple, np.ndarray)) else args
+        )
+        written.append(tuple(float(bound) for bound in bounds))
         return original_set_ylim(self, *args, **kwargs)
 
+    def recording_twinx(self, *args, **kwargs):
+        twin = original_twinx(self, *args, **kwargs)
+        twins.append(twin)
+        return twin
+
     monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", recording_set_ylim)
+    monkeypatch.setattr(matplotlib.axes.Axes, "twinx", recording_twinx)
+    return written, twins
+
+
+def test_run_progress_figure_puts_rates_on_a_second_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rates get their own floating axis beside the fixed progress axis.
+
+    Progress is anchored at both ends by its own min-max normalization, so it
+    keeps 0-100%. Rates sit in a narrow band whose bounds are arbitrary, so
+    pinning them to the same range would flatten the differences the figure
+    exists to show.
+    """
+    written, twins = _record_axis_limits(monkeypatch)
 
     plot_run_training_progress_trajectories(_training_progress_rows(), tmp_path)
+
+    # One twin rate axis per run, and only the progress axes are pinned.
+    assert len(twins) == 2, f"expected one rate axis per run, got {len(twins)}"
+    pinned = [limit for limit in written if limit == (0.0, 100.0)]
+    assert len(pinned) == 2, f"only the two progress axes are pinned, got {written}"
+    for twin in twins:
+        assert twin.get_ylim() != (0.0, 100.0), "the rate axis must follow its own data"
+
+
+def test_agreement_figure_autoscales_to_its_own_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The all-run figure drops the fixed 0-100% range to magnify the rates."""
+    written, twins = _record_axis_limits(monkeypatch)
+
     plot_agreement_rate_trajectories(_training_progress_rows(), tmp_path)
 
-    # Two runs in the per-run figure and one all-run figure: three axes, each
-    # fixed once and never widened by a second y-scale.
-    assert limits == [(0.0, 100.0)] * 3, f"expected one 0-100% axis per figure, got {limits}"
+    assert not twins, "the all-run figure has only rates, so it needs no second axis"
+    assert (0.0, 100.0) not in written, f"the rate axis must not be pinned, got {written}"
+    low, high = (float(bound) for bound in written[-1])
+    assert 0.0 < low and high < 100.0, f"axis should track the rate band, got {written[-1]}"
 
 
 def test_agreement_count_plots_reject_a_dataset_with_two_reward_sets(tmp_path: Path) -> None:

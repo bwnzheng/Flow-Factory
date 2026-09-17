@@ -579,9 +579,10 @@ def plot_run_training_progress_trajectories(
             steps, progress = _mean_reward_progress(keyed, rewards)
             if steps.size == 0:
                 continue
-            figure, axis = plt.subplots(figsize=(8, 4.5))
+            figure, progress_axis = plt.subplots(figsize=(8, 4.5))
+            rate_axis = progress_axis.twinx()
             _plot_percent_curve(
-                axis,
+                progress_axis,
                 steps,
                 progress,
                 _REWARD_PROGRESS_COLOR,
@@ -595,11 +596,7 @@ def plot_run_training_progress_trajectories(
                     [],
                     color=_REWARD_PROGRESS_COLOR,
                     linewidth=1.8,
-                    # The reward curve is normalized while the agreement curves
-                    # are absolute shares, so the qualifier belongs on the curve
-                    # it applies to rather than on the shared axis label, which
-                    # is long enough to be clipped at this figure height.
-                    label="mean reward progress (own min-max)",
+                    label="mean reward progress (left)",
                 )
             ]
             for offset, (metric, legend_name) in enumerate(_AGREEMENT_METRICS):
@@ -607,7 +604,7 @@ def plot_run_training_progress_trajectories(
                 if not fraction_rows:
                     continue
                 _plot_percent_rows(
-                    axis,
+                    rate_axis,
                     fraction_rows,
                     _percent_of_sample_share,
                     _AGREEMENT_COLORS[offset],
@@ -617,14 +614,20 @@ def plot_run_training_progress_trajectories(
                 )
                 handles.append(
                     Line2D(
-                        [], [], color=_AGREEMENT_COLORS[offset], linewidth=1.8, label=legend_name
+                        [],
+                        [],
+                        color=_AGREEMENT_COLORS[offset],
+                        linewidth=1.8,
+                        label=f"{legend_name} (right)",
                     )
                 )
-            _lock_percent_axis(axis)
-            axis.set_title(f"Reward progress and full-agreement rate [{dataset}] | {label}")
-            axis.set_xlabel("Training step")
-            axis.set_ylabel("Percent")
-            axis.legend(handles=handles, fontsize=8, loc="best")
+            _lock_percent_axis(progress_axis, "Reward progress % (left, own min-max)")
+            _autoscale_rate_axis(rate_axis, "Fully-agreeing samples % (right)")
+            progress_axis.set_title(
+                f"Reward progress and full-agreement rate [{dataset}] | {label}"
+            )
+            progress_axis.set_xlabel("Training step")
+            progress_axis.legend(handles=handles, fontsize=8, loc="best")
             figure.tight_layout()
             path = (
                 Path(output_dir)
@@ -681,10 +684,10 @@ def plot_agreement_rate_trajectories(
                         label=f"{label} | {legend_name}",
                     )
                 )
-        _lock_percent_axis(axis)
+        _autoscale_rate_axis(axis, "Percent of fully-agreeing samples")
+        axis.grid(alpha=0.25)
         axis.set_title(f"Fully-agreeing sample rate [{dataset}]")
         axis.set_xlabel("Training step")
-        axis.set_ylabel("Percent of samples")
         axis.legend(handles=handles, fontsize=8, loc="best")
         figure.tight_layout()
         path = (
@@ -814,17 +817,35 @@ def _plot_percent_rows(
     )
 
 
-def _lock_percent_axis(axis: Any) -> None:
-    """Fix a percent axis to 0-100% so a later draw cannot widen it.
+def _lock_percent_axis(axis: Any, label: str) -> None:
+    """Fix an axis to 0-100% so a later draw cannot widen it.
 
-    Every series on these figures is a percentage bounded by construction, so
-    the axis is fixed rather than autoscaled. Without disabling autoscale, the
-    next draw unstales the pending autoscale and reapplies matplotlib's default
-    margins, which reads as data poking past 0-100%.
+    Reward progress is anchored at both ends by its own normalization — 0% is a
+    reward's lowest observed value and 100% its highest — so that scale carries
+    meaning and is worth fixing. Without disabling autoscale, the next draw
+    unstales the pending autoscale and reapplies matplotlib's default margins,
+    which reads as data poking past 0-100%.
     """
     axis.set_autoscaley_on(False)
     axis.set_ylim(0.0, 100.0)
+    axis.set_ylabel(label)
     axis.grid(alpha=0.25)
+
+
+def _autoscale_rate_axis(axis: Any, label: str) -> None:
+    """Let a sample-rate axis follow its own band instead of a fixed 0-100%.
+
+    Agreement rates occupy a narrow band — roughly a fifth of the axis in these
+    runs — so pinning them to 0-100% flattens exactly the differences the figure
+    exists to show. Their bounds are arbitrary rather than anchored, which is why
+    the rate axis is the one that gets to float while progress stays fixed.
+
+    A twin rate axis is left without a grid: gridlines that appear to serve both
+    sides invite reading a crossing point as a comparison of the two scales,
+    when only the fixed left axis supports that.
+    """
+    axis.set_autoscaley_on(True)
+    axis.set_ylabel(label)
 
 
 def _percent_of_own_range(values: np.ndarray) -> np.ndarray:

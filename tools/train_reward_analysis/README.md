@@ -189,26 +189,38 @@ definition.
 because full agreement is a property of the whole reward set (`K`) rather than of
 one reward.
 
-- `<run_label>` is written once per run. It aggregates the rewards into one
-  progress curve: each reward's `per_reward_mean_reward` is mapped onto 0-100% of
-  its own observed range within that run, and those per-reward percentages are
-  averaged at each step. Averaging percentages rather than raw levels is what
-  makes the aggregate meaningful — a reward scored 0-1 and one scored 0-5
-  contribute equally — and it keeps the figure the same size however many rewards
-  are active. Read that curve for shape, never for level: a single outlier step
-  sets a reward's 100% mark, and a reward that never moves has no range to
-  express progress against, so it contributes a flat 0%, following the
-  zero-variance convention above. The two agreement curves beside it are already
-  shares of samples, so they are plotted at their own value and never rescaled.
+- `<run_label>` is written once per run and carries two axes. The left axis holds
+  the aggregated progress curve: each reward's `per_reward_mean_reward` is mapped
+  onto 0-100% of its own observed range within that run, and those per-reward
+  percentages are averaged at each step. Averaging percentages rather than raw
+  levels is what makes the aggregate meaningful — a reward scored 0-1 and one
+  scored 0-5 contribute equally — and it keeps the figure the same size however
+  many rewards are active. Read that curve for shape, never for level: a single
+  outlier step sets a reward's 100% mark, and a reward that never moves has no
+  range to express progress against, so it contributes a flat 0%, following the
+  zero-variance convention above. The right axis holds the two agreement rates,
+  which are already shares of samples and are plotted at their own value.
 - `agreement` drops the reward curve and overlays every configured run, so the
   agreement rates can be read across runs without the reward curves competing
   for the same visual channels. Run identity is carried by dash pattern and
   marker together; agreement direction keeps the same colour it has in the
   per-run figure, so the two figures stay mutually readable.
 
-Neither family leaves a free scale parameter — a normalized reward range is set
-by the data, not chosen — which is what keeps both figures off a second y-scale.
-Every plotted value is also in `metrics.csv`.
+Two y-scales in the per-run figure is a deliberate exception to keeping one scale
+per figure. The progress curve spans the full 0-100% by construction, while the
+agreement rates occupy roughly a fifth of that range, so on a shared axis the
+rates flatten into a band and the differences the figure exists to show
+disappear. The split is kept honest three ways: every axis label and legend entry
+marks its side as `(left)` or `(right)`, so no curve can be read against the
+wrong scale; only the left axis carries gridlines, so a crossing point is never
+offered as a comparison between the two scales; and the left axis keeps its fixed
+0-100% while only the right one floats, because 0% and 100% mean something for a
+normalized reward range and nothing in particular for a clipped sample share.
+
+For the same reason `agreement` autoscales instead of holding 0-100%: its
+magnified differences are the point. Read its tick labels for level, since a move
+that looks large against a narrowed axis may be small in absolute terms. Every
+plotted value is also in `metrics.csv`.
 
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
