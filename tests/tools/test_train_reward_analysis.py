@@ -459,7 +459,8 @@ def test_render_figures_renders_in_process_when_only_one_worker_is_available(
     assert (tmp_path / "stage_5_png.txt").read_text(encoding="utf-8") == "1"
 
 
-def _agreement_count_rows() -> list[dict]:
+def _agreement_count_rows(steps: int = 24) -> list[dict]:
+    """Rows long enough that sparse markers apply, with a structurally empty c = 0 bin."""
     rows = [
         {
             "run_label": label,
@@ -469,11 +470,11 @@ def _agreement_count_rows() -> list[dict]:
             "reward": "",
             "reward_pair": f"count_{agreeing_count}",
             "metric": f"agreement_count_c{agreeing_count}",
-            "value": value,
+            "value": 0.0 if agreeing_count == 0 else value + 0.001 * step,
         }
         for label in ("SRC-NFT", "NFT (uniform)")
         for agreeing_count, value in ((0, 0.0), (1, 0.4), (2, 0.6))
-        for step in (0, 1)
+        for step in range(steps)
     ]
     rows.extend(
         {
@@ -484,10 +485,10 @@ def _agreement_count_rows() -> list[dict]:
             "reward": "",
             "reward_pair": "",
             "metric": "mean_agreement_count",
-            "value": value,
+            "value": 1.6 + 0.001 * step,
         }
         for label in ("SRC-NFT", "NFT (uniform)")
-        for step, value in ((0, 1.6), (1, 1.7))
+        for step in range(steps)
     )
     return rows
 
@@ -495,23 +496,37 @@ def _agreement_count_rows() -> list[dict]:
 def test_agreement_count_distribution_plot_draws_each_bin_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each run/bin pair is drawn exactly once, never once per recorded step."""
-    labels: list[str] = []
+    """Each run/bin pair is drawn exactly once, with a distinct dash pattern.
+
+    Series sharing one agreeing count also share a color, so the dash pattern is
+    the only cue separating the runs: markers must stay sparse enough to leave
+    the dashes visible.
+    """
+    drawn: list[tuple[str, str, int]] = []
     original = matplotlib.axes.Axes.plot
 
     def counting_plot(self, *args, **kwargs):
-        labels.append(str(kwargs.get("label")))
+        drawn.append(
+            (str(kwargs.get("label")), str(kwargs.get("linestyle")), int(kwargs.get("markevery")))
+        )
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
 
     plot_agreement_count_distribution_trajectories(_agreement_count_rows(), tmp_path)
 
+    labels = [label for label, _, _ in drawn]
     assert sorted(labels) == sorted(
         f"{label} | c={agreeing_count}"
         for label in ("SRC-NFT", "NFT (uniform)")
         for agreeing_count in (1, 2)
     )
+    for agreeing_count in (1, 2):
+        styles = {
+            style for label, style, _ in drawn if label.endswith(f"| c={agreeing_count}")
+        }
+        assert len(styles) == 2, f"runs share one dash pattern for c={agreeing_count}: {styles}"
+    assert all(markevery > 1 for _, _, markevery in drawn)
 
 
 def test_agreement_count_plots_are_written_per_dataset(tmp_path: Path) -> None:

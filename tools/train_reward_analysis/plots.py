@@ -339,6 +339,10 @@ def plot_agreement_count_distribution_trajectories(
                     color=f"C{position % 10}",
                     marker="o",
                     markersize=2.5,
+                    # Series share a color within one agreeing count, so run
+                    # index is carried by the dash pattern alone. Marking every
+                    # step would fill the dash gaps and erase that cue.
+                    markevery=max(1, len(steps) // 12),
                     label=f"{label} | c={agreeing_count}",
                 )
         axis.set_title(f"Sample agreement-count distribution [{dataset}]")
