@@ -99,17 +99,25 @@ def plot_agreement_count_distribution(
     # A sample below the prompt mean on every reward is also below the mean of the
     # weighted scalar, so c = 0 is unreachable and its bin is always empty.
     counts = [count for count in range(1, values.size) if values[count] > 0.0]
+    heights = [values[count] for count in counts]
     figure, axis = plt.subplots(figsize=(max(4.5, 1.0 * len(counts) + 3.0), 4.5))
-    axis.bar(
-        np.arange(len(counts), dtype=np.float64),
-        [values[count] for count in counts],
-        width=0.7,
-    )
+    axis.bar(np.arange(len(counts), dtype=np.float64), heights, width=0.7)
+    for position, height in enumerate(heights):
+        axis.text(
+            position,
+            height,
+            f"{height:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
     axis.set_xticks(np.arange(len(counts), dtype=np.float64), [f"c={count}" for count in counts])
     axis.set_xlabel("Agreeing rewards per sample")
     axis.set_ylabel("Sample fraction")
     axis.set_title(title)
     axis.grid(alpha=0.25, axis="y")
+    # Leave room for the value labels above the bars.
+    axis.set_ylim(0.0, max(heights) * 1.15 if heights and max(heights) > 0.0 else 1.0)
     figure.tight_layout()
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)

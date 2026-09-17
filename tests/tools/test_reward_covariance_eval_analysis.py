@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import matplotlib.axes
 import numpy as np
 import pytest
 import torch
@@ -481,7 +482,18 @@ output: {dir: output}
         load_config(config_path)
 
 
-def test_agreement_count_plot_writes_one_run_distribution(tmp_path: Path) -> None:
+def test_agreement_count_plot_writes_one_run_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels: list[str] = []
+    original = matplotlib.axes.Axes.text
+
+    def capturing_text(self, x, y, text, *args, **kwargs):
+        labels.append(str(text))
+        return original(self, x, y, text, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", capturing_text)
+
     plot_agreement_count_distribution(
         [0.0, 0.183, 0.421, 0.396],
         tmp_path / "plots" / "agreement_count.png",
@@ -489,6 +501,8 @@ def test_agreement_count_plot_writes_one_run_distribution(tmp_path: Path) -> Non
     )
 
     assert (tmp_path / "plots" / "agreement_count.png").stat().st_size > 0
+    # One value label per drawn bar; the structurally empty c = 0 bin has none.
+    assert labels == ["0.183", "0.421", "0.396"]
 
 
 def test_agreement_count_plot_rejects_a_negative_fraction(tmp_path: Path) -> None:
