@@ -318,6 +318,22 @@ Based on the fix type, write the fix entry to the appropriate document:
 - **Lesson**: Moving a body out of a closure into a process-pool worker makes every free variable an undefined name — thread all of them through the task tuple and re-grep the moved body for the old names. Flag-guarded branches hide such regressions: when parallelizing, exercise each flag combination at least once, because the default configuration can leave the broken path untouched.
 - **Related Constraint**: N/A
 
+### Analysis plot redrew each series once per recorded row
+- **Date**: 2026-09-17
+- **Symptom**: The new agreement-count distribution figure made the analysis tool feel slow: `savefig` took 6.7s per figure (8.7s for the stage, versus ~0.5s for comparable stages) and `tight_layout` warned that margins could not be made large enough. The rendered figure looked correct.
+- **Root Cause**: `tools/train_reward_analysis/plots.py` built the bin list with `sorted(int(...) for row in combination_rows)` instead of `sorted({...})`, so the value carried one entry per *row* rather than one per *bin*. The plotting loop then iterated that list, drawing each series once per recorded step — 488 and 732 artists per figure instead of 6-8. The duplicate lines overlap pixel-for-pixel, so the figure was visually indistinguishable while rasterization cost 30x: `figure.tight_layout()` calls reached 16k and drawing hit 141k font lookups, and the failed-layout warning was a symptom of the bloat rather than a layout problem.
+- **Fix**: Deduplicate the bins into a set before iterating (`plots.py`, both agreement-count plots), which brought the stage from 8.69s to 0.55s and removed the warning. A regression test counts `matplotlib.axes.Axes.plot` calls to assert each run/bin pair is drawn exactly once, since duplicated artists are invisible to visual inspection.
+- **Lesson**: Aggregate over *keys*, not rows. When a plot iterates a derived key list, derive it with `set`/`dict` semantics and never from a row-valued comprehension; duplicated artists are silent — visual review cannot catch them, so assert on artist or call counts (or on wall-clock/stage timing) when adding a figure with many series.
+- **Related Constraint**: N/A
+
+### Self-referential extend hung the whole test suite
+- **Date**: 2026-09-17
+- **Symptom**: `pytest tests/tools/` stopped finishing — the process spun at 100% CPU indefinitely with no failure output, and the last test named in `-v` output was the one under construction.
+- **Root Cause**: The new test built its mixed-reward-set fixture with `rows.extend({**row, ...} for row in rows)`, mutating the same list the generator was iterating. A list iterator follows the growing list, so the generator never exhausted and the suite hung instead of failing.
+- **Fix**: Materialize the second reward set into a list first, then `rows.extend(second_reward_set)` (`tests/tools/test_train_reward_analysis.py`).
+- **Lesson**: Never pass a generator over container `C` into a mutating call on `C` (`extend`, `update`, `+=`) — it is an infinite loop, not a copy. A hang with no output is a strong signal for exactly this shape; when a suite stops finishing, read the last started test before reaching for timing or resource explanations.
+- **Related Constraint**: N/A
+
 ## Cross-refs
 
 - `constraints.md` (archival target for constraint violations)

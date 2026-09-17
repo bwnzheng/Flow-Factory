@@ -293,20 +293,24 @@ def plot_agreement_count_distribution_trajectories(
     Bins that no run ever populates are left out: with the strictly positive
     weights this tool accepts, ``c = 0`` is unreachable, because a sample below
     the group mean on every reward is also below the mean of the weighted scalar.
+
+    One figure is written per dataset, because a dataset fixes the reward set
+    (and therefore ``K``) that its runs were trained against. A dataset carrying
+    more than one reward combination is rejected instead of mixing incomparable
+    counts into one figure.
     """
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if str(row["metric"]).startswith("agreement_count_c"):
-            grouped[
-                (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
-            ].append(row)
+            grouped[str(row.get("dataset", "unknown_dataset"))].append(row)
 
-    for (dataset, combination), combination_rows in grouped.items():
+    for dataset, dataset_rows in grouped.items():
+        _reject_mixed_reward_combinations(dataset, dataset_rows)
         counts = sorted(
-            int(str(row["reward_pair"]).removeprefix("count_")) for row in combination_rows
+            {int(str(row["reward_pair"]).removeprefix("count_")) for row in dataset_rows}
         )
         by_run: dict[str, dict[str, list[dict[str, Any]]]] = {}
-        for label, line_rows in sorted(_group_by_run(combination_rows).items()):
+        for label, line_rows in sorted(_group_by_run(dataset_rows).items()):
             bins: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for row in line_rows:
                 bins[str(row["reward_pair"])].append(row)
@@ -343,12 +347,7 @@ def plot_agreement_count_distribution_trajectories(
         axis.grid(alpha=0.25)
         axis.legend(fontsize=7, loc="best")
         figure.tight_layout()
-        path = (
-            Path(output_dir)
-            / _filename_component(dataset)
-            / "agreement_count"
-            / f"{_filename_component(combination)}.{plot_format}"
-        )
+        path = Path(output_dir) / _filename_component(dataset) / f"agreement_count.{plot_format}"
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
         plt.close(figure)
@@ -370,22 +369,21 @@ def plot_agreement_count_expectation_trajectories(
     the matching agreement-count bins are present in ``rows``.
     """
     rows = list(rows)
-    ceilings: dict[tuple[str, str], int] = {}
+    ceilings: dict[str, int] = {}
     for row in rows:
         if str(row["metric"]).startswith("agreement_count_c"):
-            key = (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
+            dataset = str(row.get("dataset", "unknown_dataset"))
             agreeing_count = int(str(row["reward_pair"]).removeprefix("count_"))
-            ceilings[key] = max(ceilings.get(key, 0), agreeing_count)
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            ceilings[dataset] = max(ceilings.get(dataset, 0), agreeing_count)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row["metric"] == "mean_agreement_count":
-            grouped[
-                (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
-            ].append(row)
+            grouped[str(row.get("dataset", "unknown_dataset"))].append(row)
 
-    for (dataset, combination), combination_rows in grouped.items():
+    for dataset, dataset_rows in grouped.items():
+        _reject_mixed_reward_combinations(dataset, dataset_rows)
         figure, axis = plt.subplots(figsize=(8, 4.5))
-        for label, line_rows in sorted(_group_by_run(combination_rows).items()):
+        for label, line_rows in sorted(_group_by_run(dataset_rows).items()):
             raw_steps, raw_values = _series(line_rows)
             raw_line = axis.plot(
                 raw_steps,
@@ -405,7 +403,7 @@ def plot_agreement_count_expectation_trajectories(
                 label=label,
                 zorder=2,
             )
-        ceiling = ceilings.get((dataset, combination))
+        ceiling = ceilings.get(dataset)
         if ceiling is not None:
             axis.axhline(
                 ceiling,
@@ -424,8 +422,7 @@ def plot_agreement_count_expectation_trajectories(
         path = (
             Path(output_dir)
             / _filename_component(dataset)
-            / "agreement_count_expectation"
-            / f"{_filename_component(combination)}.{plot_format}"
+            / f"agreement_count_expectation.{plot_format}"
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
@@ -519,6 +516,21 @@ def plot_per_reward_bottleneck_rate_trajectories(
         figure.savefig(path, dpi=180)
         plt.close(figure)
         plt.close(figure)
+
+
+def _reject_mixed_reward_combinations(dataset: str, rows: Iterable[dict[str, Any]]) -> None:
+    """Fail fast when one dataset carries more than one reward combination.
+
+    A dataset fixes the reward set its runs were trained against, so its samples
+    are only comparable while that set — and therefore the agreeing-count scale —
+    stays constant.
+    """
+    combinations = sorted({str(row["reward_combination"]) for row in rows})
+    if len(combinations) > 1:
+        raise ValueError(
+            f"Dataset {dataset!r} carries more than one reward combination {combinations}; "
+            "agreement-count statistics are only comparable within a single reward set."
+        )
 
 
 def _group_by_run(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

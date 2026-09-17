@@ -20,6 +20,7 @@ import json
 import pickle
 from pathlib import Path
 
+import matplotlib.axes
 import numpy as np
 import pytest
 
@@ -424,7 +425,7 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
 
 
-def test_agreement_count_plots_are_written_per_combination(tmp_path: Path) -> None:
+def _agreement_count_rows() -> list[dict]:
     rows = [
         {
             "run_label": label,
@@ -454,11 +455,51 @@ def test_agreement_count_plots_are_written_per_combination(tmp_path: Path) -> No
         for label in ("SRC-NFT", "NFT (uniform)")
         for step, value in ((0, 1.6), (1, 1.7))
     )
+    return rows
+
+
+def test_agreement_count_distribution_plot_draws_each_bin_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each run/bin pair is drawn exactly once, never once per recorded step."""
+    labels: list[str] = []
+    original = matplotlib.axes.Axes.plot
+
+    def counting_plot(self, *args, **kwargs):
+        labels.append(str(kwargs.get("label")))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
+
+    plot_agreement_count_distribution_trajectories(_agreement_count_rows(), tmp_path)
+
+    assert sorted(labels) == sorted(
+        f"{label} | c={agreeing_count}"
+        for label in ("SRC-NFT", "NFT (uniform)")
+        for agreeing_count in (1, 2)
+    )
+
+
+def test_agreement_count_plots_are_written_per_dataset(tmp_path: Path) -> None:
+    rows = _agreement_count_rows()
 
     plot_agreement_count_distribution_trajectories(rows, tmp_path)
     plot_agreement_count_expectation_trajectories(rows, tmp_path)
 
-    assert (tmp_path / "pickscore" / "agreement_count" / "clip_score__pick_score.png").stat().st_size > 0
-    assert (
-        tmp_path / "pickscore" / "agreement_count_expectation" / "clip_score__pick_score.png"
-    ).stat().st_size > 0
+    assert (tmp_path / "pickscore" / "agreement_count.png").stat().st_size > 0
+    assert (tmp_path / "pickscore" / "agreement_count_expectation.png").stat().st_size > 0
+
+
+def test_agreement_count_plots_reject_a_dataset_with_two_reward_sets(tmp_path: Path) -> None:
+    """A dataset fixes its reward set; mixing two would mix agreeing-count scales."""
+    rows = _agreement_count_rows()
+    second_reward_set = [
+        {**row, "reward_combination": "clip_score__ocr_reward__pick_score"} for row in rows
+    ]
+    rows.extend(second_reward_set)
+
+    with pytest.raises(ValueError, match="more than one reward combination"):
+        plot_agreement_count_distribution_trajectories(rows, tmp_path)
+
+    with pytest.raises(ValueError, match="more than one reward combination"):
+        plot_agreement_count_expectation_trajectories(rows, tmp_path)

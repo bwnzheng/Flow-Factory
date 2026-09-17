@@ -137,13 +137,16 @@ per dataset:
   per_reward_bottleneck_rate/<reward>.png
   standardized_reward_covariance/<reward_pair>.png
   reward_concordance_lower_bound.<plot_format>
-  agreement_count/<reward_combination>.<plot_format>
-  agreement_count_expectation/<reward_combination>.<plot_format>
+  agreement_count.<plot_format>
+  agreement_count_expectation.<plot_format>
 ```
 
 The dataset directory is recovered from the saved run context source (for
 example, `pickscore` or `ocr`), so the fixed reward combination for each
-dataset is unambiguous. Runs without saved source provenance are placed under
+dataset is unambiguous. The agreement-count figures are therefore written per
+dataset rather than per reward combination; a dataset that unexpectedly carries
+two reward combinations is rejected instead of mixing incomparable
+agreeing-count scales into one figure. Runs without saved source provenance are placed under
 `unknown_dataset`. Set `output.plot_format` to `png` (default) or `pdf` to choose the
 format for all generated figures.
 When multiple runs are configured, every figure overlays their `run_label`
