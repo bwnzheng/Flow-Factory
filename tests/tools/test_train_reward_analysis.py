@@ -38,7 +38,6 @@ from tools.train_reward_analysis.metrics import (
     compute_reward_concordance_metrics,
 )
 from tools.train_reward_analysis.plots import (
-    _SERIES_PALETTE,
     _percent_of_own_range,
     _percent_of_sample_share,
     _smoothed_series,
@@ -46,9 +45,10 @@ from tools.train_reward_analysis.plots import (
     plot_agreement_count_expectation_trajectories,
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
+    plot_agreement_rate_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
+    plot_run_training_progress_trajectories,
     plot_standardized_reward_covariance_trajectories,
-    plot_training_progress_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
@@ -683,21 +683,116 @@ def _training_progress_rows(dataset: str = "pickscore") -> list[dict]:
     return rows
 
 
-def test_training_progress_plot_is_written_per_dataset(tmp_path: Path) -> None:
-    plot_training_progress_trajectories(_training_progress_rows(), tmp_path)
+def test_training_progress_figures_are_written_into_their_own_folder(tmp_path: Path) -> None:
+    """One reward-progress figure per run, plus one all-run agreement figure."""
+    rows = _training_progress_rows()
 
-    assert (tmp_path / "pickscore" / "training_progress.png").stat().st_size > 0
+    plot_run_training_progress_trajectories(rows, tmp_path)
+    plot_agreement_rate_trajectories(rows, tmp_path)
+
+    folder = tmp_path / "pickscore" / "training_progress"
+    assert (folder / "SRC-NFT.png").stat().st_size > 0
+    assert (folder / "NFT__uniform_.png").stat().st_size > 0
+    assert (folder / "agreement.png").stat().st_size > 0
 
 
-def test_training_progress_plot_keeps_both_families_on_one_percent_axis(
+def test_run_progress_figure_aggregates_every_reward_into_one_curve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reward progress and agreement rates share one axis, never two y-scales.
+    """Rewards collapse to a single curve, so the figure cannot grow with them.
 
-    Each reward is normalized to its own min-max, so it spans 0-100% by
-    construction, and an agreement rate is a share of samples, so it already
-    does. Neither leaves a free scale parameter to choose, which is the only
-    reason a second y-scale would be needed.
+    Each reward is normalized to its own range before averaging, so the
+    aggregate is the mean of per-reward percentages rather than of raw levels.
+    """
+    drawn: list[tuple[float, ...]] = []
+    original_plot = matplotlib.axes.Axes.plot
+
+    def counting_plot(self, *args, **kwargs):
+        drawn.append(tuple(np.asarray(args[1], dtype=float)))
+        return original_plot(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
+
+    rows = [
+        row
+        for row in _training_progress_rows()
+        if row["run_label"] == "SRC-NFT" and row["metric"] != "per_reward_mean_reward"
+    ]
+    # Two rewards on wildly different scales, so averaging raw levels and
+    # averaging per-reward percentages would disagree.
+    rows.extend(
+        {
+            "run_label": "SRC-NFT",
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": reward,
+            "reward_pair": "",
+            "metric": "per_reward_mean_reward",
+            "value": low + (high - low) * step / 9.0,
+        }
+        for reward, low, high in (("clip_score", 0.0, 1.0), ("pick_score", 100.0, 200.0))
+        for step in range(10)
+    )
+
+    # Smoothing is off here so the drawn series is the aggregate itself.
+    plot_run_training_progress_trajectories(rows, tmp_path, smoothing_window=1)
+
+    # Three series: the aggregate, positive, and negative, each drawn twice as a
+    # faint raw trace and then a foreground.
+    assert len(drawn) == 6, f"expected 3 series drawn as raw + smoothed, got {len(drawn)}"
+    aggregate, foreground = drawn[0], drawn[1]
+    # Both rewards span their own range equally, so every step averages to
+    # 100 * step / 9 — which averaging raw levels could not produce, since
+    # clip_score and pick_score live on scales 100x apart.
+    np.testing.assert_allclose(aggregate, 100.0 * np.arange(10) / 9.0)
+    np.testing.assert_allclose(foreground, aggregate)
+
+
+def test_agreement_figure_distinguishes_runs_by_dash_and_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each run gets its own dash pattern and marker, so runs never look alike."""
+    styles: list[tuple[str, str]] = []
+    handles: list[Line2D] = []
+    original_plot = matplotlib.axes.Axes.plot
+    original_legend = matplotlib.axes.Axes.legend
+
+    def recording_plot(self, *args, **kwargs):
+        styles.append((str(kwargs.get("linestyle")), str(kwargs.get("marker"))))
+        return original_plot(self, *args, **kwargs)
+
+    def capturing_legend(self, *args, **kwargs):
+        handles.extend(kwargs.get("handles") or [])
+        return original_legend(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", recording_plot)
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capturing_legend)
+
+    plot_agreement_rate_trajectories(_training_progress_rows(), tmp_path)
+
+    # Two runs times two agreement directions, each drawn raw + smoothed.
+    assert len(styles) == 8, f"expected 4 series drawn twice, got {len(styles)}"
+    run_styles = {style for index, style in enumerate(styles) if index % 2 == 1}
+    assert len(run_styles) == 2, f"runs must not share a dash/marker pair: {run_styles}"
+
+    labels = [handle.get_label() for handle in handles]
+    assert sorted(labels) == sorted(
+        f"{label} | {legend_name}"
+        for label in ("SRC-NFT", "NFT (uniform)")
+        for _, legend_name in (("", "positive fully-agree"), ("", "negative fully-agree"))
+    )
+
+
+def test_training_progress_figures_lock_their_axis_to_one_hundred_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every series is a percentage, so each figure keeps a single 0-100% axis.
+
+    A reward normalized to its own min-max spans 0-100% by construction, and an
+    agreement rate is a share of samples, so it already does. Neither leaves a
+    free scale parameter to choose, which is the only reason a second y-scale
+    would ever be needed.
     """
     limits: list[tuple[float, float]] = []
     original_set_ylim = matplotlib.axes.Axes.set_ylim
@@ -708,47 +803,12 @@ def test_training_progress_plot_keeps_both_families_on_one_percent_axis(
 
     monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", recording_set_ylim)
 
-    plot_training_progress_trajectories(_training_progress_rows(), tmp_path)
+    plot_run_training_progress_trajectories(_training_progress_rows(), tmp_path)
+    plot_agreement_rate_trajectories(_training_progress_rows(), tmp_path)
 
-    assert limits == [(0.0, 100.0)], f"expected one shared percent axis, got {limits}"
-
-
-def test_training_progress_plot_stops_before_reusing_a_series_colour(tmp_path: Path) -> None:
-    """Past the palette's slots two series would share a hue; fail rather than cycle."""
-    rows = [
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": f"reward_{index}",
-            "reward_pair": "",
-            "metric": "per_reward_mean_reward",
-            "value": 0.5 + 0.01 * step,
-        }
-        for index in range(len(_SERIES_PALETTE))
-        for step in range(4)
-    ]
-    rows.extend(
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": "",
-            "reward_pair": "",
-            "metric": metric,
-            "value": 0.2,
-        }
-        for metric in (
-            "positive_fully_concordant_sample_rate",
-            "negative_fully_concordant_sample_rate",
-        )
-        for step in range(4)
-    )
-
-    with pytest.raises(ValueError, match="validated palette"):
-        plot_training_progress_trajectories(rows, tmp_path)
+    # Two runs in the per-run figure and one all-run figure: three axes, each
+    # fixed once and never widened by a second y-scale.
+    assert limits == [(0.0, 100.0)] * 3, f"expected one 0-100% axis per figure, got {limits}"
 
 
 def test_agreement_count_plots_reject_a_dataset_with_two_reward_sets(tmp_path: Path) -> None:

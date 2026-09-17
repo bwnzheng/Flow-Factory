@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import matplotlib
 
@@ -27,23 +27,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-# Fixed-order categorical slots for the training-progress figure. This is the
+# The two signed halves of full concordance, and the aggregate reward-progress
+# curve that shares their axes. These are the opening three slots of the
 # validated reference palette, whose slot *order* is what keeps neighbouring
-# series separable under colour-vision deficiency; slots are assigned in order
-# and never cycled, because a repeated hue would make two series unreadable
-# rather than merely similar. Slots 3-5 sit below 3:1 contrast on a light
-# surface, so that figure always ships a legend and every plotted value also
-# appears in metrics.csv.
-_SERIES_PALETTE = (
-    "#2a78d6",  # blue
-    "#eb6834",  # orange
-    "#1baf7a",  # aqua
-    "#eda100",  # yellow
-    "#e87ba4",  # magenta
-    "#008300",  # green
-    "#4a3aa7",  # violet
-    "#e34948",  # red
+# series separable under colour-vision deficiency; that opening three validates
+# on every pair, not only adjacent ones, so any of the three reads against any
+# other. Agreement direction keeps its colour in both training-progress figures,
+# so the two stay mutually readable. The slots sit below 3:1 contrast on a light
+# surface, so both figures ship a legend and every plotted value also appears in
+# metrics.csv.
+_AGREEMENT_METRICS = (
+    ("positive_fully_concordant_sample_rate", "positive fully-agree"),
+    ("negative_fully_concordant_sample_rate", "negative fully-agree"),
 )
+_AGREEMENT_METRIC_NAMES = {name for name, _ in _AGREEMENT_METRICS}
+_AGREEMENT_COLORS = ("#2a78d6", "#eb6834")  # blue, orange
+_REWARD_PROGRESS_COLOR = "#1baf7a"  # aqua
 
 
 def plot_per_reward_conflict_score_trajectories(
@@ -550,39 +549,169 @@ def plot_per_reward_bottleneck_rate_trajectories(
         plt.close(figure)
 
 
-def plot_training_progress_trajectories(
+def plot_run_training_progress_trajectories(
     rows: Iterable[dict[str, Any]],
     output_dir: str | Path,
     smoothing_window: int = 5,
     plot_format: str = "png",
 ) -> None:
-    """Write one training-progress and full-agreement figure per dataset.
+    """Write one reward-progress and full-agreement figure per run and dataset.
 
-    Two families share a single percent axis. Every reward contributes the
-    step's macro-averaged raw reward, mapped onto 0-100% of that reward's own
-    observed range within the run, so rewards on different scales — an OCR
-    score beside a PickScore — stay comparable in shape. The two agreement
-    curves are already shares of samples, so they are plotted at their own
-    value and are never rescaled.
+    Rewards are aggregated into a single progress curve rather than drawn
+    separately: each reward is mapped onto 0-100% of its own observed range
+    within the run, and those per-reward percentages are averaged at each step.
+    A reward set of any size therefore reads as one curve, which is the point —
+    a per-reward version grows unreadable as rewards are added.
 
-    Both families are bounded 0-100% by construction and neither introduces a
-    free scale parameter, so one axis carries both and no second y-scale is
-    needed. Read the reward curves for shape, not for level: normalizing to the
-    run's own range means every curve spans the full axis, and a single outlier
-    step sets the 100% mark. A reward that never moves has no range to express
-    progress against and is drawn as a flat 0%, matching the zero-variance
-    convention used elsewhere in this tool.
+    Averaging percentages rather than raw levels is what makes the aggregate
+    meaningful: a reward scored 0-1 and one scored 0-5 contribute equally, so
+    the curve tracks how far each reward has moved through its own range. Read
+    it for shape, not for level; a single outlier step sets a reward's 100% mark,
+    and a reward that never moves contributes a flat 0%.
+
+    The two agreement curves are already shares of samples, so they are plotted
+    at their own value and are never rescaled. All three curves are bounded
+    0-100% by construction with no free scale parameter, so one axis carries
+    them and no second y-scale is needed.
     """
-    fraction_metrics = (
-        ("positive_fully_concordant_sample_rate", "positive fully-agree"),
-        ("negative_fully_concordant_sample_rate", "negative fully-agree"),
-    )
-    fraction_names = {name for name, _ in fraction_metrics}
+    for dataset, rewards, by_run in _group_progress_rows(rows):
+        for label, keyed in by_run.items():
+            steps, progress = _mean_reward_progress(keyed, rewards)
+            if steps.size == 0:
+                continue
+            figure, axis = plt.subplots(figsize=(8, 4.5))
+            _plot_percent_curve(
+                axis,
+                steps,
+                progress,
+                _REWARD_PROGRESS_COLOR,
+                "-",
+                "o",
+                smoothing_window,
+            )
+            handles = [
+                Line2D(
+                    [],
+                    [],
+                    color=_REWARD_PROGRESS_COLOR,
+                    linewidth=1.8,
+                    # The reward curve is normalized while the agreement curves
+                    # are absolute shares, so the qualifier belongs on the curve
+                    # it applies to rather than on the shared axis label, which
+                    # is long enough to be clipped at this figure height.
+                    label="mean reward progress (own min-max)",
+                )
+            ]
+            for offset, (metric, legend_name) in enumerate(_AGREEMENT_METRICS):
+                fraction_rows = keyed.get((metric, ""))
+                if not fraction_rows:
+                    continue
+                _plot_percent_rows(
+                    axis,
+                    fraction_rows,
+                    _percent_of_sample_share,
+                    _AGREEMENT_COLORS[offset],
+                    "-",
+                    "o",
+                    smoothing_window,
+                )
+                handles.append(
+                    Line2D(
+                        [], [], color=_AGREEMENT_COLORS[offset], linewidth=1.8, label=legend_name
+                    )
+                )
+            _lock_percent_axis(axis)
+            axis.set_title(f"Reward progress and full-agreement rate [{dataset}] | {label}")
+            axis.set_xlabel("Training step")
+            axis.set_ylabel("Percent")
+            axis.legend(handles=handles, fontsize=8, loc="best")
+            figure.tight_layout()
+            path = (
+                Path(output_dir)
+                / _filename_component(dataset)
+                / "training_progress"
+                / f"{_filename_component(label)}.{plot_format}"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(path, dpi=180)
+            plt.close(figure)
+
+
+def plot_agreement_rate_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one all-run full-agreement figure per dataset.
+
+    This figure drops the reward-progress curve so the runs can carry the axes
+    alone: with no other family competing for the same channels, run identity is
+    read from colour, dash pattern, and marker together rather than from the dash
+    pattern by itself. Agreement direction keeps the colours it has in the
+    per-run figure, so the two figures in this folder stay mutually readable.
+    """
+    for dataset, _rewards, by_run in _group_progress_rows(rows):
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        handles = []
+        for run_index, (label, keyed) in enumerate(by_run.items()):
+            linestyle = ("-", "--", "-.", ":")[run_index % 4]
+            marker = ("o", "s", "^", "D")[run_index % 4]
+            for offset, (metric, legend_name) in enumerate(_AGREEMENT_METRICS):
+                fraction_rows = keyed.get((metric, ""))
+                if not fraction_rows:
+                    continue
+                _plot_percent_rows(
+                    axis,
+                    fraction_rows,
+                    _percent_of_sample_share,
+                    _AGREEMENT_COLORS[offset],
+                    linestyle,
+                    marker,
+                    smoothing_window,
+                )
+                handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color=_AGREEMENT_COLORS[offset],
+                        linestyle=linestyle,
+                        marker=marker,
+                        linewidth=1.8,
+                        label=f"{label} | {legend_name}",
+                    )
+                )
+        _lock_percent_axis(axis)
+        axis.set_title(f"Fully-agreeing sample rate [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Percent of samples")
+        axis.legend(handles=handles, fontsize=8, loc="best")
+        figure.tight_layout()
+        path = (
+            Path(output_dir)
+            / _filename_component(dataset)
+            / "training_progress"
+            / f"agreement.{plot_format}"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
+def _group_progress_rows(
+    rows: Iterable[dict[str, Any]],
+) -> list[tuple[str, list[str], dict[str, dict[tuple[str, str], list[dict[str, Any]]]]]]:
+    """Group progress rows by dataset and then by run, keyed by metric and reward.
+
+    A dataset fixes the reward set its runs were trained against, so a dataset
+    carrying two combinations is rejected rather than averaged into one curve.
+    """
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        if row["metric"] == "per_reward_mean_reward" or row["metric"] in fraction_names:
+        if row["metric"] == "per_reward_mean_reward" or row["metric"] in _AGREEMENT_METRIC_NAMES:
             grouped[str(row.get("dataset", "unknown_dataset"))].append(row)
 
+    result = []
     for dataset, dataset_rows in grouped.items():
         _reject_mixed_reward_combinations(dataset, dataset_rows)
         rewards = sorted(
@@ -592,99 +721,51 @@ def plot_training_progress_trajectories(
                 if row["metric"] == "per_reward_mean_reward" and row["reward"]
             }
         )
-        series_count = len(rewards) + len(fraction_metrics)
-        if series_count > len(_SERIES_PALETTE):
-            raise ValueError(
-                f"Dataset {dataset!r} plots {series_count} series but the validated palette holds "
-                f"{len(_SERIES_PALETTE)}. Split the reward set across figures instead of cycling "
-                "colours, which would give two series the same hue."
-            )
         by_run: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {}
         for label, line_rows in sorted(_group_by_run(dataset_rows).items()):
             keyed: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
             for row in line_rows:
                 keyed[(str(row["metric"]), str(row["reward"]))].append(row)
             by_run[label] = keyed
-
-        figure, axis = plt.subplots(figsize=(9, 5))
-        legend_handles = []
-        for run_index, (label, keyed) in enumerate(by_run.items()):
-            style = ("-", "--", "-.", ":")[run_index % 4]
-            for series_index, reward in enumerate(rewards):
-                progress_rows = keyed.get(("per_reward_mean_reward", reward))
-                if not progress_rows:
-                    continue
-                color = _SERIES_PALETTE[series_index]
-                _plot_percent_series(
-                    axis,
-                    progress_rows,
-                    _percent_of_own_range,
-                    color,
-                    style,
-                    smoothing_window,
-                )
-                legend_handles.append(
-                    Line2D(
-                        [],
-                        [],
-                        color=color,
-                        linestyle=style,
-                        linewidth=1.8,
-                        label=f"{label} | {reward}",
-                    )
-                )
-            for offset, (metric, legend_name) in enumerate(fraction_metrics):
-                fraction_rows = keyed.get((metric, ""))
-                if not fraction_rows:
-                    continue
-                color = _SERIES_PALETTE[len(rewards) + offset]
-                _plot_percent_series(
-                    axis,
-                    fraction_rows,
-                    _percent_of_sample_share,
-                    color,
-                    style,
-                    smoothing_window,
-                )
-                legend_handles.append(
-                    Line2D(
-                        [],
-                        [],
-                        color=color,
-                        linestyle=style,
-                        linewidth=1.8,
-                        label=f"{label} | {legend_name}",
-                    )
-                )
-        # Both families are percentages, so the axis is fixed rather than
-        # autoscaled: a later draw would otherwise unstale the pending autoscale
-        # and widen the limits by matplotlib's default margins, which would read
-        # as data poking past 0-100%.
-        axis.set_autoscaley_on(False)
-        axis.set_ylim(0.0, 100.0)
-        axis.set_title(f"Reward progress and full-agreement rate [{dataset}]")
-        axis.set_xlabel("Training step")
-        axis.set_ylabel("Percent (reward: own min-max; agreement: sample share)")
-        axis.grid(alpha=0.25)
-        axis.legend(handles=legend_handles, fontsize=7, loc="best", ncol=2)
-        figure.tight_layout()
-        path = Path(output_dir) / _filename_component(dataset) / f"training_progress.{plot_format}"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(path, dpi=180)
-        plt.close(figure)
+        result.append((dataset, rewards, by_run))
+    return result
 
 
-def _plot_percent_series(
+def _mean_reward_progress(
+    keyed: dict[tuple[str, str], list[dict[str, Any]]],
+    rewards: Sequence[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average every reward's own 0-100% progress into one curve per step.
+
+    Each reward is normalized to its own range before averaging, so a reward
+    scored 0-1 and one scored 0-5 contribute equally to the aggregate. A step
+    where a reward is absent is averaged over the rewards that are present.
+    """
+    collected: dict[int, list[float]] = defaultdict(list)
+    for reward in rewards:
+        reward_rows = keyed.get(("per_reward_mean_reward", reward))
+        if not reward_rows:
+            continue
+        steps, values = _series(reward_rows)
+        for step, percent in zip(steps, _percent_of_own_range(values)):
+            collected[int(step)].append(float(percent))
+    ordered = sorted(collected)
+    return (
+        np.asarray(ordered, dtype=np.int64),
+        np.asarray([float(np.mean(collected[step])) for step in ordered]),
+    )
+
+
+def _plot_percent_curve(
     axis: Any,
-    rows: Iterable[dict[str, Any]],
-    transform: Any,
+    steps: np.ndarray,
+    percent: np.ndarray,
     color: str,
     linestyle: str,
+    marker: str,
     smoothing_window: int,
 ) -> None:
     """Draw one faint raw trace with its smoothed foreground on a percent axis."""
-    steps, values = _series(rows)
-    percent = transform(values)
     axis.plot(
         steps,
         percent,
@@ -701,14 +782,49 @@ def _plot_percent_series(
         color=color,
         linestyle=linestyle,
         linewidth=1.8,
-        marker="o",
-        markersize=2.5,
+        marker=marker,
+        markersize=3,
         # Marking every step would fill the dash gaps and hide the cue that
         # carries run identity.
         markevery=max(1, len(steps) // 12),
         label="_nolegend_",
         zorder=2,
     )
+
+
+def _plot_percent_rows(
+    axis: Any,
+    rows: Iterable[dict[str, Any]],
+    transform: Any,
+    color: str,
+    linestyle: str,
+    marker: str,
+    smoothing_window: int,
+) -> None:
+    """Draw one percent series read from its own metric rows."""
+    steps, values = _series(rows)
+    _plot_percent_curve(
+        axis,
+        steps,
+        transform(values),
+        color,
+        linestyle,
+        marker,
+        smoothing_window,
+    )
+
+
+def _lock_percent_axis(axis: Any) -> None:
+    """Fix a percent axis to 0-100% so a later draw cannot widen it.
+
+    Every series on these figures is a percentage bounded by construction, so
+    the axis is fixed rather than autoscaled. Without disabling autoscale, the
+    next draw unstales the pending autoscale and reapplies matplotlib's default
+    margins, which reads as data poking past 0-100%.
+    """
+    axis.set_autoscaley_on(False)
+    axis.set_ylim(0.0, 100.0)
+    axis.grid(alpha=0.25)
 
 
 def _percent_of_own_range(values: np.ndarray) -> np.ndarray:

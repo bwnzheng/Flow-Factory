@@ -45,14 +45,15 @@ from tools.train_reward_analysis.metrics import (
 from tools.train_reward_analysis.plots import (
     plot_agreement_count_distribution_trajectories,
     plot_agreement_count_expectation_trajectories,
+    plot_agreement_rate_trajectories,
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
     plot_per_reward_bottleneck_rate_trajectories,
     plot_per_reward_weighted_advantage_sign_trajectories,
     plot_per_reward_weighted_advantage_count_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
+    plot_run_training_progress_trajectories,
     plot_standardized_reward_covariance_trajectories,
-    plot_training_progress_trajectories,
 )
 from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
@@ -135,7 +136,8 @@ def main() -> None:
         plot_per_reward_weighted_advantage_count_trajectories,
         plot_standardized_reward_covariance_trajectories,
         plot_reward_concordance_lower_bound_trajectories,
-        plot_training_progress_trajectories,
+        plot_run_training_progress_trajectories,
+        plot_agreement_rate_trajectories,
     )
     metadata["plot_workers"] = _plot_worker_count(plot_functions)
     (output_dir / "metadata.json").write_text(

@@ -165,7 +165,9 @@ per dataset:
   reward_concordance_lower_bound.<plot_format>
   agreement_count.<plot_format>
   agreement_count_expectation.<plot_format>
-  training_progress.<plot_format>
+  training_progress/
+    <run_label>.<plot_format>
+    agreement.<plot_format>
 ```
 
 The dataset directory is recovered from the saved run context source (for
@@ -183,27 +185,30 @@ run trajectories. The reward combination is intentionally omitted from the
 filename and title because it is fixed by the dataset directory. The diagonal
 is omitted because covariance after per-group standardization is one by
 definition.
-`training_progress` is written once per dataset, like the agreement-count
-figures, because full agreement is a property of the whole reward set (`K`)
-rather than of one reward. It carries two families on a single 0-100% axis.
-Each reward contributes its `per_reward_mean_reward` curve mapped onto 0-100% of
-that reward's own observed range within that run, so rewards on different scales
-stay comparable in shape; read those curves for shape, never for level, since a
-single outlier step sets the 100% mark and every curve spans the full axis by
-construction. A reward that never moves has no range to express progress against
-and is drawn as a flat 0%, following the zero-variance convention above. The two
-agreement curves are already shares of samples, so they are plotted at their own
-value in percent and are never rescaled.
+`training_progress/` holds two figures per dataset, both on a single 0-100% axis,
+because full agreement is a property of the whole reward set (`K`) rather than of
+one reward.
 
-One axis carries both families because each is bounded 0-100% by construction
-and neither leaves a free scale parameter — the normalized reward range is set
-by the data, not chosen. That is what keeps the figure off a second y-scale.
-Series identity is carried by colour and run identity by dash pattern. Colours
-are assigned in a fixed palette order and never cycled: the rewards of a dataset
-take the leading slots and the two agreement curves take the next two, so the
-agreement colours shift with the number of rewards in that dataset's reward set.
-A dataset needing more series than the palette holds is rejected rather than
-given two series that share a hue. Every plotted value is also in `metrics.csv`.
+- `<run_label>` is written once per run. It aggregates the rewards into one
+  progress curve: each reward's `per_reward_mean_reward` is mapped onto 0-100% of
+  its own observed range within that run, and those per-reward percentages are
+  averaged at each step. Averaging percentages rather than raw levels is what
+  makes the aggregate meaningful — a reward scored 0-1 and one scored 0-5
+  contribute equally — and it keeps the figure the same size however many rewards
+  are active. Read that curve for shape, never for level: a single outlier step
+  sets a reward's 100% mark, and a reward that never moves has no range to
+  express progress against, so it contributes a flat 0%, following the
+  zero-variance convention above. The two agreement curves beside it are already
+  shares of samples, so they are plotted at their own value and never rescaled.
+- `agreement` drops the reward curve and overlays every configured run, so the
+  agreement rates can be read across runs without the reward curves competing
+  for the same visual channels. Run identity is carried by dash pattern and
+  marker together; agreement direction keeps the same colour it has in the
+  per-run figure, so the two figures stay mutually readable.
+
+Neither family leaves a free scale parameter — a normalized reward range is set
+by the data, not chosen — which is what keeps both figures off a second y-scale.
+Every plotted value is also in `metrics.csv`.
 
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
