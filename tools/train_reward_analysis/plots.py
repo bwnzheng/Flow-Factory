@@ -276,6 +276,162 @@ def plot_per_reward_disagreement_trajectories(
         plt.close(figure)
 
 
+def plot_agreement_count_distribution_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one sample agreement-count distribution figure per reward combination.
+
+    Per-reward disagreement rates are marginals: they cannot separate polarized
+    conflict (few samples opposing many rewards at once) from diffuse conflict
+    (many samples opposing a single reward). The agreement-count distribution
+    keeps that joint structure, so a rising ``c = n_rewards`` curve beside a
+    rising ``c = 1`` curve means conflict is spreading rather than deepening.
+
+    Bins that no run ever populates are left out: with the strictly positive
+    weights this tool accepts, ``c = 0`` is unreachable, because a sample below
+    the group mean on every reward is also below the mean of the weighted scalar.
+    """
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if str(row["metric"]).startswith("agreement_count_c"):
+            grouped[
+                (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
+            ].append(row)
+
+    for (dataset, combination), combination_rows in grouped.items():
+        counts = sorted(
+            int(str(row["reward_pair"]).removeprefix("count_")) for row in combination_rows
+        )
+        by_run: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for label, line_rows in sorted(_group_by_run(combination_rows).items()):
+            bins: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for row in line_rows:
+                bins[str(row["reward_pair"])].append(row)
+            by_run[label] = bins
+        active_counts = [
+            agreeing_count
+            for agreeing_count in counts
+            if any(
+                float(row["value"]) != 0.0
+                for bins in by_run.values()
+                for row in bins.get(f"count_{agreeing_count}", ())
+            )
+        ]
+        figure, axis = plt.subplots(figsize=(9, 5))
+        for run_index, (label, bins) in enumerate(by_run.items()):
+            style = ("-", "--", "-.", ":")[run_index % 4]
+            for position, agreeing_count in enumerate(active_counts):
+                count_rows = bins.get(f"count_{agreeing_count}")
+                if not count_rows:
+                    continue
+                steps, values = _smoothed_series(count_rows, smoothing_window)
+                axis.plot(
+                    steps,
+                    values,
+                    linestyle=style,
+                    color=f"C{position % 10}",
+                    marker="o",
+                    markersize=2.5,
+                    label=f"{label} | c={agreeing_count}",
+                )
+        axis.set_title(f"Sample agreement-count distribution [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Sample fraction")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=7, loc="best")
+        figure.tight_layout()
+        path = (
+            Path(output_dir)
+            / _filename_component(dataset)
+            / "agreement_count"
+            / f"{_filename_component(combination)}.{plot_format}"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
+def plot_agreement_count_expectation_trajectories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    smoothing_window: int = 5,
+    plot_format: str = "png",
+) -> None:
+    """Write one mean agreement-count figure per reward combination.
+
+    The expected count is exactly ``n_rewards`` minus the summed per-reward
+    disagreement rates, so this figure restates the marginal disagreement rows.
+    It earns its place as a single bounded scalar: read against the dashed
+    ceiling, it answers "how far from full concordance is this group" without
+    the reader comparing several marginal curves. The ceiling is drawn only when
+    the matching agreement-count bins are present in ``rows``.
+    """
+    rows = list(rows)
+    ceilings: dict[tuple[str, str], int] = {}
+    for row in rows:
+        if str(row["metric"]).startswith("agreement_count_c"):
+            key = (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
+            agreeing_count = int(str(row["reward_pair"]).removeprefix("count_"))
+            ceilings[key] = max(ceilings.get(key, 0), agreeing_count)
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["metric"] == "mean_agreement_count":
+            grouped[
+                (str(row.get("dataset", "unknown_dataset")), str(row["reward_combination"]))
+            ].append(row)
+
+    for (dataset, combination), combination_rows in grouped.items():
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        for label, line_rows in sorted(_group_by_run(combination_rows).items()):
+            raw_steps, raw_values = _series(line_rows)
+            raw_line = axis.plot(
+                raw_steps,
+                raw_values,
+                alpha=0.22,
+                linewidth=1.0,
+                label="_nolegend_",
+                zorder=1,
+            )[0]
+            steps, values = _smoothed_series(line_rows, smoothing_window)
+            axis.plot(
+                steps,
+                values,
+                color=raw_line.get_color(),
+                marker="o",
+                markersize=3,
+                label=label,
+                zorder=2,
+            )
+        ceiling = ceilings.get((dataset, combination))
+        if ceiling is not None:
+            axis.axhline(
+                ceiling,
+                color="black",
+                linewidth=0.8,
+                alpha=0.4,
+                linestyle="--",
+                label=f"all {ceiling} rewards agree",
+            )
+        axis.set_title(f"Mean agreement count [{dataset}]")
+        axis.set_xlabel("Training step")
+        axis.set_ylabel("Mean agreeing reward count per sample")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+        figure.tight_layout()
+        path = (
+            Path(output_dir)
+            / _filename_component(dataset)
+            / "agreement_count_expectation"
+            / f"{_filename_component(combination)}.{plot_format}"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=180)
+        plt.close(figure)
+
+
 def plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, smoothing_window=5, plot_format="png"):
     """Plot standardized advantage means split by sample weight and sign."""
     names = {"weight_ge_1_adv_positive":"weight≥1, adv>0", "weight_ge_1_adv_negative":"weight≥1, adv<0", "weight_lt_1_adv_positive":"weight<1, adv>0", "weight_lt_1_adv_negative":"weight<1, adv<0", "adv_positive":"adv>0", "adv_negative":"adv<0"}

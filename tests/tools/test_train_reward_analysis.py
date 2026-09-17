@@ -35,6 +35,8 @@ from tools.train_reward_analysis.metrics import (
 )
 from tools.train_reward_analysis.plots import (
     _smoothed_series,
+    plot_agreement_count_distribution_trajectories,
+    plot_agreement_count_expectation_trajectories,
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
@@ -88,6 +90,113 @@ def test_aggregate_group_metrics_macro_averages_prompt_groups() -> None:
     assert aggregate["reward_concordance_lower_bound"] == pytest.approx(-0.25)
 
 
+def test_agreement_count_distribution_exposes_joint_conflict_structure() -> None:
+    """Equal per-reward disagreement can still hide different joint conflict."""
+    diffuse = np.asarray(
+        [
+            [2.0, 0.0, 2.0],
+            [1.0, 4.0, 0.0],
+            [0.0, 3.0, 3.0],
+            [4.0, 2.0, 1.0],
+            [1.0, 1.0, 3.0],
+            [2.0, 1.0, 1.0],
+        ]
+    )
+    polarized = np.asarray(
+        [
+            [3.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [2.0, 2.0, 4.0],
+            [2.0, 4.0, 3.0],
+            [4.0, 0.0, 2.0],
+            [4.0, 3.0, 1.0],
+        ]
+    )
+    weights = np.ones(3)
+
+    diffuse_metrics = compute_reward_concordance_metrics(diffuse, weights)
+    polarized_metrics = compute_reward_concordance_metrics(polarized, weights)
+
+    # The marginal disagreement rates, and therefore the redundant mean count,
+    # are identical for both groups.
+    np.testing.assert_allclose(
+        diffuse_metrics["per_reward_disagreement"], polarized_metrics["per_reward_disagreement"]
+    )
+    assert diffuse_metrics["mean_agreement_count"] == pytest.approx(
+        polarized_metrics["mean_agreement_count"]
+    )
+
+    # The count distribution separates them: every diffuse sample keeps two of
+    # the three rewards, while the other group spreads over one to three.
+    np.testing.assert_allclose(
+        diffuse_metrics["sample_agreement_count_distribution"], [0.0, 1.0 / 6.0, 5.0 / 6.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        polarized_metrics["sample_agreement_count_distribution"], [0.0, 1.0 / 3.0, 0.5, 1.0 / 6.0]
+    )
+    assert diffuse_metrics["fully_concordant_sample_rate"] == 0.0
+    assert polarized_metrics["fully_concordant_sample_rate"] == pytest.approx(1.0 / 6.0)
+
+
+def test_agreement_count_mean_is_the_complement_of_disagreement() -> None:
+    """The mean count is derived, and total conflict is structurally unreachable."""
+    rewards = np.asarray(
+        [
+            [0.0, 5.0, 1.0],
+            [3.0, 0.5, 4.0],
+            [1.0, 3.0, 2.0],
+            [4.0, 1.5, 0.0],
+            [2.0, 2.5, 3.0],
+        ]
+    )
+    metrics = compute_reward_concordance_metrics(rewards, np.asarray([1.0, 0.5, 2.0]))
+
+    # A sample below the group mean on every reward is also below the mean of
+    # the weighted scalar, so no sample agrees with the scalar on zero rewards.
+    assert metrics["sample_agreement_count_distribution"][0] == 0.0
+    assert metrics["mean_agreement_count"] == pytest.approx(
+        rewards.shape[1] - metrics["per_reward_disagreement"].sum()
+    )
+
+
+def test_aggregate_group_metrics_macro_averages_agreement_count_distribution() -> None:
+    first = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 1.0], [1.0, 0.0]]),
+        reward_weights=np.asarray([0.25, 1.0]),
+    )
+    second = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]]),
+        reward_weights=np.asarray([1.0, 0.25]),
+    )
+
+    aggregate = aggregate_group_metrics([first, second])
+
+    first_distribution = first["sample_agreement_count_distribution"]
+    second_distribution = second["sample_agreement_count_distribution"]
+
+    np.testing.assert_allclose(
+        aggregate["sample_agreement_count_distribution"],
+        (first_distribution + second_distribution) / 2.0,
+    )
+    assert aggregate["mean_agreement_count"] == pytest.approx(
+        (first["mean_agreement_count"] + second["mean_agreement_count"]) / 2.0
+    )
+    assert aggregate["fully_concordant_sample_rate"] == pytest.approx(
+        (first["fully_concordant_sample_rate"] + second["fully_concordant_sample_rate"]) / 2.0
+    )
+
+
+def test_aggregate_group_metrics_rejects_mismatched_agreement_distribution() -> None:
+    metrics = compute_reward_concordance_metrics(
+        np.asarray([[0.0, 1.0], [1.0, 0.0]]),
+        reward_weights=np.asarray([1.0, 1.0]),
+    )
+    truncated = {**metrics, "sample_agreement_count_distribution": np.asarray([0.0, 1.0])}
+
+    with pytest.raises(ValueError, match="agreement-count distribution"):
+        aggregate_group_metrics([truncated])
+
+
 def _write_train_pickle(path: Path, step: int) -> None:
     payload = {
         "step": step,
@@ -130,6 +239,11 @@ def test_analysis_uses_only_saved_rewards_not_saved_src_probabilities(tmp_path: 
         "per_reward_bottleneck_rate",
         "standardized_reward_covariance",
         "reward_concordance_lower_bound",
+        "agreement_count_c0",
+        "agreement_count_c1",
+        "agreement_count_c2",
+        "mean_agreement_count",
+        "fully_concordant_sample_rate",
         "adv_positive",
         "adv_negative",
         "adv_zero",
@@ -308,3 +422,43 @@ def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: P
     covariance_dir = tmp_path / "pickscore" / "standardized_reward_covariance"
     assert (covariance_dir / "clip_score__pick_score.png").stat().st_size > 0
     assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
+
+
+def test_agreement_count_plots_are_written_per_combination(tmp_path: Path) -> None:
+    rows = [
+        {
+            "run_label": label,
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": "",
+            "reward_pair": f"count_{agreeing_count}",
+            "metric": f"agreement_count_c{agreeing_count}",
+            "value": value,
+        }
+        for label in ("SRC-NFT", "NFT (uniform)")
+        for agreeing_count, value in ((0, 0.0), (1, 0.4), (2, 0.6))
+        for step in (0, 1)
+    ]
+    rows.extend(
+        {
+            "run_label": label,
+            "dataset": "pickscore",
+            "step": step,
+            "reward_combination": "clip_score__pick_score",
+            "reward": "",
+            "reward_pair": "",
+            "metric": "mean_agreement_count",
+            "value": value,
+        }
+        for label in ("SRC-NFT", "NFT (uniform)")
+        for step, value in ((0, 1.6), (1, 1.7))
+    )
+
+    plot_agreement_count_distribution_trajectories(rows, tmp_path)
+    plot_agreement_count_expectation_trajectories(rows, tmp_path)
+
+    assert (tmp_path / "pickscore" / "agreement_count" / "clip_score__pick_score.png").stat().st_size > 0
+    assert (
+        tmp_path / "pickscore" / "agreement_count_expectation" / "clip_score__pick_score.png"
+    ).stat().st_size > 0

@@ -82,6 +82,9 @@ conflict_score[i, k] = w[k] * reward_advantage[i, k] * scalar_advantage[i]
 sample_lower_bound[i] = min_k(conflict_score[i, k])
 per_reward_disagreement[k] = mean_i(reward_advantage[i, k] * scalar_advantage[i] < 0)
 per_reward_bottleneck_rate[k] = mean_i(argmin_j conflict_score[i, j] == k)
+agreement_count[i] = sum_k(reward_advantage[i, k] * scalar_advantage[i] >= 0)
+agreement_count_distribution[c] = mean_i(agreement_count[i] == c)   for c = 0..K
+mean_agreement_count = mean_i(agreement_count[i])
 ```
 
 Positive conflict scores mean the named reward supports the scalar training
@@ -106,6 +109,23 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
 - `reward_concordance_lower_bound` is the prompt-group mean of each sample's
   weakest standardized conflict score. It is the sample-wise reward-concordance lower
   bound under the frozen uniform reference.
+- `agreement_count_c<c>` is the prompt-group fraction of samples whose agreeing
+  reward count equals `c`, macro-averaged over prompt groups. Per-reward
+  disagreement rates are marginals, so they cannot tell polarized conflict
+  (a few samples opposing several rewards at once) from diffuse conflict (many
+  samples each opposing one reward) — the distribution can. Note that `c = 0`
+  is unreachable: with the strictly positive weights this tool accepts, a sample
+  below the group mean on every reward is also below the mean of the weighted
+  scalar, so the lowest populated bin is `c = 1`.
+- `mean_agreement_count` is the prompt-group mean agreeing reward count per
+  sample. It is a derived quantity — exactly `K - sum_k(per_reward_disagreement[k])`
+  — and carries no information beyond the per-reward disagreement rates; it is
+  reported for readability only, and plotted as one bounded scalar per
+  combination against a dashed `all K rewards agree` ceiling.
+- `fully_concordant_sample_rate` is the prompt-group fraction of samples that
+  agree with the weighted scalar on every active reward, i.e. the `c = K` bin of
+  the agreement-count distribution. It is named separately because `K` varies
+  per reward combination.
 
 The output directory also contains `metadata.json`, followed by one directory
 per dataset:
@@ -117,6 +137,8 @@ per dataset:
   per_reward_bottleneck_rate/<reward>.png
   standardized_reward_covariance/<reward_pair>.png
   reward_concordance_lower_bound.<plot_format>
+  agreement_count/<reward_combination>.<plot_format>
+  agreement_count_expectation/<reward_combination>.<plot_format>
 ```
 
 The dataset directory is recovered from the saved run context source (for

@@ -42,6 +42,8 @@ from tools.train_reward_analysis.metrics import (
     compute_weighted_advantage_sign_metrics,
 )
 from tools.train_reward_analysis.plots import (
+    plot_agreement_count_distribution_trajectories,
+    plot_agreement_count_expectation_trajectories,
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
     plot_per_reward_bottleneck_rate_trajectories,
@@ -128,6 +130,12 @@ def main() -> None:
     plot_per_reward_bottleneck_rate_trajectories(
         rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
     )
+    plot_agreement_count_distribution_trajectories(
+        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
+    )
+    plot_agreement_count_expectation_trajectories(
+        rows, output_dir, smoothing_window=config.smoothing_window, plot_format=config.plot_format
+    )
     plot_per_reward_weighted_advantage_sign_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
     plot_per_reward_weighted_advantage_count_trajectories(rows, output_dir, config.smoothing_window, config.plot_format)
     plot_standardized_reward_covariance_trajectories(
@@ -173,14 +181,22 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 metadata.setdefault("reward_weight_sources", {}).update(result["weight_sources"])
                 break
     metadata = {
-        "metric_version": 3,
+        "metric_version": 4,
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
         "plot_smoothing_window": config.smoothing_window,
         "plot_format": config.plot_format,
         "analysis_workers": workers,
-        "metrics": {"per_reward_conflict_score": "mean_standardized_weighted_reward_contribution", "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment", "standardized_reward_covariance": "prompt-local population covariance of standardized reward pairs", "reward_concordance_lower_bound": "mean_over_samples_of_the_minimum standardized reward contribution"},
+        "metrics": {
+            "per_reward_conflict_score": "mean_standardized_weighted_reward_contribution",
+            "per_reward_disagreement": "fraction_of_samples_with_negative_reward_scalar_alignment",
+            "standardized_reward_covariance": "prompt-local population covariance of standardized reward pairs",
+            "reward_concordance_lower_bound": "mean_over_samples_of_the_minimum standardized reward contribution",
+            "sample_agreement_count_distribution": "prompt-group fraction of samples whose agreeing-reward count equals each value from 0 to n_rewards",
+            "mean_agreement_count": "prompt-group mean agreeing-reward count per sample, exactly n_rewards minus the summed per-reward disagreement",
+            "fully_concordant_sample_rate": "prompt-group fraction of samples that agree with the weighted scalar on every active reward",
+        },
         "runs": run_metadata,
     }
     return rows, metadata
@@ -517,6 +533,37 @@ def _metric_rows(
             "reward_pair": "",
             "metric": "reward_concordance_lower_bound",
             "value": float(metrics["reward_concordance_lower_bound"]),
+        }
+    )
+    agreement_distribution = np.asarray(
+        metrics["sample_agreement_count_distribution"], dtype=np.float64
+    )
+    for agreeing_count, fraction in enumerate(agreement_distribution):
+        rows.append(
+            {
+                **common,
+                "reward": "",
+                "reward_pair": f"count_{agreeing_count}",
+                "metric": f"agreement_count_c{agreeing_count}",
+                "value": float(fraction),
+            }
+        )
+    rows.append(
+        {
+            **common,
+            "reward": "",
+            "reward_pair": "",
+            "metric": "mean_agreement_count",
+            "value": float(metrics["mean_agreement_count"]),
+        }
+    )
+    rows.append(
+        {
+            **common,
+            "reward": "",
+            "reward_pair": "",
+            "metric": "fully_concordant_sample_rate",
+            "value": float(metrics["fully_concordant_sample_rate"]),
         }
     )
     return rows

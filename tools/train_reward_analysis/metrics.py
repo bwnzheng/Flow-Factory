@@ -96,7 +96,9 @@ def compute_reward_concordance_metrics(
 
     Returns:
         The mean standardized conflict score and disagreement rate for every
-        reward, plus the mean of each sample's weakest reward score.
+        reward, plus the mean of each sample's weakest reward score, and the
+        distribution of how many rewards agree with the weighted scalar for each
+        sample.
     """
     matrix = _validate_rewards(rewards)
     group_size, n_rewards = matrix.shape
@@ -105,8 +107,13 @@ def compute_reward_concordance_metrics(
     centered_rewards = _standardize_centered(matrix, axis=0)
     scalar_rewards = matrix @ weights
     scalar_advantages = _standardize_centered(scalar_rewards, axis=0)
-    conflict_scores = weights[None, :] * centered_rewards * scalar_advantages[:, None]
-    disagreement = (centered_rewards * scalar_advantages[:, None] < 0.0).mean(axis=0)
+    alignment = centered_rewards * scalar_advantages[:, None]
+    conflict_scores = weights[None, :] * alignment
+    disagreement = (alignment < 0.0).mean(axis=0)
+    agreeing_counts = (alignment >= 0.0).sum(axis=1)
+    agreement_count_distribution = (
+        np.bincount(agreeing_counts, minlength=n_rewards + 1) / group_size
+    )
     bottleneck = np.argmin(conflict_scores, axis=1)
     bottleneck_rate = np.bincount(bottleneck, minlength=n_rewards) / group_size
     standardized_covariance = centered_rewards.T @ centered_rewards / group_size
@@ -118,6 +125,9 @@ def compute_reward_concordance_metrics(
         "per_reward_bottleneck_rate": bottleneck_rate,
         "standardized_reward_covariance": standardized_covariance,
         "reward_concordance_lower_bound": float(conflict_scores.min(axis=1).mean()),
+        "sample_agreement_count_distribution": agreement_count_distribution,
+        "mean_agreement_count": float(agreeing_counts.mean()),
+        "fully_concordant_sample_rate": float(agreement_count_distribution[n_rewards]),
     }
 
 
@@ -135,12 +145,17 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         raise ValueError("Cannot aggregate an empty collection of prompt-group metrics.")
 
     n_rewards = len(group_metrics[0]["per_reward_conflict_score"])
+    agreement_distributions = []
     for metrics in group_metrics:
         if len(metrics["per_reward_conflict_score"]) != n_rewards:
             raise ValueError("All groups must have the same number of active rewards.")
         covariance = np.asarray(metrics["standardized_reward_covariance"])
         if covariance.shape != (n_rewards, n_rewards):
             raise ValueError("All groups must have square reward covariance matrices.")
+        distribution = np.asarray(metrics["sample_agreement_count_distribution"], dtype=np.float64)
+        if distribution.shape != (n_rewards + 1,):
+            raise ValueError("All groups must report an agreement-count distribution.")
+        agreement_distributions.append(distribution)
 
     return {
         "n_groups": len(group_metrics),
@@ -159,6 +174,13 @@ def aggregate_group_metrics(group_metrics: Sequence[dict[str, Any]]) -> dict[str
         ),
         "reward_concordance_lower_bound": float(
             np.mean([metrics["reward_concordance_lower_bound"] for metrics in group_metrics])
+        ),
+        "sample_agreement_count_distribution": np.mean(agreement_distributions, axis=0),
+        "mean_agreement_count": float(
+            np.mean([metrics["mean_agreement_count"] for metrics in group_metrics])
+        ),
+        "fully_concordant_sample_rate": float(
+            np.mean([metrics["fully_concordant_sample_rate"] for metrics in group_metrics])
         ),
     }
 
