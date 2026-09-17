@@ -38,6 +38,15 @@ plots/covariance_matrix.<plot_format>
 summary.json
 ```
 
+Each source additionally gets two cross-run figures under
+`agreement_count/<source>/`: `distribution.<plot_format>` compares the runs'
+agreeing-count distributions as grouped bars, and `expectation.<plot_format>`
+tracks each run's expected agreeing count against its checkpoint step (written
+only when a label has more than one checkpoint). The agreeing count is how many
+rewards point the same way as the weighted scalar for one sample, computed
+exactly as the training-side reward-concordance tool computes it, so fresh-sample
+figures here and training-batch figures there share one definition.
+
 Runs may evaluate the base model directly by setting `base_model_only: true`
 instead of `checkpoint`. Base-model samples use `checkpoint_0/` and are marked
 as `base_model` in the manifest and JSON artifacts.
@@ -51,7 +60,21 @@ numerically equivalent to the prompt-local Pearson correlation matrix. The
 `plots/covariance_matrix.<plot_format>` heatmap uses the prompt-macro-averaged
 standardized covariance matrix; raw covariance remains available in the JSONL
 artifacts. Set `output.plot_format` to `png` (default) or `pdf` to choose the
-output format. No scalarization weights are used.
+output format.
+
+Covariance, correlation, and negative-pair metrics use no scalarization weights.
+The agreement-count statistics do, because they compare each reward against the
+weighted scalar: weights are inherited from the run's own
+`logs/media.jsonl` run_context (the same source the training-side analysis
+reads), matched by source name and required to cover exactly that source's
+rewards. Set `runs[].reward_weights` to override, which is also required for
+`base_model_only` runs since they have no training log; a base-model run must
+use the same weights as the runs it is compared against. Every `summary.json`
+records `reward_weights` and `reward_weight_source` for auditing.
+
+Because fresh rollouts are not shaped by the training-time sample selector, the
+agreement-count figures here are the ones that show what fine-tuning moved; the
+training-side tool's figures describe the selected batch instead.
 
 Use separate `output.cache_dir` and `output.jsr_dir` values when running the
 run-based workflow. `cache_dir` contains generated images, manifests, reward

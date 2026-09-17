@@ -60,8 +60,14 @@ runs:
   # For a pure base-model covariance evaluation, use base_model_only: true
   # instead of checkpoint.
   - name: "example_run"
-    checkpoint: "saves/example_run/checkpoints/checkpoint-60"
     label: "example"
+    checkpoint: "saves/example_run/checkpoints/checkpoint-60"
+    # Scalarization weights for the agreement-count statistics. Omit to inherit
+    # the weights saved in this run's logs/media.jsonl run_context, which is the
+    # same source the training-side analysis reads. Set them explicitly for
+    # base_model_only runs (no training log exists), and keep them identical to
+    # the runs being compared.
+    # reward_weights: {pick_score: 0.2, clip_score: 0.2, ocr_reward: 1.0}
 
 output:
   dir: "analysis_output/eval_reward_analysis"

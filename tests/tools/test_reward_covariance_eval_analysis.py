@@ -31,6 +31,8 @@ from tools.eval_reward_analysis.analyze import (
     RunConfig,
     SourceConfig,
     _generate_images,
+    _resolve_reward_weights,
+    _write_agreement_count_plots,
     _write_analysis_artifacts,
     load_config,
     load_prompt_records,
@@ -350,6 +352,8 @@ def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) ->
         manifest,
         {"a": values_a, "b": values_b},
         tmp_path,
+        {"a": 1.0, "b": 1.0},
+        "run_config",
     )
     sample_rows = [
         json.loads(line) for line in (tmp_path / "samples.jsonl").read_text().splitlines()
@@ -363,3 +367,168 @@ def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) ->
     np.testing.assert_allclose(metric_rows[0]["standardized_covariance"], [[1.0, 1.0], [1.0, 1.0]])
     assert summary["n_prompts"] == 2
     assert (tmp_path / summary["covariance_plot"]).is_file()
+    assert summary["reward_weights"] == {"a": 1.0, "b": 1.0}
+    assert summary["reward_weight_source"] == "run_config"
+    # Two rewards, two samples: each prompt's c = 0 bin is structurally empty.
+    assert len(summary["agreement_count_distribution"]) == 3
+    assert summary["agreement_count_distribution"][0] == 0.0
+    assert summary["mean_agreement_count"] == pytest.approx(
+        sum(
+            count * fraction
+            for count, fraction in enumerate(summary["agreement_count_distribution"])
+        )
+    )
+    assert metric_rows[0]["agreement_count_distribution"][0] == 0.0
+    assert metric_rows[0]["mean_agreement_count"] == pytest.approx(summary["mean_agreement_count"])
+
+
+def _weights_context_payload(weights_by_source: dict[str, dict[str, float]]) -> dict:
+    """Build a run_context whose reward entries carry one weight per source."""
+    reward_entries = {}
+    names = sorted({name for weights in weights_by_source.values() for name in weights})
+    for index, name in enumerate(names):
+        reward_entries[f"reward_{index}"] = {
+            "name": name,
+            "weight": {
+                source: float(weights[name])
+                for source, weights in weights_by_source.items()
+                if name in weights
+            },
+        }
+    return {"record_type": "run_context", "configuration": {"reward": reward_entries}}
+
+
+def _checkpoint_fixture(tmp_path: Path, weights_by_source: dict[str, dict[str, float]]) -> Path:
+    run_dir = tmp_path / "saves" / "run"
+    checkpoint = run_dir / "checkpoints" / "checkpoint-10"
+    checkpoint.mkdir(parents=True)
+    (run_dir / "logs").mkdir(parents=True)
+    (run_dir / "logs" / "media.jsonl").write_text(
+        json.dumps(_weights_context_payload(weights_by_source)) + "\n", encoding="utf-8"
+    )
+    return checkpoint
+
+
+def test_resolve_reward_weights_reads_the_training_run_context(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_fixture(tmp_path, {"ocr": {"a": 0.2, "b": 1.0}})
+    run = RunConfig("run", "Run", str(checkpoint))
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    weights, origin = _resolve_reward_weights(run, source)
+
+    assert weights == {"a": 0.2, "b": 1.0}
+    assert origin == "saved_run_context:ocr"
+
+
+def test_resolve_reward_weights_prefers_explicit_run_weights(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_fixture(tmp_path, {"ocr": {"a": 0.2, "b": 1.0}})
+    run = RunConfig("run", "Run", str(checkpoint), reward_weights={"a": 1.0, "b": 1.0})
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    weights, origin = _resolve_reward_weights(run, source)
+
+    assert weights == {"a": 1.0, "b": 1.0}
+    assert origin == "run_config"
+
+
+def test_resolve_reward_weights_rejects_incomplete_names(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_fixture(tmp_path, {"ocr": {"a": 0.2, "b": 1.0}})
+    run = RunConfig("run", "Run", str(checkpoint), reward_weights={"a": 1.0})
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    with pytest.raises(ValueError, match="must cover exactly"):
+        _resolve_reward_weights(run, source)
+
+
+def test_resolve_reward_weights_requires_weights_for_a_base_model_run(tmp_path: Path) -> None:
+    run = RunConfig("base", "Base", None, base_model_only=True)
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    with pytest.raises(ValueError, match="evaluates the base model"):
+        _resolve_reward_weights(run, source)
+
+
+def test_resolve_reward_weights_requires_the_source_in_the_run_context(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_fixture(tmp_path, {"pickscore": {"a": 1.0, "b": 1.0}})
+    run = RunConfig("run", "Run", str(checkpoint))
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    with pytest.raises(ValueError, match="no saved weights for source"):
+        _resolve_reward_weights(run, source)
+
+
+def test_parse_run_reads_reward_weights(tmp_path: Path) -> None:
+    config_path = tmp_path / "eval.yaml"
+    template = """
+model: {base_model: model}
+evaluation: {num_samples_per_prompt: 2}
+sources:
+  - name: test
+    prompts_file: prompts.txt
+    rewards:
+      - {name: a, reward_model: A}
+      - {name: b, reward_model: B}
+runs:
+  - {name: run, base_model_only: true, reward_weights: {a: 1.0, b: 0.25}}
+output: {dir: output}
+"""
+    config_path.write_text(template, encoding="utf-8")
+    assert load_config(config_path).runs[0].reward_weights == {"a": 1.0, "b": 0.25}
+
+    config_path.write_text(template.replace("{a: 1.0, b: 0.25}", "{a: -1.0}"), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be finite and positive"):
+        load_config(config_path)
+
+
+def test_agreement_count_figures_are_written_per_source(tmp_path: Path) -> None:
+    config = AnalysisConfig(
+        model=ModelConfig("model", "bfloat16", "cpu", 1),
+        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
+        sources=[],
+        runs=[],
+        output_dir=str(tmp_path),
+    )
+    summaries = [
+        {
+            "run_label": label,
+            "source": "ocr",
+            "checkpoint_step": step,
+            "reward_names": ["a", "b", "c"],
+            "agreement_count_distribution": [0.0, 0.1 + 0.01 * step, 0.4, 0.5 - 0.01 * step],
+            "mean_agreement_count": 2.4 + 0.01 * step,
+        }
+        for label in ("SRC", "uniform")
+        for step in (0, 20)
+    ]
+
+    _write_agreement_count_plots(config, summaries)
+
+    output_dir = tmp_path / "agreement_count" / "ocr"
+    assert (output_dir / "distribution.png").stat().st_size > 0
+    assert (output_dir / "expectation.png").stat().st_size > 0
+
+
+def test_agreement_count_expectation_is_skipped_without_a_trajectory(tmp_path: Path) -> None:
+    config = AnalysisConfig(
+        model=ModelConfig("model", "bfloat16", "cpu", 1),
+        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
+        sources=[],
+        runs=[],
+        output_dir=str(tmp_path),
+    )
+    summaries = [
+        {
+            "run_label": "SRC",
+            "source": "ocr",
+            "checkpoint_step": 0,
+            "reward_names": ["a", "b", "c"],
+            "agreement_count_distribution": [0.0, 0.1, 0.4, 0.5],
+            "mean_agreement_count": 2.4,
+        }
+    ]
+
+    _write_agreement_count_plots(config, summaries)
+
+    output_dir = tmp_path / "agreement_count" / "ocr"
+    assert (output_dir / "distribution.png").stat().st_size > 0
+    assert not (output_dir / "expectation.png").exists()

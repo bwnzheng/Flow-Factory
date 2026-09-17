@@ -35,7 +35,12 @@ from tools.eval_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_group_metrics,
 )
-from tools.eval_reward_analysis.plots import plot_covariance_matrix, plot_jsr_curves
+from tools.eval_reward_analysis.plots import (
+    plot_agreement_count_distribution,
+    plot_agreement_count_expectation,
+    plot_covariance_matrix,
+    plot_jsr_curves,
+)
 from tools.eval_reward_analysis.reward_scoring import score_reward
 from tools.model_inference import (
     EvaluationRunner,
@@ -43,6 +48,7 @@ from tools.model_inference import (
     resolve_device,
     run_evaluation_set,
 )
+from tools.train_reward_analysis.reward_logs import load_saved_reward_weight_context
 from tools.utils import PromptRecord, load_prompt_records
 
 
@@ -86,6 +92,7 @@ class RunConfig:
     label: str
     checkpoint: Optional[str]
     base_model_only: bool = False
+    reward_weights: Optional[Dict[str, float]] = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +281,7 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                     num_processes=config.model.num_processes,
                     batch_size=config.evaluation.reward_batch_size,
                 )
+            reward_weights, reward_weight_source = _resolve_reward_weights(run, source)
             summary = _write_analysis_artifacts(
                 config,
                 run,
@@ -283,9 +291,12 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                 manifest_rows,
                 reward_values,
                 experiment_dir,
+                reward_weights,
+                reward_weight_source,
                 write_covariance=(config.covariance or {"enabled": True}).get("enabled", True),
             )
             experiment_summaries.append(summary)
+    _write_agreement_count_plots(config, experiment_summaries)
     if config.jsr is not None:
         _write_run_jsr_results(config, experiment_summaries)
     metadata = {
@@ -344,6 +355,8 @@ def _write_analysis_artifacts(
     manifest_rows: List[Dict[str, Any]],
     reward_values: Dict[str, Dict[str, float]],
     experiment_dir: Path,
+    reward_weights: Dict[str, float],
+    reward_weight_source: str,
     write_covariance: bool = True,
 ) -> Dict[str, Any]:
     reward_names = [str(reward["name"]) for reward in source.rewards]
@@ -378,7 +391,9 @@ def _write_analysis_artifacts(
             [[sample["rewards"][name] for name in reward_names] for sample in samples],
             dtype=np.float64,
         )
-        metric = compute_group_metrics(matrix)
+        metric = compute_group_metrics(
+            matrix, np.asarray([reward_weights[name] for name in reward_names], dtype=np.float64)
+        )
         group_metrics.append(metric)
         prompt_metrics.append(
             {
@@ -412,6 +427,8 @@ def _write_analysis_artifacts(
         "reward_names": reward_names,
         "n_prompts": len(prompt_metrics),
         "samples_per_prompt": config.evaluation.num_samples_per_prompt,
+        "reward_weights": {name: float(reward_weights[name]) for name in reward_names},
+        "reward_weight_source": reward_weight_source,
         "covariance_plot": (
             str(covariance_plot_path.relative_to(experiment_dir)) if covariance_plot_path else None
         ),
@@ -419,6 +436,49 @@ def _write_analysis_artifacts(
     }
     _write_json(experiment_dir / "summary.json", summary)
     return summary
+
+
+def _write_agreement_count_plots(
+    config: AnalysisConfig, summaries: List[Dict[str, Any]]
+) -> None:
+    """Write per-source fresh-sample agreement-count figures for every run.
+
+    One bar chart compares the agreeing-count distributions of the runs, and one
+    curve tracks each run's expected count against its checkpoint step. Both use
+    freshly generated samples, so they answer whether training moved the policy's
+    agreement structure, unlike training-batch statistics that the sample
+    selector shapes by construction.
+    """
+    by_source: Dict[str, List[Dict[str, Any]]] = {}
+    for summary in summaries:
+        by_source.setdefault(str(summary["source"]), []).append(summary)
+    output_root = Path(config.output_dir)
+    for source_name, source_summaries in sorted(by_source.items()):
+        reward_count = len(source_summaries[0]["reward_names"])
+        output_dir = output_root / "agreement_count" / source_name
+        distributions = {}
+        curves: Dict[str, List[tuple[int, float]]] = {}
+        for summary in sorted(
+            source_summaries, key=lambda item: (str(item["run_label"]), int(item["checkpoint_step"]))
+        ):
+            label = str(summary["run_label"])
+            step = int(summary["checkpoint_step"])
+            distributions[f"{label} ckpt-{step}"] = summary["agreement_count_distribution"]
+            curves.setdefault(label, []).append((step, float(summary["mean_agreement_count"])))
+        plot_agreement_count_distribution(
+            distributions,
+            output_dir / f"distribution.{config.plot_format}",
+            title=f"Agreement-count distribution of fresh samples ({source_name})",
+        )
+        # A single checkpoint per label has no trajectory to draw.
+        stepped_curves = {label: points for label, points in curves.items() if len(points) > 1}
+        if stepped_curves:
+            plot_agreement_count_expectation(
+                stepped_curves,
+                reward_count,
+                output_dir / f"expectation.{config.plot_format}",
+                title=f"Mean agreement count over checkpoints ({source_name})",
+            )
 
 
 def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any]]) -> None:
@@ -643,7 +703,11 @@ def _parse_toggle(value: Any, field: str) -> Dict[str, bool]:
 def _parse_run(value: Any, index: int) -> RunConfig:
     if not isinstance(value, dict):
         raise ValueError(f"runs[{index}] must be a mapping.")
-    _reject_unknown(value, {"name", "label", "checkpoint", "base_model_only"}, f"runs[{index}]")
+    _reject_unknown(
+        value,
+        {"name", "label", "checkpoint", "base_model_only", "reward_weights"},
+        f"runs[{index}]",
+    )
     name = _nonempty_string(value.get("name"), f"runs[{index}].name")
     checkpoint_value = value.get("checkpoint")
     base_model_only = value.get("base_model_only", False)
@@ -662,7 +726,82 @@ def _parse_run(value: Any, index: int) -> RunConfig:
             else None
         ),
         base_model_only=base_model_only,
+        reward_weights=_parse_reward_weights(value.get("reward_weights"), f"runs[{index}]"),
     )
+
+
+def _parse_reward_weights(value: Any, field: str) -> Optional[Dict[str, float]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{field}.reward_weights must be a non-empty mapping when present.")
+    weights: Dict[str, float] = {}
+    for name, weight in value.items():
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise ValueError(f"{field}.reward_weights[{name!r}] must be a number.")
+        if not np.isfinite(float(weight)) or float(weight) <= 0.0:
+            raise ValueError(f"{field}.reward_weights[{name!r}] must be finite and positive.")
+        weights[str(name)] = float(weight)
+    return weights
+
+
+def _run_context_path(checkpoint: Path) -> Optional[Path]:
+    """Find the training run's media manifest above a checkpoint directory."""
+    for parent in [checkpoint, *checkpoint.parents][:4]:
+        candidate = parent / "logs" / "media.jsonl"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _resolve_reward_weights(run: RunConfig, source: SourceConfig) -> tuple[Dict[str, float], str]:
+    """Resolve the scalarization weights used to count agreeing rewards.
+
+    The counts are only comparable to the training-side analysis when they use
+    the weights the checkpoints were trained with, so the run's own saved run
+    context is the default source and an explicit override must be complete.
+    """
+    reward_names = [str(reward["name"]) for reward in source.rewards]
+    if run.reward_weights is not None:
+        missing = [name for name in reward_names if name not in run.reward_weights]
+        extra = [name for name in run.reward_weights if name not in reward_names]
+        if missing or extra:
+            raise ValueError(
+                f"runs[{run.name!r}].reward_weights must cover exactly the {source.name!r} "
+                f"rewards; missing={missing}, unexpected={extra}."
+            )
+        return {name: run.reward_weights[name] for name in reward_names}, "run_config"
+
+    if run.checkpoint is None:
+        raise ValueError(
+            f"Run {run.name!r} evaluates the base model and has no training log to inherit "
+            f"scalarization weights from; set runs[{run.name!r}].reward_weights for source "
+            f"{source.name!r} to the weights its comparison runs were trained with."
+        )
+    context_path = _run_context_path(Path(run.checkpoint))
+    if context_path is None:
+        raise ValueError(
+            f"No logs/media.jsonl found above checkpoint {run.checkpoint!r} for run "
+            f"{run.name!r}; set runs[{run.name!r}].reward_weights explicitly."
+        )
+    context = load_saved_reward_weight_context(context_path.parent.parent)
+    if context is None:
+        raise ValueError(
+            f"{context_path} has no run_context record for run {run.name!r}; set "
+            f"runs[{run.name!r}].reward_weights explicitly."
+        )
+    saved = context.weights_by_source.get(source.name)
+    if saved is None:
+        raise ValueError(
+            f"Run {run.name!r} has no saved weights for source {source.name!r}; available "
+            f"sources are {sorted(context.weights_by_source)}."
+        )
+    if set(saved) != set(reward_names):
+        raise ValueError(
+            f"Saved weights for source {source.name!r} cover {sorted(saved)}, but the source "
+            f"config lists {sorted(reward_names)}."
+        )
+    return {name: float(saved[name]) for name in reward_names}, f"saved_run_context:{source.name}"
 
 
 def _checkpoint_step(path: Path) -> int:
@@ -686,6 +825,11 @@ def _json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
             metrics["negative_pairwise_correlation_ratio"]
         ),
         "mean_negative_pairwise_correlation": float(metrics["mean_negative_pairwise_correlation"]),
+        "agreement_count_distribution": np.asarray(
+            metrics["agreement_count_distribution"]
+        ).tolist(),
+        "mean_agreement_count": float(metrics["mean_agreement_count"]),
+        "fully_concordant_sample_rate": float(metrics["fully_concordant_sample_rate"]),
     }
 
 
