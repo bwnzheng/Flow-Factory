@@ -197,7 +197,7 @@ For example:
 
 ```json
 {
-  "spec_version": 5,
+  "spec_version": 6,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -285,6 +285,15 @@ plot, set the top margin for that figure as a fraction of the figure height:
 This leaves 4% above the axes. The default is unchanged when the field is
 omitted. Values must be in `[0.0, 1.0)`.
 
+For extra room below the x-axis label, set the bottom margin directly:
+
+```json
+"bottom_margin": 0.14
+```
+
+This leaves 14% below the axes. It is useful when a long x-axis label or large
+x-axis tick font is close to the lower image boundary.
+
 ## Broken y-axis
 
 To use a broken y-axis for one figure, edit that figure's adjacent JSON file and
@@ -293,7 +302,7 @@ replace the axis `limits` with ascending `segments`. For example, this keeps
 
 ```json
 {
-  "spec_version": 5,
+  "spec_version": 6,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -400,7 +409,7 @@ Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
 `spec_version` is unsupported is rejected rather than being drawn with changed
-semantics. The current renderer writes version 5 and still reads versions 1-4.
+semantics. The current renderer writes version 6 and still reads versions 1-5.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and

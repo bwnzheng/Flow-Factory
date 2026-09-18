@@ -36,8 +36,8 @@ from typing import Any
 # Bumped whenever the spec's shape or meaning changes. Readers list compatible
 # historical versions explicitly so incompatible data is never rendered with
 # changed semantics.
-SPEC_VERSION = 5
-SUPPORTED_SPEC_VERSIONS = (1, 2, 3, 4, SPEC_VERSION)
+SPEC_VERSION = 6
+SUPPORTED_SPEC_VERSIONS = (1, 2, 3, 4, 5, SPEC_VERSION)
 
 
 @dataclass(frozen=True)
@@ -144,6 +144,7 @@ class FigureSpec:
     break_mark_size: float = 0.012
     border_width: float | None = None
     top_margin: float | None = None
+    bottom_margin: float | None = None
     font_sizes: FigureFontSizes = field(default_factory=FigureFontSizes)
 
 
@@ -210,6 +211,10 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
         not math.isfinite(spec.top_margin) or not 0.0 <= spec.top_margin < 1.0
     ):
         raise ValueError(f"{context}: top_margin must be finite and in [0.0, 1.0).")
+    if spec.bottom_margin is not None and (
+        not math.isfinite(spec.bottom_margin) or not 0.0 <= spec.bottom_margin < 1.0
+    ):
+        raise ValueError(f"{context}: bottom_margin must be finite and in [0.0, 1.0).")
     if spec.legend is not None and (
         isinstance(spec.legend.ncol, bool)
         or not isinstance(spec.legend.ncol, int)
@@ -326,6 +331,8 @@ def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
         result["border_width"] = spec.border_width
     if spec.top_margin is not None:
         result["top_margin"] = spec.top_margin
+    if spec.bottom_margin is not None:
+        result["bottom_margin"] = spec.bottom_margin
     font_sizes = _font_sizes_to_mapping(spec.font_sizes)
     if font_sizes:
         result["font_sizes"] = font_sizes
@@ -445,6 +452,7 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
         break_mark_size=float(raw.get("break_mark_size", 0.012)),
         border_width=(None if raw.get("border_width") is None else float(raw["border_width"])),
         top_margin=None if raw.get("top_margin") is None else float(raw["top_margin"]),
+        bottom_margin=(None if raw.get("bottom_margin") is None else float(raw["bottom_margin"])),
         font_sizes=(
             FigureFontSizes() if font_sizes is None else _font_sizes_from_mapping(font_sizes, path)
         ),
