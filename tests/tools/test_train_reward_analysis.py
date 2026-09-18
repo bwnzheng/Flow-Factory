@@ -544,7 +544,7 @@ def test_figure_data_round_trips_through_its_own_file(tmp_path: Path) -> None:
     assert (tmp_path / f"{stem}.json").is_file()
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_older_figure_data_remains_readable(tmp_path: Path, version: int) -> None:
     stem, spec = build_figures(_training_progress_rows())[0]
     write_figure_data([(stem, spec)], tmp_path)
@@ -592,6 +592,7 @@ def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
         ),
         smoothing_window=1,
         border_width=2.0,
+        top_margin=0.04,
         font_sizes=font_sizes,
     )
     write_figure_data([("fonts", spec)], tmp_path)
@@ -628,6 +629,7 @@ def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
         for axis in figure.axes
         for spine in axis.spines.values()
     )
+    assert figure.subplotpars.top == pytest.approx(0.96)
     original_close(figure)
 
 
@@ -653,6 +655,7 @@ def test_broken_axis_round_trips_and_renders_two_panels(
         break_gap=0.08,
         break_mark_size=0.015,
         border_width=2.0,
+        top_margin=0.04,
         font_sizes=FigureFontSizes(
             title=16.0,
             x_label=13.0,
@@ -693,6 +696,7 @@ def test_broken_axis_round_trips_and_renders_two_panels(
     break_marks = [line for axis in figure.axes for line in axis.lines if not line.get_clip_on()]
     assert len(break_marks) == 4
     assert {line.get_linewidth() for line in break_marks} == {2.0}
+    assert figure.subplotpars.top == pytest.approx(0.96)
     original_close(figure)
 
 
@@ -769,6 +773,19 @@ def test_invalid_border_width_fails_fast(tmp_path: Path, value: float) -> None:
     )
 
     with pytest.raises(ValueError, match="border_width"):
+        write_figure_data([("invalid", spec)], tmp_path)
+
+
+@pytest.mark.parametrize("value", [-1.0, 1.0, float("nan"), float("inf")])
+def test_invalid_top_margin_fails_fast(tmp_path: Path, value: float) -> None:
+    spec = FigureSpec(
+        title="invalid",
+        x_label="step",
+        left=FigureAxis(label="value"),
+        top_margin=value,
+    )
+
+    with pytest.raises(ValueError, match="top_margin"):
         write_figure_data([("invalid", spec)], tmp_path)
 
 

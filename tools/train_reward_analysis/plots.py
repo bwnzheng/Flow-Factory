@@ -148,6 +148,8 @@ def _render_continuous_figure(
         base_axis.legend(**_legend_kwargs(spec.legend, spec.font_sizes.legend))
 
     figure.tight_layout()
+    if spec.top_margin is not None:
+        figure.subplots_adjust(top=1.0 - spec.top_margin)
     path = Path(output_dir) / f"{stem}.{plot_format}"
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
@@ -243,7 +245,7 @@ def _render_broken_figure(
         left=0.12,
         right=0.88 if spec.right is not None else 0.96,
         bottom=0.12,
-        top=0.9,
+        top=(0.9 if spec.top_margin is None else 1.0 - spec.top_margin),
         hspace=spec.break_gap,
     )
     _draw_break_marks(left_axes, spec.break_mark_size, spec.border_width)

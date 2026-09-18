@@ -197,7 +197,7 @@ For example:
 
 ```json
 {
-  "spec_version": 4,
+  "spec_version": 5,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -275,6 +275,16 @@ Legends already support multiple columns through `legend.ncol`:
 `ncol` must be a positive integer. Use the optional `anchor` field when the
 multi-column legend needs to sit outside the axes.
 
+If the title or a top-anchored legend leaves too much blank space above the
+plot, set the top margin for that figure as a fraction of the figure height:
+
+```json
+"top_margin": 0.04
+```
+
+This leaves 4% above the axes. The default is unchanged when the field is
+omitted. Values must be in `[0.0, 1.0)`.
+
 ## Broken y-axis
 
 To use a broken y-axis for one figure, edit that figure's adjacent JSON file and
@@ -283,7 +293,7 @@ replace the axis `limits` with ascending `segments`. For example, this keeps
 
 ```json
 {
-  "spec_version": 4,
+  "spec_version": 5,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -390,7 +400,7 @@ Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
 `spec_version` is unsupported is rejected rather than being drawn with changed
-semantics. The current renderer writes version 4 and still reads versions 1-3.
+semantics. The current renderer writes version 5 and still reads versions 1-4.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and
