@@ -24,18 +24,18 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import yaml
 
+from tools.train_reward_analysis.figure_spec import SPEC_VERSION, read_spec
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
@@ -43,17 +43,10 @@ from tools.train_reward_analysis.metrics import (
     compute_weighted_advantage_sign_metrics,
 )
 from tools.train_reward_analysis.plots import (
-    plot_agreement_count_distribution_trajectories,
-    plot_agreement_count_expectation_trajectories,
-    plot_concordance_rate_trajectories,
-    plot_per_reward_conflict_score_trajectories,
-    plot_per_reward_disagreement_trajectories,
-    plot_per_reward_bottleneck_rate_trajectories,
-    plot_per_reward_weighted_advantage_sign_trajectories,
-    plot_per_reward_weighted_advantage_count_trajectories,
-    plot_reward_concordance_lower_bound_trajectories,
-    plot_run_training_progress_trajectories,
-    plot_standardized_reward_covariance_trajectories,
+    FigureOutput,
+    build_figures,
+    render_figure,
+    write_figure_data,
 )
 from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
@@ -62,14 +55,10 @@ from tools.train_reward_analysis.reward_logs import (
     load_train_reward_groups,
 )
 
-# Bumped whenever the emitted metric rows change shape or meaning, so a stale
-# plot-data cache is rejected instead of quietly drawing a figure with missing
-# series.
-METRIC_VERSION = 5
-
 # The one source of truth for accepted cache modes: the YAML parser and the
 # command-line override both validate against it, so the two cannot drift apart.
 CACHE_MODES = ("regenerate", "reuse")
+LEGACY_DATA_FILES = ("plot_data.json", "metrics.csv")
 
 
 @dataclass(frozen=True)
@@ -106,7 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Override output.cache_mode for this invocation, so redrawing from an existing "
-            "plot-data.json needs no edit to the config file. Omit to use the config value."
+            "set of per-figure JSON files needs no edit to the config file. Omit to use the "
+            "config value."
         ),
     )
     return parser
@@ -131,55 +121,133 @@ def main() -> None:
     _validate_config(config)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = output_dir / "plot_data.json"
+    remove_legacy_data = config.cache_mode == "regenerate"
+
     if config.cache_mode == "reuse":
-        if not cache_path.is_file():
-            raise FileNotFoundError(
-                f"Plot-data cache not found: {cache_path}. Re-run with output.cache_mode "
-                "regenerate in the config, or --cache-mode regenerate on the command line."
-            )
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        rows = cached["rows"]
-        metadata = cached["metadata"]
-        cached_version = metadata.get("metric_version")
-        if cached_version != METRIC_VERSION:
-            raise ValueError(
-                f"Plot-data cache {cache_path} holds metric_version {cached_version!r}, but this "
-                f"tool writes {METRIC_VERSION}. Its rows are missing metrics the figures need, so "
-                "it would silently draw incomplete figures. Re-run with output.cache_mode: regenerate."
-            )
-        print(f"[Reward concordance] Reusing plot-data cache: {cache_path}")
+        metadata = _read_metadata(output_dir)
+        outputs = [
+            (stem, read_spec(_spec_path(output_dir, stem)))
+            for stem in _figure_stems(metadata, output_dir)
+        ]
+        print(f"[Reward concordance] Reusing {len(outputs)} figure specs from {output_dir}")
     else:
         rows, metadata = run_analysis(config)
-        cache_path.write_text(
-            json.dumps({"rows": rows, "metadata": metadata}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        print(f"[Reward concordance] Wrote plot-data cache: {cache_path}")
-    _write_rows(rows, output_dir / "metrics.csv")
-    plot_functions = (
-        plot_per_reward_conflict_score_trajectories,
-        plot_per_reward_disagreement_trajectories,
-        plot_per_reward_bottleneck_rate_trajectories,
-        plot_agreement_count_distribution_trajectories,
-        plot_agreement_count_expectation_trajectories,
-        plot_per_reward_weighted_advantage_sign_trajectories,
-        plot_per_reward_weighted_advantage_count_trajectories,
-        plot_standardized_reward_covariance_trajectories,
-        plot_reward_concordance_lower_bound_trajectories,
-        plot_run_training_progress_trajectories,
-        plot_concordance_rate_trajectories,
-    )
-    metadata["plot_workers"] = _plot_worker_count(plot_functions)
+        outputs = build_figures(rows, config.smoothing_window)
+        metadata["figures"] = write_figure_data(outputs, output_dir)
+        print(f"[Reward concordance] Wrote {len(outputs)} figure specs to {output_dir}")
+
+    metadata["format_version"] = SPEC_VERSION
+    metadata["plot_format"] = config.plot_format
+    metadata["plot_workers"] = _plot_worker_count(len(outputs))
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    _render_figures(config, rows, output_dir, plot_functions)
+    _render_figures(config, outputs, output_dir)
+    if remove_legacy_data:
+        removed = _remove_legacy_data_files(output_dir)
+        if removed:
+            print(f"[Reward concordance] Removed legacy data files: {', '.join(removed)}")
     print(
         "[Reward concordance] "
-        f"runs={len(config.runs)} metric_rows={len(rows)} output={output_dir}"
+        f"runs={len(config.runs)} figures={len(outputs)} output={output_dir}"
     )
+
+
+def _spec_path(output_dir: Path, stem: str) -> Path:
+    """Return the data file that sits beside one figure's image."""
+    return output_dir / f"{stem}.json"
+
+
+def _read_metadata(output_dir: Path) -> dict[str, Any]:
+    path = output_dir / "metadata.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"No metadata.json in {output_dir}. Re-run with output.cache_mode: regenerate to "
+            "write the figure data first."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _remove_legacy_data_files(output_dir: Path) -> list[str]:
+    """Remove superseded aggregate data only after figure specs exist.
+
+    The old files duplicate the per-figure points and can be much larger than
+    the figures themselves. The exact-name list keeps migration scoped: images,
+    metadata, and unrelated analysis artifacts are never touched.
+    """
+    removed = []
+    for name in LEGACY_DATA_FILES:
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
+            removed.append(name)
+    return removed
+
+
+def _figure_stems(metadata: dict[str, Any], output_dir: Path) -> list[str]:
+    """List the figures the last regeneration wrote, refusing to guess.
+
+    Reading the index rather than globbing means a figure whose data was deleted
+    is reported instead of silently disappearing, and a leftover file from an
+    older configuration is never redrawn.
+    """
+    stems = metadata.get("figures")
+    if not stems:
+        raise ValueError(
+            f"{output_dir / 'metadata.json'} lists no figures, so there is nothing to redraw. "
+            "Re-run with output.cache_mode: regenerate."
+        )
+    if not isinstance(stems, list) or not all(isinstance(stem, str) and stem for stem in stems):
+        raise ValueError(
+            f"{output_dir / 'metadata.json'} must list figure path stems as non-empty strings. "
+            "Re-run with output.cache_mode: regenerate."
+        )
+    if len(stems) != len(set(stems)):
+        raise ValueError(
+            f"{output_dir / 'metadata.json'} lists duplicate figures. Re-run with "
+            "output.cache_mode: regenerate."
+        )
+    missing = [stem for stem in stems if not _spec_path(output_dir, stem).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Figure data missing for {missing}. Re-run with output.cache_mode: regenerate."
+        )
+    return [str(stem) for stem in stems]
+
+
+def _render_figure_task(task: tuple[Any, ...]) -> None:
+    """Draw one figure inside a worker process."""
+    spec, output_dir, stem, plot_format = task
+    render_figure(spec, output_dir, stem, plot_format)
+
+
+def _plot_worker_count(figure_count: int) -> int:
+    """Pick how many worker processes the figure stage should use."""
+    return max(1, min(figure_count, os.cpu_count() or 1))
+
+
+def _render_figures(
+    config: AnalysisConfig,
+    outputs: Sequence[FigureOutput],
+    output_dir: Path,
+) -> None:
+    """Render every figure, spreading them over worker processes.
+
+    Matplotlib is imported by this module and keeps global state, so the pool is
+    spawned rather than forked: forking a process that already loaded extension
+    modules and started threads risks deadlocking the children. Worker startup
+    costs a fresh interpreter import, which the parallel figures amortize.
+    """
+    tasks = [(spec, str(output_dir), stem, config.plot_format) for stem, spec in outputs]
+    workers = _plot_worker_count(len(tasks))
+    if workers == 1:
+        for task in tasks:
+            _render_figure_task(task)
+        return
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        list(executor.map(_render_figure_task, tasks))
 
 
 def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -193,8 +261,24 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
         step_groups = load_train_reward_groups(rewards_dir)
         saved_weight_context = load_saved_reward_weight_context(run_dir)
         for step, groups in step_groups.items():
-            tasks.append((run, step, groups, saved_weight_context, config.src_interpolation, config.src_temperature))
-        run_metadata.append({"run_name": run.name, "run_label": run.label, "reward_weights": run.reward_weights, "n_steps": len(step_groups)})
+            tasks.append(
+                (
+                    run,
+                    step,
+                    groups,
+                    saved_weight_context,
+                    config.src_interpolation,
+                    config.src_temperature,
+                )
+            )
+        run_metadata.append(
+            {
+                "run_name": run.name,
+                "run_label": run.label,
+                "reward_weights": run.reward_weights,
+                "n_steps": len(step_groups),
+            }
+        )
 
     workers = os.cpu_count() or 1
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -207,7 +291,6 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
                 metadata.setdefault("reward_weight_sources", {}).update(result["weight_sources"])
                 break
     metadata = {
-        "metric_version": METRIC_VERSION,
         "source": "saved_train_reward_pickles_and_optional_media_run_context",
         "centering": "uniform_prompt_local_frozen_reward_mean",
         "natural_aggregation": "macro_average_over_prompt_groups",
@@ -231,48 +314,6 @@ def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str
     return rows, metadata
 
 
-def _render_plot_stage(task: tuple[Any, ...]) -> None:
-    """Render one figure stage inside a worker process.
-
-    Each stage writes its own files and shares no state with the others, so the
-    only thing crossing the process boundary is the metric rows.
-    """
-    function, rows, output_dir, smoothing_window, plot_format = task
-    function(rows, output_dir, smoothing_window=smoothing_window, plot_format=plot_format)
-
-
-def _plot_worker_count(plot_functions: Sequence[Callable[..., None]]) -> int:
-    """Pick how many worker processes the figure stage should use."""
-    return max(1, min(len(plot_functions), os.cpu_count() or 1))
-
-
-def _render_figures(
-    config: AnalysisConfig,
-    rows: list[dict[str, Any]],
-    output_dir: Path,
-    plot_functions: Sequence[Callable[..., None]],
-) -> None:
-    """Render every figure stage, spreading the stages over worker processes.
-
-    Matplotlib is imported by this module and keeps global state, so the pool is
-    spawned rather than forked: forking a process that already loaded extension
-    modules and started threads risks deadlocking the children. Worker startup
-    costs a fresh interpreter import, which the parallel stages amortize.
-    """
-    tasks = [
-        (function, rows, str(output_dir), config.smoothing_window, config.plot_format)
-        for function in plot_functions
-    ]
-    workers = _plot_worker_count(plot_functions)
-    if workers == 1:
-        for task in tasks:
-            _render_plot_stage(task)
-        return
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
-        list(executor.map(_render_plot_stage, tasks))
-
-
 def _analyze_run_step(task: tuple[Any, ...]) -> dict[str, Any]:
     """Analyze one run and training step in a worker process."""
     run, step, groups, saved_weight_context, interpolation, temperature = task
@@ -282,61 +323,67 @@ def _analyze_run_step(task: tuple[Any, ...]) -> dict[str, Any]:
         by_combination.setdefault(group.reward_names, []).append(group)
     weight_sources = {}
     for reward_names, combination_groups in sorted(by_combination.items()):
-            weights, weight_source = _weights_for_group(run, reward_names, saved_weight_context)
-            weight_sources["__".join(reward_names)] = weight_source
-            dataset = _dataset_from_weight_source(weight_source)
-            metrics = [
-                compute_reward_concordance_metrics(
-                    group.rewards,
-                    weights,
-                )
-                for group in combination_groups
-            ]
-            aggregate = aggregate_group_metrics(metrics)
-            sign_metrics = []
-            for group in combination_groups:
-                sample_weights = (
-                    compute_src_sample_weights(group.rewards, weights, interpolation, temperature)
-                    if run.src_reweight else np.ones(group.rewards.shape[0])
-                )
-                sign_metrics.append(compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights))
-            if not run.src_reweight:
-                for item in sign_metrics:
-                    item.pop("weight_ge_1_adv_positive")
-                    item.pop("weight_ge_1_adv_negative")
-                    item.pop("weight_lt_1_adv_positive")
-                    item.pop("weight_lt_1_adv_negative")
-                    item.pop("weight_ge_1_adv_zero")
-                    item.pop("weight_lt_1_adv_zero")
-                    item["_counts"].pop("weight_ge_1_adv_positive")
-                    item["_counts"].pop("weight_ge_1_adv_negative")
-                    item["_counts"].pop("weight_ge_1_adv_zero")
-                    item["_counts"].pop("weight_lt_1_adv_positive")
-                    item["_counts"].pop("weight_lt_1_adv_negative")
-                    item["_counts"].pop("weight_lt_1_adv_zero")
-            else:
-                for item in sign_metrics:
-                    item.pop("adv_positive")
-                    item.pop("adv_negative")
-                    item.pop("adv_zero")
-                    item["_counts"].pop("adv_positive")
-                    item["_counts"].pop("adv_negative")
-                    item["_counts"].pop("adv_zero")
-            for metric_name in sign_metrics[0]:
-                if metric_name == "_counts":
-                    continue
-                values = np.mean([item[metric_name] for item in sign_metrics], axis=0)
-                aggregate[metric_name] = values
-            aggregate["_sign_counts"] = {
-                metric_name: np.mean(
-                    [item["_counts"][metric_name] for item in sign_metrics], axis=0
-                )
-                for metric_name in sign_metrics[0]["_counts"]
-            }
-            for metric_name, counts in aggregate["_sign_counts"].items():
-                aggregate[f"sample_count_{metric_name}"] = counts
-            rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
-    return {"run_name": run.name, "rows": rows, "n_groups": len(groups), "weight_sources": weight_sources}
+        weights, weight_source = _weights_for_group(run, reward_names, saved_weight_context)
+        weight_sources["__".join(reward_names)] = weight_source
+        dataset = _dataset_from_weight_source(weight_source)
+        metrics = [
+            compute_reward_concordance_metrics(
+                group.rewards,
+                weights,
+            )
+            for group in combination_groups
+        ]
+        aggregate = aggregate_group_metrics(metrics)
+        sign_metrics = []
+        for group in combination_groups:
+            sample_weights = (
+                compute_src_sample_weights(group.rewards, weights, interpolation, temperature)
+                if run.src_reweight
+                else np.ones(group.rewards.shape[0])
+            )
+            sign_metrics.append(
+                compute_weighted_advantage_sign_metrics(group.rewards, weights, sample_weights)
+            )
+        if not run.src_reweight:
+            for item in sign_metrics:
+                item.pop("weight_ge_1_adv_positive")
+                item.pop("weight_ge_1_adv_negative")
+                item.pop("weight_lt_1_adv_positive")
+                item.pop("weight_lt_1_adv_negative")
+                item.pop("weight_ge_1_adv_zero")
+                item.pop("weight_lt_1_adv_zero")
+                item["_counts"].pop("weight_ge_1_adv_positive")
+                item["_counts"].pop("weight_ge_1_adv_negative")
+                item["_counts"].pop("weight_ge_1_adv_zero")
+                item["_counts"].pop("weight_lt_1_adv_positive")
+                item["_counts"].pop("weight_lt_1_adv_negative")
+                item["_counts"].pop("weight_lt_1_adv_zero")
+        else:
+            for item in sign_metrics:
+                item.pop("adv_positive")
+                item.pop("adv_negative")
+                item.pop("adv_zero")
+                item["_counts"].pop("adv_positive")
+                item["_counts"].pop("adv_negative")
+                item["_counts"].pop("adv_zero")
+        for metric_name in sign_metrics[0]:
+            if metric_name == "_counts":
+                continue
+            values = np.mean([item[metric_name] for item in sign_metrics], axis=0)
+            aggregate[metric_name] = values
+        aggregate["_sign_counts"] = {
+            metric_name: np.mean([item["_counts"][metric_name] for item in sign_metrics], axis=0)
+            for metric_name in sign_metrics[0]["_counts"]
+        }
+        for metric_name, counts in aggregate["_sign_counts"].items():
+            aggregate[f"sample_count_{metric_name}"] = counts
+        rows.extend(_metric_rows(run, step, reward_names, aggregate, dataset))
+    return {
+        "run_name": run.name,
+        "rows": rows,
+        "n_groups": len(groups),
+        "weight_sources": weight_sources,
+    }
 
 
 def _parse_config(path: str | Path) -> AnalysisConfig:
@@ -575,16 +622,46 @@ def _metric_rows(
                 "value": float(value),
             }
         )
-    for metric_name in ("weight_ge_1_adv_positive", "weight_ge_1_adv_negative", "weight_ge_1_adv_zero", "weight_lt_1_adv_positive", "weight_lt_1_adv_negative", "weight_lt_1_adv_zero", "adv_positive", "adv_negative", "adv_zero"):
+    for metric_name in (
+        "weight_ge_1_adv_positive",
+        "weight_ge_1_adv_negative",
+        "weight_ge_1_adv_zero",
+        "weight_lt_1_adv_positive",
+        "weight_lt_1_adv_negative",
+        "weight_lt_1_adv_zero",
+        "adv_positive",
+        "adv_negative",
+        "adv_zero",
+    ):
         if metric_name in metrics:
             for reward_name, value in zip(reward_names, metrics[metric_name]):
                 index = reward_names.index(reward_name)
                 counts = metrics.get("_sign_counts", {}).get(metric_name, ())
-                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value), "sample_count": float(counts[index]) if len(counts) else float("nan")})
-    for metric_name in ("sample_count_weight_ge_1_adv_positive", "sample_count_weight_ge_1_adv_negative", "sample_count_weight_ge_1_adv_zero", "sample_count_weight_lt_1_adv_positive", "sample_count_weight_lt_1_adv_negative", "sample_count_weight_lt_1_adv_zero", "sample_count_adv_positive", "sample_count_adv_negative", "sample_count_adv_zero"):
+                rows.append(
+                    {
+                        **common,
+                        "reward": reward_name,
+                        "metric": metric_name,
+                        "value": float(value),
+                        "sample_count": float(counts[index]) if len(counts) else float("nan"),
+                    }
+                )
+    for metric_name in (
+        "sample_count_weight_ge_1_adv_positive",
+        "sample_count_weight_ge_1_adv_negative",
+        "sample_count_weight_ge_1_adv_zero",
+        "sample_count_weight_lt_1_adv_positive",
+        "sample_count_weight_lt_1_adv_negative",
+        "sample_count_weight_lt_1_adv_zero",
+        "sample_count_adv_positive",
+        "sample_count_adv_negative",
+        "sample_count_adv_zero",
+    ):
         if metric_name in metrics:
             for reward_name, value in zip(reward_names, metrics[metric_name]):
-                rows.append({**common, "reward": reward_name, "metric": metric_name, "value": float(value)})
+                rows.append(
+                    {**common, "reward": reward_name, "metric": metric_name, "value": float(value)}
+                )
     covariance = np.asarray(metrics["standardized_reward_covariance"], dtype=np.float64)
     for first_index, first_name in enumerate(reward_names):
         for second_index in range(first_index + 1, len(reward_names)):
@@ -670,26 +747,6 @@ def _dataset_from_weight_source(weight_source: str) -> str:
         if source:
             return source.replace(",", "+")
     return "unknown_dataset"
-
-
-def _write_rows(rows: list[dict[str, Any]], path: Path) -> None:
-    fields = (
-        "run_name",
-        "run_label",
-        "dataset",
-        "step",
-        "reward_combination",
-        "n_groups",
-        "reward",
-        "reward_pair",
-        "sample_count",
-        "metric",
-        "value",
-    )
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 if __name__ == "__main__":

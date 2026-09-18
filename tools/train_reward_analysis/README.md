@@ -54,7 +54,7 @@ plot:
 output:
   dir: "analysis_output/train_reward_analysis"
   plot_format: "png"  # Matplotlib output format: png or pdf.
-  cache_mode: "regenerate"  # "regenerate" writes plot_data.json; "reuse" redraws from it.
+  cache_mode: "regenerate"  # "regenerate" writes one JSON per figure; "reuse" redraws them.
 ```
 
 Then run:
@@ -73,8 +73,8 @@ python -m tools.train_reward_analysis.analyze \
 ```
 
 `--cache-mode {regenerate,reuse}` overrides `output.cache_mode` for one
-invocation, so redrawing from an existing `plot_data.json` needs no edit to the
-config file:
+invocation, so redrawing from existing per-figure JSON files needs no edit to
+the config file:
 
 ```bash
 python -m tools.train_reward_analysis.analyze \
@@ -85,8 +85,8 @@ Omitting the flag leaves the config file's value in charge; the override applies
 on top of it, and applies to nothing else.
 
 Both stages use worker processes: the per-run/step metric computation runs on
-`os.cpu_count()` workers, and the figure stages are spread over at most one
-worker per stage (`metadata.json` records both as `analysis_workers` and
+`os.cpu_count()` workers, and the figures are spread over at most one worker per
+figure (`metadata.json` records both as `analysis_workers` and
 `plot_workers`). Figure workers are spawned rather than forked, because
 matplotlib is already imported in the parent process.
 
@@ -116,7 +116,8 @@ keeps the weakest reward score for every sample, so strong agreement on one
 reward cannot hide opposition on another.
 
 Each step reports a macro-average over prompt groups, never a recentered pool
-of samples from different prompts. The `metrics.csv` output is tidy/long-form:
+of samples from different prompts. These values become the line points in the
+per-figure JSON files:
 
 - `per_reward_conflict_score` is the prompt-group mean standardized conflict score for
   each active reward.
@@ -166,31 +167,59 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
   different scales; it exists so the progress figure has an auditable source.
 
 One naming split runs through this output on purpose: figure titles, axis labels,
-and legends say *concordant*, while the `metrics.csv` columns keep the
-`agreement_count` vocabulary they were introduced with. Display wording and the
-emitted schema are allowed to differ here, because renaming an emitted column
-would invalidate every existing `plot_data.json` and every downstream reader of
-the CSV for a change that is purely cosmetic. The figure filenames follow the
-same rule: files named after a metric column (`agreement_count`,
+and legends say *concordant*, while files named after the original metric
+(`agreement_count`,
 `agreement_count_expectation`) keep that name, while `concordance` is named for
 its content.
 
-The output directory also contains `metadata.json`, followed by one directory
-per dataset:
+The output directory contains `metadata.json`, followed by one directory per
+dataset. Every image has a same-stem JSON file beside it:
 
 ```text
 <dataset>/
-  per_reward_conflict_score/<reward>.png
-  per_reward_disagreement/<reward>.png
-  per_reward_bottleneck_rate/<reward>.png
-  standardized_reward_covariance/<reward_pair>.png
-  reward_concordance_lower_bound.<plot_format>
-  agreement_count.<plot_format>
-  agreement_count_expectation.<plot_format>
+  per_reward_conflict_score/<reward>.{json,<plot_format>}
+  per_reward_disagreement/<reward>.{json,<plot_format>}
+  per_reward_bottleneck_rate/<reward>.{json,<plot_format>}
+  standardized_reward_covariance/<reward_pair>.{json,<plot_format>}
+  reward_concordance_lower_bound.{json,<plot_format>}
+  agreement_count.{json,<plot_format>}
+  agreement_count_expectation.{json,<plot_format>}
   training_progress/
-    <run_label>.<plot_format>
-    concordance.<plot_format>
+    <run_label>.{json,<plot_format>}
+    concordance.{json,<plot_format>}
 ```
+
+Each JSON is organized around the image rather than around internal metric
+records. Its `series` list gives every drawn line a label and a compact list of
+`[training_step, raw_value]` points. Axis, smoothing, legend, and non-default
+style settings are included only because they are needed to redraw that image.
+For example:
+
+```json
+{
+  "spec_version": 1,
+  "title": "Concordant sample rate [pickscore]",
+  "x_label": "Training step",
+  "series": [
+    {
+      "label": "SRC-NFT | positive concordant rate",
+      "points": [
+        [0.0, 18.75],
+        [10.0, 20.3125]
+      ],
+      "color": "#2a78d6"
+    }
+  ],
+  "left": {
+    "label": "Percent of concordant samples"
+  },
+  "smoothing_window": 5
+}
+```
+
+The points are the unsmoothed values supplied to the renderer. The foreground
+moving average is derived from them, so a figure can be fully reconstructed
+from its JSON without loading reward pickles or rebuilding metric rows.
 
 The dataset directory is recovered from the saved run context source (for
 example, `pickscore` or `ocr`), so the fixed reward combination for each
@@ -207,9 +236,9 @@ run trajectories. The reward combination is intentionally omitted from the
 filename and title because it is fixed by the dataset directory. The diagonal
 is omitted because covariance after per-group standardization is one by
 definition.
-`training_progress/` holds two figures per dataset, both on a single 0-100% axis,
-because full concordance is a property of the whole reward set (`K`) rather than of
-one reward.
+`training_progress/` holds one two-axis figure per run plus one autoscaled
+all-run concordance figure per dataset. Full concordance is a property of the
+whole reward set (`K`) rather than of one reward.
 
 - `<run_label>` is written once per run and carries two axes. The left axis holds
   the aggregated progress curve: each reward's `per_reward_mean_reward` is mapped
@@ -250,7 +279,7 @@ normalized reward range and nothing in particular for a clipped sample share.
 For the same reason `concordance` autoscales instead of holding 0-100%: its
 magnified differences are the point. Read its tick labels for level, since a move
 that looks large against a narrowed axis may be small in absolute terms. Every
-plotted value is also in `metrics.csv`.
+plotted value is also visible in the adjacent JSON file.
 
 Every plotted curve is smoothed independently with the centered moving-average
 window in `plot.smoothing_window`. At the first and last few recorded steps,
@@ -258,9 +287,14 @@ the average uses the available in-range points. The original unsmoothed curve
 is retained as a same-color transparent background trace; use `1` when the
 foreground should equal the raw values.
 
-The final tidy rows used by all figures are stored in `plot_data.json`. Set
-`output.cache_mode: reuse` to skip reward-pickle analysis and redraw every figure
-directly from that cache. If the cache is absent, use `regenerate` first. A cache
-whose `metric_version` differs from the current one is rejected, because its rows
-are missing metrics that the figures need and it would otherwise draw silently
-incomplete figures.
+Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
+figure directly from the per-figure JSON files indexed by `metadata.json`. If
+the index or any listed JSON is absent, use `regenerate` first. A JSON whose
+`spec_version` differs from the current renderer is rejected rather than being
+drawn with changed semantics.
+
+The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
+they repeated dataset, run, reward, and metric identifiers on every point and
+largely duplicated each other. After a successful `regenerate` writes the new
+figure JSON files, those two exact legacy files are removed from the output
+directory. Other images, metadata, and unrelated files are left untouched.

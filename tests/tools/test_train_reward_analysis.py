@@ -38,22 +38,23 @@ from tools.train_reward_analysis.analyze import (
     _render_figures,
     run_analysis,
 )
+from tools.train_reward_analysis.figure_spec import read_spec
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
 )
 from tools.train_reward_analysis.plots import (
+    _CATEGORICAL_COLORS,
+    _moving_average,
     _percent_of_own_range,
-    _percent_of_sample_share,
-    _smoothed_series,
-    plot_agreement_count_distribution_trajectories,
-    plot_agreement_count_expectation_trajectories,
-    plot_per_reward_conflict_score_trajectories,
-    plot_per_reward_disagreement_trajectories,
-    plot_concordance_rate_trajectories,
-    plot_reward_concordance_lower_bound_trajectories,
-    plot_run_training_progress_trajectories,
-    plot_standardized_reward_covariance_trajectories,
+    _percent_points,
+    build_agreement_count_distribution_figures,
+    build_agreement_count_expectation_figures,
+    build_concordance_rate_figures,
+    build_figures,
+    build_run_training_progress_figures,
+    render_figure,
+    write_figure_data,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
@@ -280,12 +281,12 @@ def test_percent_of_own_range_stretches_each_series_between_its_own_extremes() -
     np.testing.assert_allclose(_percent_of_own_range(np.asarray([0.7, 0.7, 0.7])), [0.0, 0.0, 0.0])
 
 
-def test_percent_of_sample_share_never_rescales_an_agreement_rate() -> None:
+def test_percent_points_never_rescale_an_agreement_rate() -> None:
     """Agreement curves are already shares of samples and are plotted as they are."""
-    np.testing.assert_allclose(
-        _percent_of_sample_share(np.asarray([0.0, 0.125, 1.0])),
-        [0.0, 12.5, 100.0],
-    )
+    rows = [{"step": step, "value": value} for step, value in enumerate([0.0, 0.125, 1.0])]
+
+    assert _percent_points(rows) == [[0.0, 0.0], [1.0, 12.5], [2.0, 100.0]]
+    assert _percent_points([]) == []
 
 
 def test_aggregate_group_metrics_rejects_mismatched_agreement_distribution() -> None:
@@ -472,7 +473,7 @@ def test_cache_mode_flag_is_honoured_from_the_command_line(
         ["analyze", "-c", str(config_path), "--cache-mode", "reuse"],
     )
 
-    with pytest.raises(FileNotFoundError, match="Plot-data cache not found"):
+    with pytest.raises(FileNotFoundError, match="No metadata.json"):
         analyze.main()
 
 
@@ -509,116 +510,136 @@ def test_plot_format_accepts_pdf_and_rejects_unknown_value(tmp_path: Path) -> No
 
 
 def test_centered_smoothing_uses_available_edge_points() -> None:
-    rows = [{"step": step, "value": value} for step, value in enumerate((0.0, 3.0, 6.0, 9.0, 12.0))]
+    values = np.asarray([1.0, 2.0, 3.0, 4.0])
 
-    steps, values = _smoothed_series(rows, smoothing_window=3)
+    np.testing.assert_allclose(_moving_average(values, 3), [1.5, 2.0, 3.0, 3.5])
+    np.testing.assert_allclose(_moving_average(values, 1), values)
+    with pytest.raises(ValueError, match="positive odd integer"):
+        _moving_average(values, 4)
 
-    np.testing.assert_array_equal(steps, np.arange(5))
-    np.testing.assert_allclose(values, [1.5, 3.0, 6.0, 9.0, 10.5])
+
+def test_every_figure_carries_the_configured_smoothing_window() -> None:
+    """A spec must never fall back to its own default and ignore the config."""
+    outputs = build_figures(_training_progress_rows(), smoothing_window=3)
+
+    assert outputs
+    assert {spec.smoothing_window for _, spec in outputs} == {3}
 
 
-def test_lower_bound_and_per_reward_conflict_score_plots_are_written(tmp_path: Path) -> None:
-    rows = [
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": reward,
-            "metric": "per_reward_conflict_score",
-            "value": value,
-        }
-        for reward, values in {"clip_score": (0.2, 0.3), "pick_score": (-0.4, -0.5)}.items()
-        for step, value in enumerate(values)
-    ]
-    rows.extend(
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": "",
-            "metric": "reward_concordance_lower_bound",
-            "value": value,
-        }
-        for step, value in enumerate((-0.3, -0.4))
+def test_figure_data_round_trips_through_its_own_file(tmp_path: Path) -> None:
+    stem, spec = build_figures(_training_progress_rows())[0]
+
+    write_figure_data([(stem, spec)], tmp_path)
+
+    assert read_spec(tmp_path / f"{stem}.json") == spec
+    assert (tmp_path / f"{stem}.json").is_file()
+
+
+def test_figure_data_leads_with_each_line_and_its_points(tmp_path: Path) -> None:
+    """The on-disk structure should read like the figure, not analysis rows."""
+    stem, spec = build_figures(_training_progress_rows())[0]
+
+    write_figure_data([(stem, spec)], tmp_path)
+    raw = json.loads((tmp_path / f"{stem}.json").read_text(encoding="utf-8"))
+
+    assert list(raw)[:3] == ["spec_version", "title", "x_label"]
+    assert raw["series"]
+    assert list(raw["series"][0])[:3] == ["label", "points", "color"]
+    assert all(len(point) == 2 for series in raw["series"] for point in series["points"])
+    assert "rows" not in raw
+    assert "metric" not in raw["series"][0]
+
+
+def test_regeneration_cleanup_removes_only_superseded_aggregate_data(tmp_path: Path) -> None:
+    for name in analyze.LEGACY_DATA_FILES:
+        (tmp_path / name).write_text("legacy", encoding="utf-8")
+    unrelated = tmp_path / "keep.json"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    removed = analyze._remove_legacy_data_files(tmp_path)
+
+    assert removed == list(analyze.LEGACY_DATA_FILES)
+    assert all(not (tmp_path / name).exists() for name in analyze.LEGACY_DATA_FILES)
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+
+
+def test_every_image_is_recoverable_from_its_data_alone(tmp_path: Path) -> None:
+    """Redrawing from the specs alone must reproduce the images byte for byte.
+
+    This is what the data files are for: an image and the description of it
+    travel together, so nothing upstream of them has to be re-derived.
+    """
+    outputs = build_figures(_training_progress_rows())
+    write_figure_data(outputs, tmp_path)
+    for stem, spec in outputs:
+        render_figure(spec, tmp_path, stem, "png")
+    before = {stem: (tmp_path / f"{stem}.png").read_bytes() for stem, _ in outputs}
+
+    for path in tmp_path.rglob("*.png"):
+        path.unlink()
+    for stem, _ in outputs:
+        render_figure(read_spec(tmp_path / f"{stem}.json"), tmp_path, stem, "png")
+
+    assert {stem: (tmp_path / f"{stem}.png").read_bytes() for stem, _ in outputs} == before
+
+
+def test_stale_figure_data_is_rejected_rather_than_redrawn(tmp_path: Path) -> None:
+    """A spec from another version would redraw a figure that no longer matches."""
+    stem, spec = build_figures(_training_progress_rows())[0]
+    write_figure_data([(stem, spec)], tmp_path)
+    path = tmp_path / f"{stem}.json"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"spec_version": 1', '"spec_version": 0'),
+        encoding="utf-8",
     )
-    rows.extend(
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": reward,
-            "metric": "per_reward_disagreement",
-            "value": value,
-        }
-        for reward, values in {"clip_score": (0.2, 0.3), "pick_score": (0.7, 0.6)}.items()
-        for step, value in enumerate(values)
-    )
 
-    plot_per_reward_conflict_score_trajectories(rows, tmp_path)
-    plot_per_reward_disagreement_trajectories(rows, tmp_path)
-    rows.extend(
-        {
-            "run_label": "SRC-NFT",
-            "dataset": "pickscore",
-            "step": step,
-            "reward_combination": "clip_score__pick_score",
-            "reward": "",
-            "reward_pair": "clip_score__pick_score",
-            "metric": "standardized_reward_covariance",
-            "value": value,
-        }
-        for step, value in enumerate((0.2, 0.3))
-    )
-    plot_standardized_reward_covariance_trajectories(rows, tmp_path)
-    plot_reward_concordance_lower_bound_trajectories(rows, tmp_path)
-
-    output_dir = tmp_path / "pickscore"
-    assert (output_dir / "per_reward_conflict_score" / "clip_score.png").stat().st_size > 0
-    assert (output_dir / "per_reward_conflict_score" / "pick_score.png").stat().st_size > 0
-    assert (output_dir / "per_reward_disagreement" / "clip_score.png").stat().st_size > 0
-    assert (output_dir / "per_reward_disagreement" / "pick_score.png").stat().st_size > 0
-    covariance_dir = tmp_path / "pickscore" / "standardized_reward_covariance"
-    assert (covariance_dir / "clip_score__pick_score.png").stat().st_size > 0
-    assert (output_dir / "reward_concordance_lower_bound.png").stat().st_size > 0
+    with pytest.raises(ValueError, match="spec_version"):
+        read_spec(path)
 
 
-def _write_stage_marker(rows, output_dir, smoothing_window, plot_format) -> None:
-    """Picklable figure-stage stand-in for the rendering-plumbing test."""
-    Path(output_dir, f"stage_{smoothing_window}_{plot_format}.txt").write_text(
-        str(len(rows)), encoding="utf-8"
-    )
-
-
-def test_render_figures_forwards_arguments_to_worker_stages(
+def test_render_figures_writes_one_image_per_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stages receive rows, output directory, smoothing and format in workers."""
-    rows = [{"value": 1.0}, {"value": 2.0}]
-    config = AnalysisConfig(smoothing_window=3, plot_format="pdf")
-    monkeypatch.setattr(analyze, "_plot_worker_count", lambda functions: 2)
+    monkeypatch.setattr(analyze.os, "cpu_count", lambda: 1)
+    config = AnalysisConfig(output_dir=str(tmp_path))
+    outputs = build_figures(_training_progress_rows())
 
-    _render_figures(config, rows, tmp_path, (_write_stage_marker,))
+    analyze._render_figures(config, outputs, tmp_path)
 
-    assert (tmp_path / "stage_3_pdf.txt").read_text(encoding="utf-8") == "2"
+    for stem, _ in outputs:
+        assert (tmp_path / f"{stem}.png").stat().st_size > 0
 
 
-def test_render_figures_renders_in_process_when_only_one_worker_is_available(
+def test_render_figures_spreads_specs_over_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rows = [{"value": 1.0}]
-    config = AnalysisConfig(smoothing_window=5, plot_format="png")
-    monkeypatch.setattr(analyze, "_plot_worker_count", lambda functions: 1)
+    monkeypatch.setattr(analyze.os, "cpu_count", lambda: 2)
+    config = AnalysisConfig(output_dir=str(tmp_path))
+    outputs = build_figures(_training_progress_rows())
 
-    _render_figures(config, rows, tmp_path, (_write_stage_marker,))
+    analyze._render_figures(config, outputs, tmp_path)
 
-    assert (tmp_path / "stage_5_png.txt").read_text(encoding="utf-8") == "1"
+    for stem, _ in outputs:
+        assert (tmp_path / f"{stem}.png").stat().st_size > 0
+
+
+def test_figure_index_refuses_to_guess_what_to_redraw(tmp_path: Path) -> None:
+    """Reuse reads the recorded index, so a deleted spec is reported."""
+    with pytest.raises(ValueError, match="lists no figures"):
+        analyze._figure_stems({}, tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="Figure data missing"):
+        analyze._figure_stems({"figures": ["ocr/missing"]}, tmp_path)
+
+
+def test_figure_data_rejects_duplicate_output_names(tmp_path: Path) -> None:
+    stem, spec = build_figures(_training_progress_rows())[0]
+
+    with pytest.raises(ValueError, match="duplicate output stems"):
+        write_figure_data([(stem, spec), (stem, spec)], tmp_path)
 
 
 def _agreement_count_rows(steps: int = 24) -> list[dict]:
-    """Rows long enough that sparse markers apply, with a structurally empty c = 0 bin."""
     rows = [
         {
             "run_label": label,
@@ -651,61 +672,52 @@ def _agreement_count_rows(steps: int = 24) -> list[dict]:
     return rows
 
 
-def test_agreement_count_distribution_plot_draws_each_bin_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Each run/bin pair is drawn exactly once, and the legend keeps the runs apart.
+def test_agreement_count_figure_maps_every_bin_and_keeps_handles_marker_free() -> None:
+    """Bins that no run populates are dropped, and legend handles stay bare.
 
     Series sharing one agreeing count also share a color, so the dash pattern is
-    the only cue separating the runs: the plotted series must keep sparse markers,
-    and the legend handles must carry no marker at all, since the centre marker
-    would cover the single dash gap that fits inside a short handle.
+    the only cue separating the runs: the drawn series keep sparse markers, and
+    the handles carry none, since a handle's centre marker would cover the single
+    dash gap that fits inside a short handle.
     """
-    drawn: list[tuple[str, int]] = []
-    handles: list[Line2D] = []
-    original_plot = matplotlib.axes.Axes.plot
-    original_legend = matplotlib.axes.Axes.legend
+    ((stem, spec),) = build_agreement_count_distribution_figures(_agreement_count_rows())
 
-    def counting_plot(self, *args, **kwargs):
-        drawn.append((str(kwargs.get("linestyle")), int(kwargs.get("markevery"))))
-        return original_plot(self, *args, **kwargs)
-
-    def capturing_legend(self, *args, **kwargs):
-        handles.extend(kwargs.get("handles") or [])
-        return original_legend(self, *args, **kwargs)
-
-    monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
-    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capturing_legend)
-
-    plot_agreement_count_distribution_trajectories(_agreement_count_rows(), tmp_path)
-
-    assert len(drawn) == 4, "each run/bin pair is drawn exactly once"
-    assert all(markevery > 1 for _, markevery in drawn)
-
-    labels = [handle.get_label() for handle in handles]
-    assert sorted(labels) == sorted(
+    assert stem == "pickscore/agreement_count"
+    drawn = {series.label: series for series in spec.series}
+    assert set(drawn) == {
         f"{label} | c={agreeing_count}"
         for label in ("SRC-NFT", "NFT (uniform)")
         for agreeing_count in (1, 2)
-    )
+    }
+    assert all(series.markevery > 1 for series in spec.series)
+    assert all(series.faint_raw_trace is False for series in spec.series)
+
+    handles = {entry.label: entry for entry in spec.legend.entries}
+    assert set(handles) == set(drawn)
+    assert all(entry.marker == "" for entry in spec.legend.entries)
+    assert spec.legend.handlelength == 2.8
     for agreeing_count in (1, 2):
         styles = {
-            str(handle.get_linestyle())
-            for handle in handles
-            if handle.get_label().endswith(f"| c={agreeing_count}")
+            entry.linestyle
+            for entry in spec.legend.entries
+            if entry.label.endswith(f"| c={agreeing_count}")
         }
         assert len(styles) == 2, f"runs share one dash pattern for c={agreeing_count}: {styles}"
-    assert all(handle.get_marker() in ("", "None", None) for handle in handles)
 
 
-def test_agreement_count_plots_are_written_per_dataset(tmp_path: Path) -> None:
+def test_agreement_count_figures_reject_a_dataset_with_two_reward_sets() -> None:
+    """A dataset fixes its reward set; mixing two would mix agreeing-count scales."""
     rows = _agreement_count_rows()
+    rows.extend(
+        {**row, "reward_combination": "clip_score__ocr_reward__pick_score"} for row in list(rows)
+    )
 
-    plot_agreement_count_distribution_trajectories(rows, tmp_path)
-    plot_agreement_count_expectation_trajectories(rows, tmp_path)
-
-    assert (tmp_path / "pickscore" / "agreement_count.png").stat().st_size > 0
-    assert (tmp_path / "pickscore" / "agreement_count_expectation.png").stat().st_size > 0
+    for builder in (
+        build_agreement_count_distribution_figures,
+        build_agreement_count_expectation_figures,
+    ):
+        with pytest.raises(ValueError, match="more than one reward combination"):
+            builder(rows)
 
 
 def _training_progress_rows(dataset: str = "pickscore") -> list[dict]:
@@ -744,43 +756,28 @@ def _training_progress_rows(dataset: str = "pickscore") -> list[dict]:
     return rows
 
 
-def test_training_progress_figures_are_written_into_their_own_folder(tmp_path: Path) -> None:
-    """One reward-progress figure per run, plus one all-run agreement figure."""
-    rows = _training_progress_rows()
+def test_training_progress_is_one_figure_per_run_beside_one_all_run_figure() -> None:
+    progress = build_run_training_progress_figures(_training_progress_rows())
+    concordance = build_concordance_rate_figures(_training_progress_rows())
 
-    plot_run_training_progress_trajectories(rows, tmp_path)
-    plot_concordance_rate_trajectories(rows, tmp_path)
-
-    folder = tmp_path / "pickscore" / "training_progress"
-    assert (folder / "SRC-NFT.png").stat().st_size > 0
-    assert (folder / "NFT__uniform_.png").stat().st_size > 0
-    assert (folder / "concordance.png").stat().st_size > 0
+    assert sorted(stem for stem, _ in progress) == [
+        "pickscore/training_progress/NFT__uniform_",
+        "pickscore/training_progress/SRC-NFT",
+    ]
+    assert [stem for stem, _ in concordance] == ["pickscore/training_progress/concordance"]
 
 
-def test_run_progress_figure_aggregates_every_reward_into_one_curve(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_progress_figure_aggregates_every_reward_into_one_curve() -> None:
     """Rewards collapse to a single curve, so the figure cannot grow with them.
 
-    Each reward is normalized to its own range before averaging, so the
-    aggregate is the mean of per-reward percentages rather than of raw levels.
+    Each reward is normalized to its own range before averaging, so the aggregate
+    is the mean of per-reward percentages rather than of raw levels.
     """
-    drawn: list[tuple[float, ...]] = []
-    original_plot = matplotlib.axes.Axes.plot
-
-    def counting_plot(self, *args, **kwargs):
-        drawn.append(tuple(np.asarray(args[1], dtype=float)))
-        return original_plot(self, *args, **kwargs)
-
-    monkeypatch.setattr(matplotlib.axes.Axes, "plot", counting_plot)
-
     rows = [
         row
         for row in _training_progress_rows()
         if row["run_label"] == "SRC-NFT" and row["metric"] != "per_reward_mean_reward"
     ]
-    # Two rewards on wildly different scales, so averaging raw levels and
-    # averaging per-reward percentages would disagree.
     rows.extend(
         {
             "run_label": "SRC-NFT",
@@ -792,160 +789,73 @@ def test_run_progress_figure_aggregates_every_reward_into_one_curve(
             "metric": "per_reward_mean_reward",
             "value": low + (high - low) * step / 9.0,
         }
+        # Two rewards on scales 100x apart: averaging raw levels and averaging
+        # per-reward percentages cannot both produce the same curve.
         for reward, low, high in (("clip_score", 0.0, 1.0), ("pick_score", 100.0, 200.0))
         for step in range(10)
     )
 
-    # Smoothing is off here so the drawn series is the aggregate itself.
-    plot_run_training_progress_trajectories(rows, tmp_path, smoothing_window=1)
+    spec = dict(build_run_training_progress_figures(rows))["pickscore/training_progress/SRC-NFT"]
 
-    # Three series: the aggregate, positive, and negative, each drawn twice as a
-    # faint raw trace and then a foreground.
-    assert len(drawn) == 6, f"expected 3 series drawn as raw + smoothed, got {len(drawn)}"
-    aggregate, foreground = drawn[0], drawn[1]
-    # Both rewards span their own range equally, so every step averages to
-    # 100 * step / 9 — which averaging raw levels could not produce, since
-    # clip_score and pick_score live on scales 100x apart.
-    np.testing.assert_allclose(aggregate, 100.0 * np.arange(10) / 9.0)
-    np.testing.assert_allclose(foreground, aggregate)
+    progress = spec.series[0]
+    assert progress.label == "mean reward progress (left)"
+    np.testing.assert_allclose([value for _, value in progress.points], 100.0 * np.arange(10) / 9.0)
 
 
-def test_concordance_figure_gives_runs_the_colour_and_direction_the_dash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_progress_figure_puts_rates_on_a_second_axis() -> None:
+    """Progress keeps the anchored 0-100%; the rates float to their own band."""
+    spec = dict(build_run_training_progress_figures(_training_progress_rows()))[
+        "pickscore/training_progress/SRC-NFT"
+    ]
+
+    assert spec.left.limits == [0.0, 100.0]
+    assert spec.left.grid is True
+    assert spec.right is not None
+    assert spec.right.limits is None, "the rate axis follows its own data"
+    assert spec.right.grid is False, "only the anchored axis offers gridlines"
+    assert {series.axis for series in spec.series} == {"left", "right"}
+    # Every curve is named with the side it belongs to, so none is read against
+    # the wrong scale.
+    assert all(
+        series.label.endswith("(left)") or series.label.endswith("(right)")
+        for series in spec.series
+    )
+
+
+def test_concordance_figure_gives_runs_the_colour_and_direction_the_dash() -> None:
     """Runs own colour and marker; positive/negative own solid/dashed.
 
     Direction has only two values while runs do not, so the strongest channel
     goes to the runs and the dash pattern — the one that survives greyscale —
     carries direction.
     """
-    drawn: list[tuple[str, str, str]] = []
-    handles: list[Line2D] = []
-    original_plot = matplotlib.axes.Axes.plot
-    original_legend = matplotlib.axes.Axes.legend
+    ((stem, spec),) = build_concordance_rate_figures(_training_progress_rows())
 
-    def recording_plot(self, *args, **kwargs):
-        drawn.append(
-            (
-                str(kwargs.get("color")),
-                str(kwargs.get("linestyle")),
-                str(kwargs.get("marker")),
-            )
-        )
-        return original_plot(self, *args, **kwargs)
+    assert stem == "pickscore/training_progress/concordance"
+    assert spec.left.limits is None, "the all-run figure autoscales to its own band"
 
-    def capturing_legend(self, *args, **kwargs):
-        handles.extend(kwargs.get("handles") or [])
-        return original_legend(self, *args, **kwargs)
+    run_styles: dict[str, set[tuple[str, str]]] = {}
+    for series in spec.series:
+        run, _, direction = series.label.partition(" | ")
+        assert direction, f"every legend label names its run and direction: {series.label}"
+        assert series.linestyle == ("-" if direction.startswith("positive") else "--")
+        run_styles.setdefault(run, set()).add((series.color, series.marker))
+    assert set(run_styles) == {"SRC-NFT", "NFT (uniform)"}
+    for styles in run_styles.values():
+        assert len(styles) == 1, "a run keeps one colour and marker across both directions"
+    assert (
+        len({next(iter(styles)) for styles in run_styles.values()}) == 2
+    ), "the two runs must differ in colour and marker"
 
-    monkeypatch.setattr(matplotlib.axes.Axes, "plot", recording_plot)
-    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capturing_legend)
 
-    plot_concordance_rate_trajectories(_training_progress_rows(), tmp_path)
-
-    # Drawn run -> direction -> (raw, smoothed), so the odd entries are the
-    # four foregrounded series in that order.
-    assert len(drawn) == 8, f"expected 4 series drawn twice, got {len(drawn)}"
-    positive_run_a, negative_run_a, positive_run_b, negative_run_b = drawn[1::2]
-
-    assert [series[1] for series in drawn[1::2]] == ["-", "--", "-", "--"]
-    # Direction never moves the colour or the marker off its run.
-    for positive, negative in ((positive_run_a, negative_run_a), (positive_run_b, negative_run_b)):
-        assert positive[0] == negative[0], "one colour per run"
-        assert positive[2] == negative[2], "one marker per run"
-    # And the two runs share neither.
-    assert positive_run_a[0] != positive_run_b[0], "runs must not share a colour"
-    assert positive_run_a[2] != positive_run_b[2], "runs must not share a marker"
-
-    labels = [handle.get_label() for handle in handles]
-    assert sorted(labels) == sorted(
-        f"{label} | {legend_name}"
-        for label in ("SRC-NFT", "NFT (uniform)")
-        for _, legend_name in (
-            ("", "positive concordant rate"),
-            ("", "negative concordant rate"),
-        )
+def test_concordance_figure_rejects_more_runs_than_the_palette_holds() -> None:
+    """Cycling colours would give two runs the same hue, which defeats the point."""
+    rows = _training_progress_rows()
+    rows.extend(
+        {**row, "run_label": f"run_{index}"}
+        for index in range(len(_CATEGORICAL_COLORS))
+        for row in _training_progress_rows()
     )
-    assert {str(handle.get_linestyle()) for handle in handles} == {"-", "--"}
 
-
-def _record_axis_limits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[list[tuple[float, float]], list[object]]:
-    """Record every y-limit written and every twin axis created.
-
-    Matplotlib's autoscale writes limits through this same call, so the
-    recordings hold both explicit pins and autoscaled ranges.
-    """
-    written: list[tuple[float, float]] = []
-    twins: list[object] = []
-    original_set_ylim = matplotlib.axes.Axes.set_ylim
-    original_twinx = matplotlib.axes.Axes.twinx
-
-    def recording_set_ylim(self, *args, **kwargs):
-        # Autoscale passes one sequence; explicit pins pass two bounds.
-        bounds = (
-            args[0] if len(args) == 1 and isinstance(args[0], (list, tuple, np.ndarray)) else args
-        )
-        written.append(tuple(float(bound) for bound in bounds))
-        return original_set_ylim(self, *args, **kwargs)
-
-    def recording_twinx(self, *args, **kwargs):
-        twin = original_twinx(self, *args, **kwargs)
-        twins.append(twin)
-        return twin
-
-    monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", recording_set_ylim)
-    monkeypatch.setattr(matplotlib.axes.Axes, "twinx", recording_twinx)
-    return written, twins
-
-
-def test_run_progress_figure_puts_rates_on_a_second_axis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Rates get their own floating axis beside the fixed progress axis.
-
-    Progress is anchored at both ends by its own min-max normalization, so it
-    keeps 0-100%. Rates sit in a narrow band whose bounds are arbitrary, so
-    pinning them to the same range would flatten the differences the figure
-    exists to show.
-    """
-    written, twins = _record_axis_limits(monkeypatch)
-
-    plot_run_training_progress_trajectories(_training_progress_rows(), tmp_path)
-
-    # One twin rate axis per run, and only the progress axes are pinned.
-    assert len(twins) == 2, f"expected one rate axis per run, got {len(twins)}"
-    pinned = [limit for limit in written if limit == (0.0, 100.0)]
-    assert len(pinned) == 2, f"only the two progress axes are pinned, got {written}"
-    for twin in twins:
-        assert twin.get_ylim() != (0.0, 100.0), "the rate axis must follow its own data"
-
-
-def test_concordance_figure_autoscales_to_its_own_band(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The all-run figure drops the fixed 0-100% range to magnify the rates."""
-    written, twins = _record_axis_limits(monkeypatch)
-
-    plot_concordance_rate_trajectories(_training_progress_rows(), tmp_path)
-
-    assert not twins, "the all-run figure has only rates, so it needs no second axis"
-    assert (0.0, 100.0) not in written, f"the rate axis must not be pinned, got {written}"
-    low, high = (float(bound) for bound in written[-1])
-    assert 0.0 < low and high < 100.0, f"axis should track the rate band, got {written[-1]}"
-
-
-def test_agreement_count_plots_reject_a_dataset_with_two_reward_sets(tmp_path: Path) -> None:
-    """A dataset fixes its reward set; mixing two would mix agreeing-count scales."""
-    rows = _agreement_count_rows()
-    second_reward_set = [
-        {**row, "reward_combination": "clip_score__ocr_reward__pick_score"} for row in rows
-    ]
-    rows.extend(second_reward_set)
-
-    with pytest.raises(ValueError, match="more than one reward combination"):
-        plot_agreement_count_distribution_trajectories(rows, tmp_path)
-
-    with pytest.raises(ValueError, match="more than one reward combination"):
-        plot_agreement_count_expectation_trajectories(rows, tmp_path)
+    with pytest.raises(ValueError, match="validated palette"):
+        build_concordance_rate_figures(rows)
