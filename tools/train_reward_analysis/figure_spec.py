@@ -33,10 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Bumped whenever the spec's shape or meaning changes, so a spec written by an
-# older version is rejected instead of rendered into a figure that no longer
-# matches it.
-SPEC_VERSION = 1
+# Bumped whenever the spec's shape or meaning changes. Readers list compatible
+# historical versions explicitly so incompatible data is never rendered with
+# changed semantics.
+SPEC_VERSION = 2
+SUPPORTED_SPEC_VERSIONS = (1, SPEC_VERSION)
 
 
 @dataclass(frozen=True)
@@ -67,11 +68,13 @@ class FigureSeries:
 
 @dataclass(frozen=True)
 class FigureAxis:
-    """One y-axis: its label, and its limits when they are fixed."""
+    """One y-axis, optionally split into ascending non-overlapping segments."""
 
     label: str
     limits: list[float] | None = None
     grid: bool = True
+    segments: list[list[float]] | None = None
+    segment_height_ratios: list[float] | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,8 @@ class FigureSpec:
     legend: FigureLegend | None = None
     smoothing_window: int = 5
     figsize: list[float] = field(default_factory=lambda: [8.0, 4.5])
+    break_gap: float = 0.05
+    break_mark_size: float = 0.012
 
 
 def to_json(spec: FigureSpec) -> str:
@@ -133,6 +138,7 @@ def to_json(spec: FigureSpec) -> str:
     kept inline and a list of points gets one row per point, so the file reads
     like the line it describes.
     """
+    validate_spec(spec)
     return _dumps({"spec_version": SPEC_VERSION, **_as_mapping(spec)}, 0) + "\n"
 
 
@@ -150,12 +156,114 @@ def read_spec(path: str | Path) -> FigureSpec:
     if not isinstance(raw, dict):
         raise ValueError(f"Figure spec must be a JSON object: {path}")
     version = raw.get("spec_version")
-    if version != SPEC_VERSION:
+    if version not in SUPPORTED_SPEC_VERSIONS:
         raise ValueError(
-            f"Figure data {path} was written by spec_version {version!r}, but this tool writes "
-            f"{SPEC_VERSION}. Re-run with output.cache_mode: regenerate."
+            f"Figure data {path} was written by unsupported spec_version {version!r}; supported "
+            f"versions are {list(SUPPORTED_SPEC_VERSIONS)}. Re-run with "
+            "output.cache_mode: regenerate."
         )
-    return _spec_from_mapping(raw, str(path))
+    spec = _spec_from_mapping(raw, str(path))
+    validate_spec(spec, str(path))
+    return spec
+
+
+def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
+    """Reject layouts that cannot be represented without ambiguous axes."""
+    if spec.smoothing_window < 1 or spec.smoothing_window % 2 == 0:
+        raise ValueError(f"{context}: smoothing_window must be a positive odd integer.")
+    if len(spec.figsize) != 2 or any(
+        not math.isfinite(value) or value <= 0.0 for value in spec.figsize
+    ):
+        raise ValueError(f"{context}: figsize must contain two finite positive values.")
+    if not math.isfinite(spec.break_gap) or not 0.0 <= spec.break_gap < 0.5:
+        raise ValueError(f"{context}: break_gap must be finite and in [0, 0.5).")
+    if (
+        not math.isfinite(spec.break_mark_size)
+        or spec.break_mark_size <= 0.0
+        or spec.break_mark_size >= 0.1
+    ):
+        raise ValueError(
+            f"{context}: break_mark_size must be finite, positive, and smaller than 0.1."
+        )
+
+    _validate_axis(spec.left, "left", context)
+    if spec.right is not None:
+        _validate_axis(spec.right, "right", context)
+
+    for series in spec.series:
+        if series.axis not in {"left", "right"}:
+            raise ValueError(
+                f"{context}: series {series.label!r} uses unknown axis {series.axis!r}."
+            )
+        if series.axis == "right" and spec.right is None:
+            raise ValueError(
+                f"{context}: series {series.label!r} uses the right axis, but no right axis exists."
+            )
+
+    left_count = len(spec.left.segments or [])
+    right_count = len(spec.right.segments or []) if spec.right is not None else 0
+    if spec.right is not None and (left_count or right_count):
+        if left_count != right_count:
+            raise ValueError(
+                f"{context}: a dual-y broken figure requires left and right axes to define the "
+                f"same number of segments, got left({left_count}) and right({right_count})."
+            )
+        left_ratios = spec.left.segment_height_ratios or [1.0] * left_count
+        right_ratios = spec.right.segment_height_ratios or [1.0] * right_count
+        if left_ratios != right_ratios:
+            raise ValueError(
+                f"{context}: dual-y broken axes must use identical segment_height_ratios, got "
+                f"left({left_ratios}) and right({right_ratios})."
+            )
+
+
+def _validate_axis(axis: FigureAxis, name: str, context: str) -> None:
+    """Validate one continuous or segmented y-axis."""
+    if axis.limits is not None:
+        if len(axis.limits) != 2:
+            raise ValueError(f"{context}: {name}.limits must contain [lower, upper].")
+        lower, upper = axis.limits
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise ValueError(
+                f"{context}: {name}.limits must be finite and strictly increasing, got "
+                f"{axis.limits}."
+            )
+    if axis.segments is None:
+        if axis.segment_height_ratios is not None:
+            raise ValueError(f"{context}: {name}.segment_height_ratios requires {name}.segments.")
+        return
+    if axis.limits is not None:
+        raise ValueError(f"{context}: {name} cannot define both limits and segments.")
+    if len(axis.segments) < 2:
+        raise ValueError(f"{context}: {name}.segments must contain at least two ranges.")
+
+    previous_upper: float | None = None
+    for index, segment in enumerate(axis.segments):
+        if len(segment) != 2:
+            raise ValueError(f"{context}: {name}.segments[{index}] must contain [lower, upper].")
+        lower, upper = segment
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise ValueError(
+                f"{context}: {name}.segments[{index}] must be finite and strictly increasing, "
+                f"got {segment}."
+            )
+        if previous_upper is not None and lower <= previous_upper:
+            raise ValueError(
+                f"{context}: {name}.segments must be ascending and separated; segment {index} "
+                f"starts at {lower} after the previous segment ended at {previous_upper}."
+            )
+        previous_upper = upper
+
+    if axis.segment_height_ratios is None:
+        return
+    if len(axis.segment_height_ratios) != len(axis.segments):
+        raise ValueError(
+            f"{context}: {name}.segment_height_ratios must have one value per segment."
+        )
+    if any(not math.isfinite(ratio) or ratio <= 0.0 for ratio in axis.segment_height_ratios):
+        raise ValueError(
+            f"{context}: {name}.segment_height_ratios must be finite and strictly positive."
+        )
 
 
 def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
@@ -175,6 +283,10 @@ def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
         result["legend"] = _legend_to_mapping(spec.legend)
     if spec.figsize != [8.0, 4.5]:
         result["figsize"] = list(spec.figsize)
+    if spec.break_gap != 0.05:
+        result["break_gap"] = spec.break_gap
+    if spec.break_mark_size != 0.012:
+        result["break_mark_size"] = spec.break_mark_size
     return result
 
 
@@ -184,6 +296,10 @@ def _axis_to_mapping(axis: FigureAxis) -> dict[str, Any]:
         result["limits"] = axis.limits
     if not axis.grid:
         result["grid"] = False
+    if axis.segments is not None:
+        result["segments"] = axis.segments
+    if axis.segment_height_ratios is not None:
+        result["segment_height_ratios"] = axis.segment_height_ratios
     return result
 
 
@@ -261,15 +377,25 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
         legend=None if legend is None else _legend_from_mapping(legend, path),
         smoothing_window=int(raw["smoothing_window"]),
         figsize=[float(value) for value in raw.get("figsize", [8.0, 4.5])],
+        break_gap=float(raw.get("break_gap", 0.05)),
+        break_mark_size=float(raw.get("break_mark_size", 0.012)),
     )
 
 
 def _axis_from_mapping(raw: dict[str, Any], path: str) -> FigureAxis:
     limits = raw.get("limits")
+    segments = raw.get("segments")
+    ratios = raw.get("segment_height_ratios")
     return FigureAxis(
         label=str(raw["label"]),
         limits=None if limits is None else [float(value) for value in limits],
         grid=bool(raw.get("grid", True)),
+        segments=(
+            None
+            if segments is None
+            else [[float(lower), float(upper)] for lower, upper in segments]
+        ),
+        segment_height_ratios=(None if ratios is None else [float(value) for value in ratios]),
     )
 
 

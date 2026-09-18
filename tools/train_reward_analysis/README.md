@@ -197,7 +197,7 @@ For example:
 
 ```json
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -220,6 +220,51 @@ For example:
 The points are the unsmoothed values supplied to the renderer. The foreground
 moving average is derived from them, so a figure can be fully reconstructed
 from its JSON without loading reward pickles or rebuilding metric rows.
+
+## Broken y-axis
+
+To use a broken y-axis for one figure, edit that figure's adjacent JSON file and
+replace the axis `limits` with ascending `segments`. For example, this keeps
+`0.0-0.2` and `0.8-1.0` while omitting the interval in between:
+
+```json
+{
+  "spec_version": 2,
+  "title": "Concordant sample rate [pickscore]",
+  "x_label": "Training step",
+  "series": [
+    {
+      "label": "SRC-NFT | positive concordant rate",
+      "points": [[0.0, 0.1], [10.0, 0.9]],
+      "color": "#2a78d6"
+    }
+  ],
+  "left": {
+    "label": "Concordant sample rate",
+    "segments": [[0.0, 0.2], [0.8, 1.0]],
+    "segment_height_ratios": [2.0, 1.0]
+  },
+  "smoothing_window": 1,
+  "break_gap": 0.05,
+  "break_mark_size": 0.012
+}
+```
+
+`segments` and `segment_height_ratios` are both ordered from the lowest range
+to the highest range, even though the highest range is drawn at the top. The
+height ratios are optional and default to equal panel heights. `break_gap` and
+`break_mark_size` are also optional; the renderer adds the diagonal break marks
+automatically. An axis cannot define both `limits` and `segments`.
+
+The original `series[].points` stay unchanged: points in an omitted interval
+are clipped from the image rather than deleted from the JSON. Redraw the edited
+spec with `--cache-mode reuse`. This redraws all specs indexed by
+`metadata.json`, but only the edited figure changes.
+
+For a two-y-axis figure, both `left` and `right` must define the same number of
+segments and identical `segment_height_ratios`; their numeric segment bounds
+may differ. The renderer rejects mismatched layouts because the stacked panels
+would otherwise imply a false correspondence between the two scales.
 
 The dataset directory is recovered from the saved run context source (for
 example, `pickscore` or `ocr`), so the fixed reward combination for each
@@ -290,8 +335,9 @@ foreground should equal the raw values.
 Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
-`spec_version` differs from the current renderer is rejected rather than being
-drawn with changed semantics.
+`spec_version` is unsupported is rejected rather than being drawn with changed
+semantics. The current renderer writes version 2 and still reads version 1
+continuous-axis specs.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and

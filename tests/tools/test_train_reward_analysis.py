@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 from matplotlib.lines import Line2D
 
-from tools.train_reward_analysis import analyze
+from tools.train_reward_analysis import analyze, plots
 from tools.train_reward_analysis.analyze import (
     CACHE_MODES,
     AnalysisConfig,
@@ -38,7 +38,13 @@ from tools.train_reward_analysis.analyze import (
     _render_figures,
     run_analysis,
 )
-from tools.train_reward_analysis.figure_spec import read_spec
+from tools.train_reward_analysis.figure_spec import (
+    SPEC_VERSION,
+    FigureAxis,
+    FigureSeries,
+    FigureSpec,
+    read_spec,
+)
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
@@ -535,6 +541,137 @@ def test_figure_data_round_trips_through_its_own_file(tmp_path: Path) -> None:
     assert (tmp_path / f"{stem}.json").is_file()
 
 
+def test_version_one_figure_data_remains_readable(tmp_path: Path) -> None:
+    stem, spec = build_figures(_training_progress_rows())[0]
+    write_figure_data([(stem, spec)], tmp_path)
+    path = tmp_path / f"{stem}.json"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            f'"spec_version": {SPEC_VERSION}', '"spec_version": 1'
+        ),
+        encoding="utf-8",
+    )
+
+    assert read_spec(path) == spec
+
+
+def test_broken_axis_round_trips_and_renders_two_panels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = FigureSpec(
+        title="Broken reward axis",
+        x_label="Training step",
+        left=FigureAxis(
+            label="Reward",
+            segments=[[0.0, 0.2], [0.8, 1.0]],
+            segment_height_ratios=[2.0, 1.0],
+        ),
+        series=[
+            FigureSeries(
+                label="run",
+                points=[[0.0, 0.1], [1.0, 0.9]],
+                color="C0",
+            )
+        ],
+        smoothing_window=1,
+        break_gap=0.08,
+        break_mark_size=0.015,
+    )
+    write_figure_data([("broken", spec)], tmp_path)
+    loaded = read_spec(tmp_path / "broken.json")
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
+
+    path = render_figure(loaded, tmp_path, "broken", "png")
+    figure = plots.plt.gcf()
+
+    assert loaded == spec
+    assert path.stat().st_size > 0
+    assert len(figure.axes) == 2
+    assert figure.axes[0].get_ylim() == pytest.approx((0.8, 1.0))
+    assert figure.axes[1].get_ylim() == pytest.approx((0.0, 0.2))
+    assert figure.axes[0].spines["bottom"].get_visible() is False
+    assert figure.axes[1].spines["top"].get_visible() is False
+    original_close(figure)
+
+
+def test_matching_dual_y_breaks_render_both_axes(tmp_path: Path) -> None:
+    segments = [[0.0, 0.2], [0.8, 1.0]]
+    spec = FigureSpec(
+        title="Dual broken axes",
+        x_label="Training step",
+        left=FigureAxis(label="Left", segments=segments),
+        right=FigureAxis(label="Right", segments=[[0.0, 20.0], [80.0, 100.0]]),
+        series=[
+            FigureSeries(label="left", points=[[0.0, 0.1]], color="C0"),
+            FigureSeries(
+                label="right",
+                points=[[0.0, 90.0]],
+                color="C1",
+                axis="right",
+            ),
+        ],
+        smoothing_window=1,
+    )
+
+    path = render_figure(spec, tmp_path, "dual-broken", "png")
+
+    assert path.stat().st_size > 0
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        (
+            FigureSpec(
+                title="invalid",
+                x_label="step",
+                left=FigureAxis(
+                    label="value",
+                    limits=[0.0, 1.0],
+                    segments=[[0.0, 0.2], [0.8, 1.0]],
+                ),
+            ),
+            "both limits and segments",
+        ),
+        (
+            FigureSpec(
+                title="invalid",
+                x_label="step",
+                left=FigureAxis(label="value", segments=[[0.0, 0.6], [0.5, 1.0]]),
+            ),
+            "ascending and separated",
+        ),
+        (
+            FigureSpec(
+                title="invalid",
+                x_label="step",
+                left=FigureAxis(
+                    label="value",
+                    segments=[[0.0, 0.2], [0.8, 1.0]],
+                    segment_height_ratios=[1.0],
+                ),
+            ),
+            "one value per segment",
+        ),
+        (
+            FigureSpec(
+                title="invalid",
+                x_label="step",
+                left=FigureAxis(label="left", segments=[[0.0, 0.2], [0.8, 1.0]]),
+                right=FigureAxis(label="right"),
+            ),
+            "same number of segments",
+        ),
+    ],
+)
+def test_invalid_broken_axis_layouts_fail_fast(
+    tmp_path: Path, spec: FigureSpec, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        write_figure_data([("invalid", spec)], tmp_path)
+
+
 def test_figure_data_leads_with_each_line_and_its_points(tmp_path: Path) -> None:
     """The on-disk structure should read like the figure, not analysis rows."""
     stem, spec = build_figures(_training_progress_rows())[0]
@@ -589,7 +726,9 @@ def test_stale_figure_data_is_rejected_rather_than_redrawn(tmp_path: Path) -> No
     write_figure_data([(stem, spec)], tmp_path)
     path = tmp_path / f"{stem}.json"
     path.write_text(
-        path.read_text(encoding="utf-8").replace('"spec_version": 1', '"spec_version": 0'),
+        path.read_text(encoding="utf-8").replace(
+            f'"spec_version": {SPEC_VERSION}', '"spec_version": 0'
+        ),
         encoding="utf-8",
     )
 

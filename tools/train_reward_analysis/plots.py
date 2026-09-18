@@ -43,6 +43,7 @@ from tools.train_reward_analysis.figure_spec import (
     FigureSeries,
     FigureSpec,
     LegendEntry,
+    validate_spec,
     write_spec,
 )
 
@@ -94,6 +95,16 @@ def render_figure(
     spec: FigureSpec, output_dir: str | Path, stem: str, plot_format: str = "png"
 ) -> Path:
     """Draw one spec and save it as ``<stem>.<plot_format>``."""
+    validate_spec(spec)
+    if spec.left.segments is not None:
+        return _render_broken_figure(spec, output_dir, stem, plot_format)
+    return _render_continuous_figure(spec, output_dir, stem, plot_format)
+
+
+def _render_continuous_figure(
+    spec: FigureSpec, output_dir: str | Path, stem: str, plot_format: str
+) -> Path:
+    """Draw the ordinary one-panel layout without changing its established pixels."""
     figure, base_axis = plt.subplots(figsize=tuple(spec.figsize))
     axes = {"left": base_axis}
     if spec.right is not None:
@@ -125,6 +136,116 @@ def render_figure(
     figure.savefig(path, dpi=180)
     plt.close(figure)
     return path
+
+
+def _render_broken_figure(
+    spec: FigureSpec, output_dir: str | Path, stem: str, plot_format: str
+) -> Path:
+    """Draw ascending y-axis segments as vertically stacked shared-x panels."""
+    left_segments = spec.left.segments
+    if left_segments is None:
+        raise ValueError("A broken figure requires left.segments.")
+    ratios = spec.left.segment_height_ratios or [1.0] * len(left_segments)
+    figure, panel_axes = plt.subplots(
+        len(left_segments),
+        1,
+        sharex=True,
+        figsize=tuple(spec.figsize),
+        gridspec_kw={
+            "height_ratios": list(reversed(ratios)),
+            "hspace": spec.break_gap,
+        },
+    )
+    left_axes = list(np.asarray(panel_axes, dtype=object).reshape(-1))
+    axes: dict[str, list[Axes]] = {"left": left_axes}
+    if spec.right is not None:
+        axes["right"] = [axis.twinx() for axis in left_axes]
+
+    for series in spec.series:
+        for axis in axes[series.axis]:
+            _draw_series(axis, series, spec.smoothing_window)
+    for hline in spec.hlines:
+        for axis in left_axes:
+            axis.axhline(
+                hline.y,
+                color=hline.color,
+                linewidth=0.8,
+                alpha=hline.alpha,
+                linestyle=hline.linestyle,
+                label="_nolegend_",
+            )
+
+    _configure_broken_panels(left_axes, spec.left, left_segments)
+    if spec.right is not None:
+        right_segments = spec.right.segments
+        if right_segments is None:
+            raise ValueError("A dual-y broken figure requires right.segments.")
+        _configure_broken_panels(axes["right"], spec.right, right_segments)
+
+    left_axes[0].set_title(spec.title)
+    left_axes[-1].set_xlabel(spec.x_label)
+    if spec.legend is not None and spec.legend.entries:
+        left_axes[0].legend(**_legend_kwargs(spec.legend))
+    figure.supylabel(spec.left.label)
+    if spec.right is not None:
+        figure.text(
+            0.99,
+            0.5,
+            spec.right.label,
+            rotation=270,
+            va="center",
+            ha="right",
+        )
+
+    figure.subplots_adjust(
+        left=0.12,
+        right=0.88 if spec.right is not None else 0.96,
+        bottom=0.12,
+        top=0.9,
+        hspace=spec.break_gap,
+    )
+    _draw_break_marks(left_axes, spec.break_mark_size)
+    path = Path(output_dir) / f"{stem}.{plot_format}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+    return path
+
+
+def _configure_broken_panels(
+    axes: Sequence[Axes], spec: FigureAxis, segments: Sequence[Sequence[float]]
+) -> None:
+    """Apply segment limits and hide the adjoining panel spines."""
+    for index, (axis, limits) in enumerate(zip(axes, reversed(segments))):
+        axis.set_ylim(float(limits[0]), float(limits[1]))
+        if spec.grid:
+            axis.grid(True, alpha=0.25)
+        else:
+            axis.grid(False)
+        if index > 0:
+            axis.spines["top"].set_visible(False)
+        if index < len(axes) - 1:
+            axis.spines["bottom"].set_visible(False)
+            axis.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+
+
+def _draw_break_marks(axes: Sequence[Axes], size: float) -> None:
+    """Mark every omitted y interval on both sides of the plot."""
+    line = {"color": "black", "clip_on": False, "linewidth": 0.8}
+    for upper_axis, lower_axis in zip(axes[:-1], axes[1:]):
+        for x_position in (0.0, 1.0):
+            upper_axis.plot(
+                (x_position - size, x_position + size),
+                (-size, size),
+                transform=upper_axis.transAxes,
+                **line,
+            )
+            lower_axis.plot(
+                (x_position - size, x_position + size),
+                (1.0 - size, 1.0 + size),
+                transform=lower_axis.transAxes,
+                **line,
+            )
 
 
 def _legend_kwargs(legend: FigureLegend) -> dict[str, Any]:
