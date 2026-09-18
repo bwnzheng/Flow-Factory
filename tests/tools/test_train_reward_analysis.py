@@ -41,8 +41,11 @@ from tools.train_reward_analysis.analyze import (
 from tools.train_reward_analysis.figure_spec import (
     SPEC_VERSION,
     FigureAxis,
+    FigureFontSizes,
+    FigureLegend,
     FigureSeries,
     FigureSpec,
+    LegendEntry,
     read_spec,
 )
 from tools.train_reward_analysis.metrics import (
@@ -541,18 +544,81 @@ def test_figure_data_round_trips_through_its_own_file(tmp_path: Path) -> None:
     assert (tmp_path / f"{stem}.json").is_file()
 
 
-def test_version_one_figure_data_remains_readable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_figure_data_remains_readable(tmp_path: Path, version: int) -> None:
     stem, spec = build_figures(_training_progress_rows())[0]
     write_figure_data([(stem, spec)], tmp_path)
     path = tmp_path / f"{stem}.json"
     path.write_text(
         path.read_text(encoding="utf-8").replace(
-            f'"spec_version": {SPEC_VERSION}', '"spec_version": 1'
+            f'"spec_version": {SPEC_VERSION}', f'"spec_version": {version}'
         ),
         encoding="utf-8",
     )
 
     assert read_spec(path) == spec
+
+
+def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    font_sizes = FigureFontSizes(
+        title=16.0,
+        x_label=13.0,
+        left_y_label=14.0,
+        right_y_label=15.0,
+        x_tick=9.0,
+        left_y_tick=10.0,
+        right_y_tick=11.0,
+        legend=12.0,
+    )
+    spec = FigureSpec(
+        title="Font sizes",
+        x_label="Training step",
+        left=FigureAxis(label="Left"),
+        right=FigureAxis(label="Right"),
+        series=[
+            FigureSeries(label="left", points=[[0.0, 0.1]], color="C0"),
+            FigureSeries(
+                label="right",
+                points=[[0.0, 0.9]],
+                color="C1",
+                axis="right",
+            ),
+        ],
+        legend=FigureLegend(entries=[LegendEntry(label="left", color="C0")]),
+        smoothing_window=1,
+        font_sizes=font_sizes,
+    )
+    write_figure_data([("fonts", spec)], tmp_path)
+    loaded = read_spec(tmp_path / "fonts.json")
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
+
+    render_figure(loaded, tmp_path, "fonts", "png")
+    figure = plots.plt.gcf()
+    left_axis, right_axis = figure.axes
+
+    assert loaded == spec
+    assert json.loads((tmp_path / "fonts.json").read_text(encoding="utf-8"))["font_sizes"] == {
+        "title": 16.0,
+        "x_label": 13.0,
+        "left_y_label": 14.0,
+        "right_y_label": 15.0,
+        "x_tick": 9.0,
+        "left_y_tick": 10.0,
+        "right_y_tick": 11.0,
+        "legend": 12.0,
+    }
+    assert left_axis.title.get_fontsize() == pytest.approx(16.0)
+    assert left_axis.xaxis.label.get_fontsize() == pytest.approx(13.0)
+    assert left_axis.yaxis.label.get_fontsize() == pytest.approx(14.0)
+    assert right_axis.yaxis.label.get_fontsize() == pytest.approx(15.0)
+    assert {tick.get_fontsize() for tick in left_axis.get_xticklabels()} == {9.0}
+    assert {tick.get_fontsize() for tick in left_axis.get_yticklabels()} == {10.0}
+    assert {tick.get_fontsize() for tick in right_axis.get_yticklabels()} == {11.0}
+    assert {text.get_fontsize() for text in left_axis.get_legend().get_texts()} == {12.0}
+    original_close(figure)
 
 
 def test_broken_axis_round_trips_and_renders_two_panels(
@@ -576,6 +642,13 @@ def test_broken_axis_round_trips_and_renders_two_panels(
         smoothing_window=1,
         break_gap=0.08,
         break_mark_size=0.015,
+        font_sizes=FigureFontSizes(
+            title=16.0,
+            x_label=13.0,
+            left_y_label=14.0,
+            x_tick=9.0,
+            left_y_tick=10.0,
+        ),
     )
     write_figure_data([("broken", spec)], tmp_path)
     loaded = read_spec(tmp_path / "broken.json")
@@ -592,10 +665,21 @@ def test_broken_axis_round_trips_and_renders_two_panels(
     assert figure.axes[1].get_ylim() == pytest.approx((0.0, 0.2))
     assert figure.axes[0].spines["bottom"].get_visible() is False
     assert figure.axes[1].spines["top"].get_visible() is False
+    assert figure.axes[0].title.get_fontsize() == pytest.approx(16.0)
+    assert figure.axes[1].xaxis.label.get_fontsize() == pytest.approx(13.0)
+    assert {tick.get_fontsize() for tick in figure.axes[1].get_xticklabels()} == {9.0}
+    assert all(
+        {tick.get_fontsize() for tick in axis.get_yticklabels()} == {10.0} for axis in figure.axes
+    )
+    assert next(text for text in figure.texts if text.get_text() == "Reward").get_fontsize() == (
+        pytest.approx(14.0)
+    )
     original_close(figure)
 
 
-def test_matching_dual_y_breaks_render_both_axes(tmp_path: Path) -> None:
+def test_matching_dual_y_breaks_render_both_axes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     segments = [[0.0, 0.2], [0.8, 1.0]]
     spec = FigureSpec(
         title="Dual broken axes",
@@ -612,11 +696,48 @@ def test_matching_dual_y_breaks_render_both_axes(tmp_path: Path) -> None:
             ),
         ],
         smoothing_window=1,
+        font_sizes=FigureFontSizes(right_y_label=15.0, right_y_tick=11.0),
     )
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
 
     path = render_figure(spec, tmp_path, "dual-broken", "png")
+    figure = plots.plt.gcf()
 
     assert path.stat().st_size > 0
+    right_axes = figure.axes[2:]
+    assert all(
+        {tick.get_fontsize() for tick in axis.get_yticklabels()} == {11.0} for axis in right_axes
+    )
+    assert next(text for text in figure.texts if text.get_text() == "Right").get_fontsize() == (
+        pytest.approx(15.0)
+    )
+    original_close(figure)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_font_sizes_fail_fast(tmp_path: Path, value: float) -> None:
+    spec = FigureSpec(
+        title="invalid",
+        x_label="step",
+        left=FigureAxis(label="value"),
+        font_sizes=FigureFontSizes(title=value),
+    )
+
+    with pytest.raises(ValueError, match="font_sizes.title"):
+        write_figure_data([("invalid", spec)], tmp_path)
+
+
+def test_unknown_font_size_field_fails_fast(tmp_path: Path) -> None:
+    stem, spec = build_figures(_training_progress_rows())[0]
+    write_figure_data([(stem, spec)], tmp_path)
+    path = tmp_path / f"{stem}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["font_sizes"] = {"x_ticks": 11.0}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown fields.*x_ticks"):
+        read_spec(path)
 
 
 @pytest.mark.parametrize(

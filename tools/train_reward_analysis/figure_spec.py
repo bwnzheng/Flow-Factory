@@ -36,8 +36,8 @@ from typing import Any
 # Bumped whenever the spec's shape or meaning changes. Readers list compatible
 # historical versions explicitly so incompatible data is never rendered with
 # changed semantics.
-SPEC_VERSION = 2
-SUPPORTED_SPEC_VERSIONS = (1, SPEC_VERSION)
+SPEC_VERSION = 3
+SUPPORTED_SPEC_VERSIONS = (1, 2, SPEC_VERSION)
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,20 @@ class FigureLegend:
 
 
 @dataclass(frozen=True)
+class FigureFontSizes:
+    """Optional per-figure font sizes in points."""
+
+    title: float | None = None
+    x_label: float | None = None
+    left_y_label: float | None = None
+    right_y_label: float | None = None
+    x_tick: float | None = None
+    left_y_tick: float | None = None
+    right_y_tick: float | None = None
+    legend: float | None = None
+
+
+@dataclass(frozen=True)
 class FigureSpec:
     """Everything needed to redraw one figure, and nothing more."""
 
@@ -128,6 +142,7 @@ class FigureSpec:
     figsize: list[float] = field(default_factory=lambda: [8.0, 4.5])
     break_gap: float = 0.05
     break_mark_size: float = 0.012
+    font_sizes: FigureFontSizes = field(default_factory=FigureFontSizes)
 
 
 def to_json(spec: FigureSpec) -> str:
@@ -185,6 +200,10 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
         raise ValueError(
             f"{context}: break_mark_size must be finite, positive, and smaller than 0.1."
         )
+    for name in _FONT_SIZE_FIELDS:
+        value = getattr(spec.font_sizes, name)
+        if value is not None and (not math.isfinite(value) or value <= 0.0):
+            raise ValueError(f"{context}: font_sizes.{name} must be finite and strictly positive.")
 
     _validate_axis(spec.left, "left", context)
     if spec.right is not None:
@@ -287,6 +306,9 @@ def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
         result["break_gap"] = spec.break_gap
     if spec.break_mark_size != 0.012:
         result["break_mark_size"] = spec.break_mark_size
+    font_sizes = _font_sizes_to_mapping(spec.font_sizes)
+    if font_sizes:
+        result["font_sizes"] = font_sizes
     return result
 
 
@@ -353,6 +375,27 @@ def _legend_to_mapping(legend: FigureLegend) -> dict[str, Any]:
     return result
 
 
+_FONT_SIZE_FIELDS = (
+    "title",
+    "x_label",
+    "left_y_label",
+    "right_y_label",
+    "x_tick",
+    "left_y_tick",
+    "right_y_tick",
+    "legend",
+)
+
+
+def _font_sizes_to_mapping(font_sizes: FigureFontSizes) -> dict[str, float]:
+    """Serialize only explicitly configured font sizes."""
+    return {
+        name: value
+        for name in _FONT_SIZE_FIELDS
+        if (value := getattr(font_sizes, name)) is not None
+    }
+
+
 def _legend_entry_to_mapping(entry: LegendEntry) -> dict[str, Any]:
     result: dict[str, Any] = {"label": entry.label, "color": entry.color}
     defaults = LegendEntry(label="", color="")
@@ -367,6 +410,7 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
     """Rebuild a spec from its serialized form, rejecting unknown shapes."""
     legend = raw.get("legend")
     right = raw.get("right")
+    font_sizes = raw.get("font_sizes")
     return FigureSpec(
         title=str(raw["title"]),
         x_label=str(raw["x_label"]),
@@ -379,6 +423,21 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
         figsize=[float(value) for value in raw.get("figsize", [8.0, 4.5])],
         break_gap=float(raw.get("break_gap", 0.05)),
         break_mark_size=float(raw.get("break_mark_size", 0.012)),
+        font_sizes=(
+            FigureFontSizes() if font_sizes is None else _font_sizes_from_mapping(font_sizes, path)
+        ),
+    )
+
+
+def _font_sizes_from_mapping(raw: Any, path: str) -> FigureFontSizes:
+    """Load the optional font-size overrides from JSON."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"Figure font_sizes must be a JSON object: {path}")
+    unknown = sorted(set(raw) - set(_FONT_SIZE_FIELDS))
+    if unknown:
+        raise ValueError(f"Figure font_sizes contains unknown fields {unknown}: {path}")
+    return FigureFontSizes(
+        **{name: None if raw.get(name) is None else float(raw[name]) for name in _FONT_SIZE_FIELDS}
     )
 
 

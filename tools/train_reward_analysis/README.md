@@ -197,7 +197,7 @@ For example:
 
 ```json
 {
-  "spec_version": 2,
+  "spec_version": 3,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -221,6 +221,31 @@ The points are the unsmoothed values supplied to the renderer. The foreground
 moving average is derived from them, so a figure can be fully reconstructed
 from its JSON without loading reward pickles or rebuilding metric rows.
 
+## Font sizes
+
+Add `font_sizes` at the top level of one figure JSON to control its text in
+points without affecting any other figure:
+
+```json
+"font_sizes": {
+  "title": 16.0,
+  "x_label": 13.0,
+  "left_y_label": 13.0,
+  "right_y_label": 13.0,
+  "x_tick": 11.0,
+  "left_y_tick": 11.0,
+  "right_y_tick": 11.0,
+  "legend": 10.0
+}
+```
+
+Every entry is optional. An omitted entry keeps the established matplotlib
+size, so old specs retain their existing pixels. `left_y_*` and `right_y_*`
+apply independently on a dual-y figure and apply to every corresponding panel
+on a broken-axis figure. `font_sizes.legend` overrides the older
+`legend.fontsize` setting when both are present. All configured sizes must be
+finite and strictly positive.
+
 ## Broken y-axis
 
 To use a broken y-axis for one figure, edit that figure's adjacent JSON file and
@@ -229,7 +254,7 @@ replace the axis `limits` with ascending `segments`. For example, this keeps
 
 ```json
 {
-  "spec_version": 2,
+  "spec_version": 3,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -336,8 +361,8 @@ Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
 `spec_version` is unsupported is rejected rather than being drawn with changed
-semantics. The current renderer writes version 2 and still reads version 1
-continuous-axis specs.
+semantics. The current renderer writes version 3 and still reads version 1 and
+version 2 specs.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and

@@ -122,13 +122,29 @@ def _render_continuous_figure(
             label="_nolegend_",
         )
 
-    _configure_axis(base_axis, spec.left)
+    _configure_axis(
+        base_axis,
+        spec.left,
+        spec.font_sizes.left_y_label,
+        spec.font_sizes.left_y_tick,
+    )
     if spec.right is not None:
-        _configure_axis(axes["right"], spec.right)
-    base_axis.set_title(spec.title)
-    base_axis.set_xlabel(spec.x_label)
+        _configure_axis(
+            axes["right"],
+            spec.right,
+            spec.font_sizes.right_y_label,
+            spec.font_sizes.right_y_tick,
+        )
+    title = base_axis.set_title(spec.title)
+    x_label = base_axis.set_xlabel(spec.x_label)
+    if spec.font_sizes.title is not None:
+        title.set_fontsize(spec.font_sizes.title)
+    if spec.font_sizes.x_label is not None:
+        x_label.set_fontsize(spec.font_sizes.x_label)
+    if spec.font_sizes.x_tick is not None:
+        base_axis.tick_params(axis="x", labelsize=spec.font_sizes.x_tick)
     if spec.legend is not None and spec.legend.entries:
-        base_axis.legend(**_legend_kwargs(spec.legend))
+        base_axis.legend(**_legend_kwargs(spec.legend, spec.font_sizes.legend))
 
     figure.tight_layout()
     path = Path(output_dir) / f"{stem}.{plot_format}"
@@ -175,20 +191,39 @@ def _render_broken_figure(
                 label="_nolegend_",
             )
 
-    _configure_broken_panels(left_axes, spec.left, left_segments)
+    _configure_broken_panels(
+        left_axes,
+        spec.left,
+        left_segments,
+        spec.font_sizes.left_y_tick,
+    )
     if spec.right is not None:
         right_segments = spec.right.segments
         if right_segments is None:
             raise ValueError("A dual-y broken figure requires right.segments.")
-        _configure_broken_panels(axes["right"], spec.right, right_segments)
+        _configure_broken_panels(
+            axes["right"],
+            spec.right,
+            right_segments,
+            spec.font_sizes.right_y_tick,
+        )
 
-    left_axes[0].set_title(spec.title)
-    left_axes[-1].set_xlabel(spec.x_label)
+    title = left_axes[0].set_title(spec.title)
+    x_label = left_axes[-1].set_xlabel(spec.x_label)
+    if spec.font_sizes.title is not None:
+        title.set_fontsize(spec.font_sizes.title)
+    if spec.font_sizes.x_label is not None:
+        x_label.set_fontsize(spec.font_sizes.x_label)
+    if spec.font_sizes.x_tick is not None:
+        for axis in left_axes:
+            axis.tick_params(axis="x", labelsize=spec.font_sizes.x_tick)
     if spec.legend is not None and spec.legend.entries:
-        left_axes[0].legend(**_legend_kwargs(spec.legend))
-    figure.supylabel(spec.left.label)
+        left_axes[0].legend(**_legend_kwargs(spec.legend, spec.font_sizes.legend))
+    left_y_label = figure.supylabel(spec.left.label)
+    if spec.font_sizes.left_y_label is not None:
+        left_y_label.set_fontsize(spec.font_sizes.left_y_label)
     if spec.right is not None:
-        figure.text(
+        right_y_label = figure.text(
             0.99,
             0.5,
             spec.right.label,
@@ -196,6 +231,8 @@ def _render_broken_figure(
             va="center",
             ha="right",
         )
+        if spec.font_sizes.right_y_label is not None:
+            right_y_label.set_fontsize(spec.font_sizes.right_y_label)
 
     figure.subplots_adjust(
         left=0.12,
@@ -213,7 +250,10 @@ def _render_broken_figure(
 
 
 def _configure_broken_panels(
-    axes: Sequence[Axes], spec: FigureAxis, segments: Sequence[Sequence[float]]
+    axes: Sequence[Axes],
+    spec: FigureAxis,
+    segments: Sequence[Sequence[float]],
+    tick_fontsize: float | None,
 ) -> None:
     """Apply segment limits and hide the adjoining panel spines."""
     for index, (axis, limits) in enumerate(zip(axes, reversed(segments))):
@@ -222,6 +262,8 @@ def _configure_broken_panels(
             axis.grid(True, alpha=0.25)
         else:
             axis.grid(False)
+        if tick_fontsize is not None:
+            axis.tick_params(axis="y", labelsize=tick_fontsize)
         if index > 0:
             axis.spines["top"].set_visible(False)
         if index < len(axes) - 1:
@@ -248,7 +290,7 @@ def _draw_break_marks(axes: Sequence[Axes], size: float) -> None:
             )
 
 
-def _legend_kwargs(legend: FigureLegend) -> dict[str, Any]:
+def _legend_kwargs(legend: FigureLegend, fontsize: float | None = None) -> dict[str, Any]:
     handles = [
         Line2D(
             [],
@@ -265,7 +307,7 @@ def _legend_kwargs(legend: FigureLegend) -> dict[str, Any]:
     ]
     kwargs: dict[str, Any] = {
         "handles": handles,
-        "fontsize": legend.fontsize,
+        "fontsize": legend.fontsize if fontsize is None else fontsize,
         "loc": legend.loc,
         "ncol": legend.ncol,
     }
@@ -276,11 +318,20 @@ def _legend_kwargs(legend: FigureLegend) -> dict[str, Any]:
     return kwargs
 
 
-def _configure_axis(axis: Axes, spec: FigureAxis) -> None:
+def _configure_axis(
+    axis: Axes,
+    spec: FigureAxis,
+    label_fontsize: float | None = None,
+    tick_fontsize: float | None = None,
+) -> None:
     """Apply one axis's limits, label, and grid."""
     if spec.limits is not None:
         axis.set_ylim(spec.limits[0], spec.limits[1])
-    axis.set_ylabel(spec.label)
+    label = axis.set_ylabel(spec.label)
+    if label_fontsize is not None:
+        label.set_fontsize(label_fontsize)
+    if tick_fontsize is not None:
+        axis.tick_params(axis="y", labelsize=tick_fontsize)
     # Passing line properties alongside False turns the grid *on*, so the two
     # cases stay separate.
     if spec.grid:
