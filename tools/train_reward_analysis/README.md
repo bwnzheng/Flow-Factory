@@ -197,7 +197,7 @@ For example:
 
 ```json
 {
-  "spec_version": 3,
+  "spec_version": 4,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -246,6 +246,35 @@ on a broken-axis figure. `font_sizes.legend` overrides the older
 `legend.fontsize` setting when both are present. All configured sizes must be
 finite and strictly positive.
 
+## Borders and multi-column legends
+
+Set `border_width` at the top level to change the axes frame width for one
+figure. The value is in points and must be finite and strictly positive:
+
+```json
+"border_width": 1.5
+```
+
+On a dual-y figure the setting applies to both axes. On a broken-axis figure it
+also applies to every panel and the diagonal break marks. Omitting the field
+keeps the established matplotlib width.
+
+Legends already support multiple columns through `legend.ncol`:
+
+```json
+"legend": {
+  "entries": [
+    {"label": "run A", "color": "#2a78d6"},
+    {"label": "run B", "color": "#eb6834"}
+  ],
+  "ncol": 2,
+  "loc": "upper center"
+}
+```
+
+`ncol` must be a positive integer. Use the optional `anchor` field when the
+multi-column legend needs to sit outside the axes.
+
 ## Broken y-axis
 
 To use a broken y-axis for one figure, edit that figure's adjacent JSON file and
@@ -254,7 +283,7 @@ replace the axis `limits` with ascending `segments`. For example, this keeps
 
 ```json
 {
-  "spec_version": 3,
+  "spec_version": 4,
   "title": "Concordant sample rate [pickscore]",
   "x_label": "Training step",
   "series": [
@@ -361,8 +390,7 @@ Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
 `spec_version` is unsupported is rejected rather than being drawn with changed
-semantics. The current renderer writes version 3 and still reads version 1 and
-version 2 specs.
+semantics. The current renderer writes version 4 and still reads versions 1-3.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and

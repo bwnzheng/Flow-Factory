@@ -109,6 +109,7 @@ def _render_continuous_figure(
     axes = {"left": base_axis}
     if spec.right is not None:
         axes["right"] = base_axis.twinx()
+    _set_border_width(axes.values(), spec.border_width)
 
     for series in spec.series:
         _draw_series(axes[series.axis], series, spec.smoothing_window)
@@ -176,6 +177,10 @@ def _render_broken_figure(
     axes: dict[str, list[Axes]] = {"left": left_axes}
     if spec.right is not None:
         axes["right"] = [axis.twinx() for axis in left_axes]
+    _set_border_width(
+        [axis for axis_group in axes.values() for axis in axis_group],
+        spec.border_width,
+    )
 
     for series in spec.series:
         for axis in axes[series.axis]:
@@ -241,7 +246,7 @@ def _render_broken_figure(
         top=0.9,
         hspace=spec.break_gap,
     )
-    _draw_break_marks(left_axes, spec.break_mark_size)
+    _draw_break_marks(left_axes, spec.break_mark_size, spec.border_width)
     path = Path(output_dir) / f"{stem}.{plot_format}"
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
@@ -271,9 +276,22 @@ def _configure_broken_panels(
             axis.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
 
 
-def _draw_break_marks(axes: Sequence[Axes], size: float) -> None:
+def _set_border_width(axes: Iterable[Axes], width: float | None) -> None:
+    """Apply one border width to every spine without changing the default when omitted."""
+    if width is None:
+        return
+    for axis in axes:
+        for spine in axis.spines.values():
+            spine.set_linewidth(width)
+
+
+def _draw_break_marks(axes: Sequence[Axes], size: float, border_width: float | None = None) -> None:
     """Mark every omitted y interval on both sides of the plot."""
-    line = {"color": "black", "clip_on": False, "linewidth": 0.8}
+    line = {
+        "color": "black",
+        "clip_on": False,
+        "linewidth": 0.8 if border_width is None else border_width,
+    }
     for upper_axis, lower_axis in zip(axes[:-1], axes[1:]):
         for x_position in (0.0, 1.0):
             upper_axis.plot(

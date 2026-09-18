@@ -36,8 +36,8 @@ from typing import Any
 # Bumped whenever the spec's shape or meaning changes. Readers list compatible
 # historical versions explicitly so incompatible data is never rendered with
 # changed semantics.
-SPEC_VERSION = 3
-SUPPORTED_SPEC_VERSIONS = (1, 2, SPEC_VERSION)
+SPEC_VERSION = 4
+SUPPORTED_SPEC_VERSIONS = (1, 2, 3, SPEC_VERSION)
 
 
 @dataclass(frozen=True)
@@ -142,6 +142,7 @@ class FigureSpec:
     figsize: list[float] = field(default_factory=lambda: [8.0, 4.5])
     break_gap: float = 0.05
     break_mark_size: float = 0.012
+    border_width: float | None = None
     font_sizes: FigureFontSizes = field(default_factory=FigureFontSizes)
 
 
@@ -200,6 +201,16 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
         raise ValueError(
             f"{context}: break_mark_size must be finite, positive, and smaller than 0.1."
         )
+    if spec.border_width is not None and (
+        not math.isfinite(spec.border_width) or spec.border_width <= 0.0
+    ):
+        raise ValueError(f"{context}: border_width must be finite and strictly positive.")
+    if spec.legend is not None and (
+        isinstance(spec.legend.ncol, bool)
+        or not isinstance(spec.legend.ncol, int)
+        or spec.legend.ncol < 1
+    ):
+        raise ValueError(f"{context}: legend.ncol must be a positive integer.")
     for name in _FONT_SIZE_FIELDS:
         value = getattr(spec.font_sizes, name)
         if value is not None and (not math.isfinite(value) or value <= 0.0):
@@ -306,6 +317,8 @@ def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
         result["break_gap"] = spec.break_gap
     if spec.break_mark_size != 0.012:
         result["break_mark_size"] = spec.break_mark_size
+    if spec.border_width is not None:
+        result["border_width"] = spec.border_width
     font_sizes = _font_sizes_to_mapping(spec.font_sizes)
     if font_sizes:
         result["font_sizes"] = font_sizes
@@ -423,6 +436,7 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
         figsize=[float(value) for value in raw.get("figsize", [8.0, 4.5])],
         break_gap=float(raw.get("break_gap", 0.05)),
         break_mark_size=float(raw.get("break_mark_size", 0.012)),
+        border_width=(None if raw.get("border_width") is None else float(raw["border_width"])),
         font_sizes=(
             FigureFontSizes() if font_sizes is None else _font_sizes_from_mapping(font_sizes, path)
         ),
@@ -471,6 +485,9 @@ def _hline_from_mapping(raw: dict[str, Any], path: str) -> FigureHLine:
 def _legend_from_mapping(raw: dict[str, Any], path: str) -> FigureLegend:
     anchor = raw.get("anchor")
     handlelength = raw.get("handlelength")
+    ncol = raw.get("ncol", 1)
+    if isinstance(ncol, bool) or not isinstance(ncol, int) or ncol < 1:
+        raise ValueError(f"Figure legend.ncol must be a positive integer: {path}")
     return FigureLegend(
         entries=[
             LegendEntry(
@@ -486,7 +503,7 @@ def _legend_from_mapping(raw: dict[str, Any], path: str) -> FigureLegend:
         ],
         loc=str(raw.get("loc", "best")),
         fontsize=float(raw.get("fontsize", 8.0)),
-        ncol=int(raw.get("ncol", 1)),
+        ncol=ncol,
         anchor=None if anchor is None else [float(value) for value in anchor],
         handlelength=None if handlelength is None else float(handlelength),
     )

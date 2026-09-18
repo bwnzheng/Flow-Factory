@@ -544,7 +544,7 @@ def test_figure_data_round_trips_through_its_own_file(tmp_path: Path) -> None:
     assert (tmp_path / f"{stem}.json").is_file()
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_older_figure_data_remains_readable(tmp_path: Path, version: int) -> None:
     stem, spec = build_figures(_training_progress_rows())[0]
     write_figure_data([(stem, spec)], tmp_path)
@@ -586,8 +586,12 @@ def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
                 axis="right",
             ),
         ],
-        legend=FigureLegend(entries=[LegendEntry(label="left", color="C0")]),
+        legend=FigureLegend(
+            entries=[LegendEntry(label="left", color="C0")],
+            ncol=2,
+        ),
         smoothing_window=1,
+        border_width=2.0,
         font_sizes=font_sizes,
     )
     write_figure_data([("fonts", spec)], tmp_path)
@@ -618,6 +622,12 @@ def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
     assert {tick.get_fontsize() for tick in left_axis.get_yticklabels()} == {10.0}
     assert {tick.get_fontsize() for tick in right_axis.get_yticklabels()} == {11.0}
     assert {text.get_fontsize() for text in left_axis.get_legend().get_texts()} == {12.0}
+    assert left_axis.get_legend()._ncols == 2
+    assert all(
+        spine.get_linewidth() == pytest.approx(2.0)
+        for axis in figure.axes
+        for spine in axis.spines.values()
+    )
     original_close(figure)
 
 
@@ -642,6 +652,7 @@ def test_broken_axis_round_trips_and_renders_two_panels(
         smoothing_window=1,
         break_gap=0.08,
         break_mark_size=0.015,
+        border_width=2.0,
         font_sizes=FigureFontSizes(
             title=16.0,
             x_label=13.0,
@@ -674,6 +685,14 @@ def test_broken_axis_round_trips_and_renders_two_panels(
     assert next(text for text in figure.texts if text.get_text() == "Reward").get_fontsize() == (
         pytest.approx(14.0)
     )
+    assert all(
+        spine.get_linewidth() == pytest.approx(2.0)
+        for axis in figure.axes
+        for spine in axis.spines.values()
+    )
+    break_marks = [line for axis in figure.axes for line in axis.lines if not line.get_clip_on()]
+    assert len(break_marks) == 4
+    assert {line.get_linewidth() for line in break_marks} == {2.0}
     original_close(figure)
 
 
@@ -738,6 +757,32 @@ def test_unknown_font_size_field_fails_fast(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unknown fields.*x_ticks"):
         read_spec(path)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_border_width_fails_fast(tmp_path: Path, value: float) -> None:
+    spec = FigureSpec(
+        title="invalid",
+        x_label="step",
+        left=FigureAxis(label="value"),
+        border_width=value,
+    )
+
+    with pytest.raises(ValueError, match="border_width"):
+        write_figure_data([("invalid", spec)], tmp_path)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True])
+def test_invalid_legend_column_count_fails_fast(tmp_path: Path, value: object) -> None:
+    spec = FigureSpec(
+        title="invalid",
+        x_label="step",
+        left=FigureAxis(label="value"),
+        legend=FigureLegend(entries=[], ncol=value),
+    )
+
+    with pytest.raises(ValueError, match="legend.ncol"):
+        write_figure_data([("invalid", spec)], tmp_path)
 
 
 @pytest.mark.parametrize(
