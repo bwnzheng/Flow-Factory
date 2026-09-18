@@ -50,7 +50,7 @@ from tools.train_reward_analysis.plots import (
     plot_agreement_count_expectation_trajectories,
     plot_per_reward_conflict_score_trajectories,
     plot_per_reward_disagreement_trajectories,
-    plot_agreement_rate_trajectories,
+    plot_concordance_rate_trajectories,
     plot_reward_concordance_lower_bound_trajectories,
     plot_run_training_progress_trajectories,
     plot_standardized_reward_covariance_trajectories,
@@ -749,12 +749,12 @@ def test_training_progress_figures_are_written_into_their_own_folder(tmp_path: P
     rows = _training_progress_rows()
 
     plot_run_training_progress_trajectories(rows, tmp_path)
-    plot_agreement_rate_trajectories(rows, tmp_path)
+    plot_concordance_rate_trajectories(rows, tmp_path)
 
     folder = tmp_path / "pickscore" / "training_progress"
     assert (folder / "SRC-NFT.png").stat().st_size > 0
     assert (folder / "NFT__uniform_.png").stat().st_size > 0
-    assert (folder / "agreement.png").stat().st_size > 0
+    assert (folder / "concordance.png").stat().st_size > 0
 
 
 def test_run_progress_figure_aggregates_every_reward_into_one_curve(
@@ -810,7 +810,7 @@ def test_run_progress_figure_aggregates_every_reward_into_one_curve(
     np.testing.assert_allclose(foreground, aggregate)
 
 
-def test_agreement_figure_distinguishes_runs_by_dash_and_marker(
+def test_concordance_figure_distinguishes_runs_by_dash_and_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each run gets its own dash pattern and marker, so runs never look alike."""
@@ -830,7 +830,7 @@ def test_agreement_figure_distinguishes_runs_by_dash_and_marker(
     monkeypatch.setattr(matplotlib.axes.Axes, "plot", recording_plot)
     monkeypatch.setattr(matplotlib.axes.Axes, "legend", capturing_legend)
 
-    plot_agreement_rate_trajectories(_training_progress_rows(), tmp_path)
+    plot_concordance_rate_trajectories(_training_progress_rows(), tmp_path)
 
     # Two runs times two agreement directions, each drawn raw + smoothed.
     assert len(styles) == 8, f"expected 4 series drawn twice, got {len(styles)}"
@@ -841,7 +841,10 @@ def test_agreement_figure_distinguishes_runs_by_dash_and_marker(
     assert sorted(labels) == sorted(
         f"{label} | {legend_name}"
         for label in ("SRC-NFT", "NFT (uniform)")
-        for _, legend_name in (("", "positive fully-agree"), ("", "negative fully-agree"))
+        for _, legend_name in (
+            ("", "positive concordant rate"),
+            ("", "negative concordant rate"),
+        )
     )
 
 
@@ -898,13 +901,13 @@ def test_run_progress_figure_puts_rates_on_a_second_axis(
         assert twin.get_ylim() != (0.0, 100.0), "the rate axis must follow its own data"
 
 
-def test_agreement_figure_autoscales_to_its_own_band(
+def test_concordance_figure_autoscales_to_its_own_band(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The all-run figure drops the fixed 0-100% range to magnify the rates."""
     written, twins = _record_axis_limits(monkeypatch)
 
-    plot_agreement_rate_trajectories(_training_progress_rows(), tmp_path)
+    plot_concordance_rate_trajectories(_training_progress_rows(), tmp_path)
 
     assert not twins, "the all-run figure has only rates, so it needs no second axis"
     assert (0.0, 100.0) not in written, f"the rate axis must not be pinned, got {written}"

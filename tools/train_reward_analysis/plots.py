@@ -32,16 +32,16 @@ from matplotlib.lines import Line2D
 # validated reference palette, whose slot *order* is what keeps neighbouring
 # series separable under colour-vision deficiency; that opening three validates
 # on every pair, not only adjacent ones, so any of the three reads against any
-# other. Agreement direction keeps its colour in both training-progress figures,
-# so the two stay mutually readable. The slots sit below 3:1 contrast on a light
-# surface, so both figures ship a legend and every plotted value also appears in
-# metrics.csv.
-_AGREEMENT_METRICS = (
-    ("positive_fully_concordant_sample_rate", "positive fully-agree"),
-    ("negative_fully_concordant_sample_rate", "negative fully-agree"),
+# other. Concordance direction keeps its colour in both training-progress
+# figures, so the two stay mutually readable. The slots sit below 3:1 contrast on
+# a light surface, so both figures ship a legend and every plotted value also
+# appears in metrics.csv.
+_CONCORDANCE_METRICS = (
+    ("positive_fully_concordant_sample_rate", "positive concordant rate"),
+    ("negative_fully_concordant_sample_rate", "negative concordant rate"),
 )
-_AGREEMENT_METRIC_NAMES = {name for name, _ in _AGREEMENT_METRICS}
-_AGREEMENT_COLORS = ("#2a78d6", "#eb6834")  # blue, orange
+_CONCORDANCE_METRIC_NAMES = {name for name, _ in _CONCORDANCE_METRICS}
+_CONCORDANCE_COLORS = ("#2a78d6", "#eb6834")  # blue, orange
 _REWARD_PROGRESS_COLOR = "#1baf7a"  # aqua
 
 
@@ -369,7 +369,7 @@ def plot_agreement_count_distribution_trajectories(
                 legend_handles.append(
                     Line2D([], [], linestyle=style, color=color, linewidth=1.5, label=legend_label)
                 )
-        axis.set_title(f"Sample agreement-count distribution [{dataset}]")
+        axis.set_title(f"Sample concordance-count distribution [{dataset}]")
         axis.set_xlabel("Training step")
         axis.set_ylabel("Sample fraction")
         axis.grid(alpha=0.25)
@@ -442,11 +442,11 @@ def plot_agreement_count_expectation_trajectories(
                 linewidth=0.8,
                 alpha=0.4,
                 linestyle="--",
-                label=f"all {ceiling} rewards agree",
+                label=f"all {ceiling} rewards concordant",
             )
-        axis.set_title(f"Mean agreement count [{dataset}]")
+        axis.set_title(f"Mean concordance count [{dataset}]")
         axis.set_xlabel("Training step")
-        axis.set_ylabel("Mean agreeing reward count per sample")
+        axis.set_ylabel("Mean concordant reward count per sample")
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8)
         figure.tight_layout()
@@ -555,7 +555,7 @@ def plot_run_training_progress_trajectories(
     smoothing_window: int = 5,
     plot_format: str = "png",
 ) -> None:
-    """Write one reward-progress and full-agreement figure per run and dataset.
+    """Write one reward-progress and full-concordance figure per run and dataset.
 
     Rewards are aggregated into a single progress curve rather than drawn
     separately: each reward is mapped onto 0-100% of its own observed range
@@ -569,7 +569,7 @@ def plot_run_training_progress_trajectories(
     it for shape, not for level; a single outlier step sets a reward's 100% mark,
     and a reward that never moves contributes a flat 0%.
 
-    The two agreement curves are already shares of samples, so they are plotted
+    The two concordance curves are already shares of samples, so they are plotted
     at their own value and are never rescaled. All three curves are bounded
     0-100% by construction with no free scale parameter, so one axis carries
     them and no second y-scale is needed.
@@ -599,7 +599,7 @@ def plot_run_training_progress_trajectories(
                     label="mean reward progress (left)",
                 )
             ]
-            for offset, (metric, legend_name) in enumerate(_AGREEMENT_METRICS):
+            for offset, (metric, legend_name) in enumerate(_CONCORDANCE_METRICS):
                 fraction_rows = keyed.get((metric, ""))
                 if not fraction_rows:
                     continue
@@ -607,7 +607,7 @@ def plot_run_training_progress_trajectories(
                     rate_axis,
                     fraction_rows,
                     _percent_of_sample_share,
-                    _AGREEMENT_COLORS[offset],
+                    _CONCORDANCE_COLORS[offset],
                     "-",
                     "o",
                     smoothing_window,
@@ -616,16 +616,14 @@ def plot_run_training_progress_trajectories(
                     Line2D(
                         [],
                         [],
-                        color=_AGREEMENT_COLORS[offset],
+                        color=_CONCORDANCE_COLORS[offset],
                         linewidth=1.8,
                         label=f"{legend_name} (right)",
                     )
                 )
             _lock_percent_axis(progress_axis, "Reward progress % (left, own min-max)")
-            _autoscale_rate_axis(rate_axis, "Fully-agreeing samples % (right)")
-            progress_axis.set_title(
-                f"Reward progress and full-agreement rate [{dataset}] | {label}"
-            )
+            _autoscale_rate_axis(rate_axis, "Concordant samples % (right)")
+            progress_axis.set_title(f"Reward progress and concordance rate [{dataset}] | {label}")
             progress_axis.set_xlabel("Training step")
             progress_axis.legend(handles=handles, fontsize=8, loc="best")
             figure.tight_layout()
@@ -640,18 +638,18 @@ def plot_run_training_progress_trajectories(
             plt.close(figure)
 
 
-def plot_agreement_rate_trajectories(
+def plot_concordance_rate_trajectories(
     rows: Iterable[dict[str, Any]],
     output_dir: str | Path,
     smoothing_window: int = 5,
     plot_format: str = "png",
 ) -> None:
-    """Write one all-run full-agreement figure per dataset.
+    """Write one all-run full-concordance figure per dataset.
 
     This figure drops the reward-progress curve so the runs can carry the axes
     alone: with no other family competing for the same channels, run identity is
     read from colour, dash pattern, and marker together rather than from the dash
-    pattern by itself. Agreement direction keeps the colours it has in the
+    pattern by itself. Concordance direction keeps the colours it has in the
     per-run figure, so the two figures in this folder stay mutually readable.
     """
     for dataset, _rewards, by_run in _group_progress_rows(rows):
@@ -660,7 +658,7 @@ def plot_agreement_rate_trajectories(
         for run_index, (label, keyed) in enumerate(by_run.items()):
             linestyle = ("-", "--", "-.", ":")[run_index % 4]
             marker = ("o", "s", "^", "D")[run_index % 4]
-            for offset, (metric, legend_name) in enumerate(_AGREEMENT_METRICS):
+            for offset, (metric, legend_name) in enumerate(_CONCORDANCE_METRICS):
                 fraction_rows = keyed.get((metric, ""))
                 if not fraction_rows:
                     continue
@@ -668,7 +666,7 @@ def plot_agreement_rate_trajectories(
                     axis,
                     fraction_rows,
                     _percent_of_sample_share,
-                    _AGREEMENT_COLORS[offset],
+                    _CONCORDANCE_COLORS[offset],
                     linestyle,
                     marker,
                     smoothing_window,
@@ -677,16 +675,16 @@ def plot_agreement_rate_trajectories(
                     Line2D(
                         [],
                         [],
-                        color=_AGREEMENT_COLORS[offset],
+                        color=_CONCORDANCE_COLORS[offset],
                         linestyle=linestyle,
                         marker=marker,
                         linewidth=1.8,
                         label=f"{label} | {legend_name}",
                     )
                 )
-        _autoscale_rate_axis(axis, "Percent of fully-agreeing samples")
+        _autoscale_rate_axis(axis, "Percent of concordant samples")
         axis.grid(alpha=0.25)
-        axis.set_title(f"Fully-agreeing sample rate [{dataset}]")
+        axis.set_title(f"Concordant sample rate [{dataset}]")
         axis.set_xlabel("Training step")
         axis.legend(handles=handles, fontsize=8, loc="best")
         figure.tight_layout()
@@ -694,7 +692,7 @@ def plot_agreement_rate_trajectories(
             Path(output_dir)
             / _filename_component(dataset)
             / "training_progress"
-            / f"agreement.{plot_format}"
+            / f"concordance.{plot_format}"
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=180)
@@ -711,7 +709,7 @@ def _group_progress_rows(
     """
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        if row["metric"] == "per_reward_mean_reward" or row["metric"] in _AGREEMENT_METRIC_NAMES:
+        if row["metric"] == "per_reward_mean_reward" or row["metric"] in _CONCORDANCE_METRIC_NAMES:
             grouped[str(row.get("dataset", "unknown_dataset"))].append(row)
 
     result = []
@@ -835,7 +833,7 @@ def _lock_percent_axis(axis: Any, label: str) -> None:
 def _autoscale_rate_axis(axis: Any, label: str) -> None:
     """Let a sample-rate axis follow its own band instead of a fixed 0-100%.
 
-    Agreement rates occupy a narrow band — roughly a fifth of the axis in these
+    Concordance rates occupy a narrow band — roughly a fifth of the axis in these
     runs — so pinning them to 0-100% flattens exactly the differences the figure
     exists to show. Their bounds are arbitrary rather than anchored, which is why
     the rate axis is the one that gets to float while progress stays fixed.

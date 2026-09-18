@@ -144,7 +144,7 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
   sample. It is a derived quantity — exactly `K - sum_k(per_reward_disagreement[k])`
   — and carries no information beyond the per-reward disagreement rates; it is
   reported for readability only, and plotted as one bounded scalar per
-  combination against a dashed `all K rewards agree` ceiling.
+  combination against a dashed `all K rewards concordant` ceiling.
 - `fully_concordant_sample_rate` is the prompt-group fraction of samples that
   agree with the weighted scalar on every active reward, i.e. the `c = K` bin of
   the agreement-count distribution. It is named separately because `K` varies
@@ -165,6 +165,16 @@ of samples from different prompts. The `metrics.csv` output is tidy/long-form:
   it. Unlike every other metric here it is not comparable across rewards on
   different scales; it exists so the progress figure has an auditable source.
 
+One naming split runs through this output on purpose: figure titles, axis labels,
+and legends say *concordant*, while the `metrics.csv` columns keep the
+`agreement_count` vocabulary they were introduced with. Display wording and the
+emitted schema are allowed to differ here, because renaming an emitted column
+would invalidate every existing `plot_data.json` and every downstream reader of
+the CSV for a change that is purely cosmetic. The figure filenames follow the
+same rule: files named after a metric column (`agreement_count`,
+`agreement_count_expectation`) keep that name, while `concordance` is named for
+its content.
+
 The output directory also contains `metadata.json`, followed by one directory
 per dataset:
 
@@ -179,7 +189,7 @@ per dataset:
   agreement_count_expectation.<plot_format>
   training_progress/
     <run_label>.<plot_format>
-    agreement.<plot_format>
+    concordance.<plot_format>
 ```
 
 The dataset directory is recovered from the saved run context source (for
@@ -198,7 +208,7 @@ filename and title because it is fixed by the dataset directory. The diagonal
 is omitted because covariance after per-group standardization is one by
 definition.
 `training_progress/` holds two figures per dataset, both on a single 0-100% axis,
-because full agreement is a property of the whole reward set (`K`) rather than of
+because full concordance is a property of the whole reward set (`K`) rather than of
 one reward.
 
 - `<run_label>` is written once per run and carries two axes. The left axis holds
@@ -210,17 +220,17 @@ one reward.
   many rewards are active. Read that curve for shape, never for level: a single
   outlier step sets a reward's 100% mark, and a reward that never moves has no
   range to express progress against, so it contributes a flat 0%, following the
-  zero-variance convention above. The right axis holds the two agreement rates,
+  zero-variance convention above. The right axis holds the two concordance rates,
   which are already shares of samples and are plotted at their own value.
-- `agreement` drops the reward curve and overlays every configured run, so the
-  agreement rates can be read across runs without the reward curves competing
+- `concordance` drops the reward curve and overlays every configured run, so the
+  concordance rates can be read across runs without the reward curves competing
   for the same visual channels. Run identity is carried by dash pattern and
-  marker together; agreement direction keeps the same colour it has in the
+  marker together; concordance direction keeps the same colour it has in the
   per-run figure, so the two figures stay mutually readable.
 
 Two y-scales in the per-run figure is a deliberate exception to keeping one scale
 per figure. The progress curve spans the full 0-100% by construction, while the
-agreement rates occupy roughly a fifth of that range, so on a shared axis the
+concordance rates occupy roughly a fifth of that range, so on a shared axis the
 rates flatten into a band and the differences the figure exists to show
 disappear. The split is kept honest three ways: every axis label and legend entry
 marks its side as `(left)` or `(right)`, so no curve can be read against the
@@ -229,7 +239,7 @@ offered as a comparison between the two scales; and the left axis keeps its fixe
 0-100% while only the right one floats, because 0% and 100% mean something for a
 normalized reward range and nothing in particular for a clipped sample share.
 
-For the same reason `agreement` autoscales instead of holding 0-100%: its
+For the same reason `concordance` autoscales instead of holding 0-100%: its
 magnified differences are the point. Read its tick labels for level, since a move
 that looks large against a narrowed axis may be small in absolute terms. Every
 plotted value is also in `metrics.csv`.
