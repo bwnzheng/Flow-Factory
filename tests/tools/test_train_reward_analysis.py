@@ -810,17 +810,28 @@ def test_run_progress_figure_aggregates_every_reward_into_one_curve(
     np.testing.assert_allclose(foreground, aggregate)
 
 
-def test_concordance_figure_distinguishes_runs_by_dash_and_marker(
+def test_concordance_figure_gives_runs_the_colour_and_direction_the_dash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each run gets its own dash pattern and marker, so runs never look alike."""
-    styles: list[tuple[str, str]] = []
+    """Runs own colour and marker; positive/negative own solid/dashed.
+
+    Direction has only two values while runs do not, so the strongest channel
+    goes to the runs and the dash pattern — the one that survives greyscale —
+    carries direction.
+    """
+    drawn: list[tuple[str, str, str]] = []
     handles: list[Line2D] = []
     original_plot = matplotlib.axes.Axes.plot
     original_legend = matplotlib.axes.Axes.legend
 
     def recording_plot(self, *args, **kwargs):
-        styles.append((str(kwargs.get("linestyle")), str(kwargs.get("marker"))))
+        drawn.append(
+            (
+                str(kwargs.get("color")),
+                str(kwargs.get("linestyle")),
+                str(kwargs.get("marker")),
+            )
+        )
         return original_plot(self, *args, **kwargs)
 
     def capturing_legend(self, *args, **kwargs):
@@ -832,10 +843,19 @@ def test_concordance_figure_distinguishes_runs_by_dash_and_marker(
 
     plot_concordance_rate_trajectories(_training_progress_rows(), tmp_path)
 
-    # Two runs times two agreement directions, each drawn raw + smoothed.
-    assert len(styles) == 8, f"expected 4 series drawn twice, got {len(styles)}"
-    run_styles = {style for index, style in enumerate(styles) if index % 2 == 1}
-    assert len(run_styles) == 2, f"runs must not share a dash/marker pair: {run_styles}"
+    # Drawn run -> direction -> (raw, smoothed), so the odd entries are the
+    # four foregrounded series in that order.
+    assert len(drawn) == 8, f"expected 4 series drawn twice, got {len(drawn)}"
+    positive_run_a, negative_run_a, positive_run_b, negative_run_b = drawn[1::2]
+
+    assert [series[1] for series in drawn[1::2]] == ["-", "--", "-", "--"]
+    # Direction never moves the colour or the marker off its run.
+    for positive, negative in ((positive_run_a, negative_run_a), (positive_run_b, negative_run_b)):
+        assert positive[0] == negative[0], "one colour per run"
+        assert positive[2] == negative[2], "one marker per run"
+    # And the two runs share neither.
+    assert positive_run_a[0] != positive_run_b[0], "runs must not share a colour"
+    assert positive_run_a[2] != positive_run_b[2], "runs must not share a marker"
 
     labels = [handle.get_label() for handle in handles]
     assert sorted(labels) == sorted(
@@ -846,6 +866,7 @@ def test_concordance_figure_distinguishes_runs_by_dash_and_marker(
             ("", "negative concordant rate"),
         )
     )
+    assert {str(handle.get_linestyle()) for handle in handles} == {"-", "--"}
 
 
 def _record_axis_limits(

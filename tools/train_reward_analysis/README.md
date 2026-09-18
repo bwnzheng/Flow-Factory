@@ -224,9 +224,17 @@ one reward.
   which are already shares of samples and are plotted at their own value.
 - `concordance` drops the reward curve and overlays every configured run, so the
   concordance rates can be read across runs without the reward curves competing
-  for the same visual channels. Run identity is carried by dash pattern and
-  marker together; concordance direction keeps the same colour it has in the
-  per-run figure, so the two figures stay mutually readable.
+  for the same visual channels. Telling the runs apart is what that figure is
+  for, so each run owns a colour *and* a marker, and the two directions are
+  separated by the dash pattern instead — positive solid, negative dashed.
+  Direction has only two values while runs do not, so it is the one that can
+  afford the weaker channel, and the dash pattern is also what survives greyscale
+  printing, where the run colours collapse together.
+
+Which channel carries what therefore differs between the two figures: the
+per-run figure colours the direction, and the all-run figure colours the run.
+That is deliberate, since a single run leaves the colour channel nothing else to
+distinguish, and each figure carries its own legend.
 
 Two y-scales in the per-run figure is a deliberate exception to keeping one scale
 per figure. The progress curve spans the full 0-100% by construction, while the

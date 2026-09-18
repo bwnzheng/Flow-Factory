@@ -27,22 +27,39 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-# The two signed halves of full concordance, and the aggregate reward-progress
-# curve that shares their axes. These are the opening three slots of the
-# validated reference palette, whose slot *order* is what keeps neighbouring
-# series separable under colour-vision deficiency; that opening three validates
-# on every pair, not only adjacent ones, so any of the three reads against any
-# other. Concordance direction keeps its colour in both training-progress
-# figures, so the two stay mutually readable. The slots sit below 3:1 contrast on
-# a light surface, so both figures ship a legend and every plotted value also
-# appears in metrics.csv.
+# Fixed-order categorical slots for the training-progress figures. The slot
+# *order* is what keeps neighbouring series separable under colour-vision
+# deficiency, so slots are taken in sequence and never cycled or reordered; the
+# opening three validate on every pair, not only adjacent ones, so any of the
+# three reads against any other. The slots sit below 3:1 contrast on a light
+# surface, so both figures ship a legend and every plotted value also appears in
+# metrics.csv.
+_CATEGORICAL_COLORS = (
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+)
+
+# Which channel carries what differs between the two training-progress figures,
+# because they answer different questions. The per-run figure has one run and
+# two directions, so direction takes the colour. The all-run figure exists to
+# tell runs apart, so the runs take the colour and the marker, and direction
+# falls back to the dash pattern — which is also the channel that survives
+# greyscale printing.
 _CONCORDANCE_METRICS = (
     ("positive_fully_concordant_sample_rate", "positive concordant rate"),
     ("negative_fully_concordant_sample_rate", "negative concordant rate"),
 )
 _CONCORDANCE_METRIC_NAMES = {name for name, _ in _CONCORDANCE_METRICS}
-_CONCORDANCE_COLORS = ("#2a78d6", "#eb6834")  # blue, orange
-_REWARD_PROGRESS_COLOR = "#1baf7a"  # aqua
+_CONCORDANCE_DIRECTION_COLORS = (_CATEGORICAL_COLORS[0], _CATEGORICAL_COLORS[1])
+_CONCORDANCE_DIRECTION_LINESTYLES = ("-", "--")
+_REWARD_PROGRESS_COLOR = _CATEGORICAL_COLORS[2]
+_RUN_MARKERS = ("o", "s", "^", "D", "v", "X", "P", "*")
 
 
 def plot_per_reward_conflict_score_trajectories(
@@ -607,7 +624,7 @@ def plot_run_training_progress_trajectories(
                     rate_axis,
                     fraction_rows,
                     _percent_of_sample_share,
-                    _CONCORDANCE_COLORS[offset],
+                    _CONCORDANCE_DIRECTION_COLORS[offset],
                     "-",
                     "o",
                     smoothing_window,
@@ -616,7 +633,7 @@ def plot_run_training_progress_trajectories(
                     Line2D(
                         [],
                         [],
-                        color=_CONCORDANCE_COLORS[offset],
+                        color=_CONCORDANCE_DIRECTION_COLORS[offset],
                         linewidth=1.8,
                         label=f"{legend_name} (right)",
                     )
@@ -647,26 +664,35 @@ def plot_concordance_rate_trajectories(
     """Write one all-run full-concordance figure per dataset.
 
     This figure drops the reward-progress curve so the runs can carry the axes
-    alone: with no other family competing for the same channels, run identity is
-    read from colour, dash pattern, and marker together rather than from the dash
-    pattern by itself. Concordance direction keeps the colours it has in the
-    per-run figure, so the two figures in this folder stay mutually readable.
+    alone, because telling the runs apart is what it is for. Each run therefore
+    owns a colour and a marker, and the two concordance directions are separated
+    by the dash pattern instead: positive solid, negative dashed. Direction is
+    the one axis with only two values, so it is the one that can afford the
+    weakest channel, and the dash pattern is also what survives greyscale
+    printing, where the run colours collapse together.
     """
     for dataset, _rewards, by_run in _group_progress_rows(rows):
+        if len(by_run) > len(_CATEGORICAL_COLORS):
+            raise ValueError(
+                f"Dataset {dataset!r} overlays {len(by_run)} runs but the validated palette "
+                f"holds {len(_CATEGORICAL_COLORS)}. Split the runs across figures instead of "
+                "cycling colours, which would give two runs the same hue."
+            )
         figure, axis = plt.subplots(figsize=(8, 4.5))
         handles = []
         for run_index, (label, keyed) in enumerate(by_run.items()):
-            linestyle = ("-", "--", "-.", ":")[run_index % 4]
-            marker = ("o", "s", "^", "D")[run_index % 4]
+            color = _CATEGORICAL_COLORS[run_index]
+            marker = _RUN_MARKERS[run_index]
             for offset, (metric, legend_name) in enumerate(_CONCORDANCE_METRICS):
                 fraction_rows = keyed.get((metric, ""))
                 if not fraction_rows:
                     continue
+                linestyle = _CONCORDANCE_DIRECTION_LINESTYLES[offset]
                 _plot_percent_rows(
                     axis,
                     fraction_rows,
                     _percent_of_sample_share,
-                    _CONCORDANCE_COLORS[offset],
+                    color,
                     linestyle,
                     marker,
                     smoothing_window,
@@ -675,7 +701,7 @@ def plot_concordance_rate_trajectories(
                     Line2D(
                         [],
                         [],
-                        color=_CONCORDANCE_COLORS[offset],
+                        color=color,
                         linestyle=linestyle,
                         marker=marker,
                         linewidth=1.8,
@@ -784,7 +810,7 @@ def _plot_percent_curve(
         linestyle=linestyle,
         linewidth=1.8,
         marker=marker,
-        markersize=3,
+        markersize=5,
         # Marking every step would fill the dash gaps and hide the cue that
         # carries run identity.
         markevery=max(1, len(steps) // 12),
