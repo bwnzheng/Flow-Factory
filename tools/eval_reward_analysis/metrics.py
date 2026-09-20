@@ -20,13 +20,6 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from .jsr import (
-    build_reference_thresholds,
-    compute_jsr,
-    paired_prompt_bootstrap,
-    reference_quantile,
-)
-
 # Metric keys in emission order; agreement counts appear only when weights are given.
 METRIC_KEYS = (
     "mean",
