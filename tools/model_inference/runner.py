@@ -20,6 +20,8 @@ import json
 import os
 import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -44,6 +46,8 @@ ManifestRow = Dict[str, Union[int, str]]
 
 _CHECKPOINT_PATTERN = re.compile(r"checkpoint-(\d+)")
 _PIPELINE_LOAD_LOCK = threading.Lock()
+_IMAGE_VERIFY_THREAD_THRESHOLD = 32
+_IMAGE_VERIFY_MAX_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -323,18 +327,49 @@ def _expected_outputs(
     base_seed: int,
 ) -> Tuple[List[str], List[Tuple[int, int, int]]]:
     """Return expected relative paths and missing generation slots."""
-    paths: List[str] = []
-    missing: List[Tuple[int, int, int]] = []
+    tasks: List[Tuple[str, str, int, int, int]] = []
     sample_index = 0
     for prompt_index in range(len(prompts)):
         for sample_index_within_prompt in range(num_samples):
             relative_path = f"checkpoint_{step}/p{prompt_index}_s{sample_index_within_prompt}.png"
-            paths.append(relative_path)
-            output_path = os.path.join(output_dir, relative_path)
-            if not _is_readable_image(output_path):
-                missing.append((prompt_index, sample_index_within_prompt, base_seed + sample_index))
+            tasks.append(
+                (
+                    output_dir,
+                    relative_path,
+                    prompt_index,
+                    sample_index_within_prompt,
+                    base_seed + sample_index,
+                )
+            )
             sample_index += 1
+    started = time.perf_counter()
+    if len(tasks) < _IMAGE_VERIFY_THREAD_THRESHOLD:
+        checked = [_check_expected_output(task) for task in tasks]
+        validation_mode = "serial"
+    else:
+        worker_count = min(_IMAGE_VERIFY_MAX_WORKERS, os.cpu_count() or 1, len(tasks))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            checked = list(executor.map(_check_expected_output, tasks))
+        validation_mode = f"threads:{worker_count}"
+    paths = [relative_path for relative_path, _ in checked]
+    missing = [missing_slot for _, missing_slot in checked if missing_slot is not None]
+    print(
+        f"[Image cache] total={len(paths)} valid={len(paths) - len(missing)} "
+        f"missing={len(missing)} validation={validation_mode} "
+        f"elapsed={time.perf_counter() - started:.2f}s",
+        flush=True,
+    )
     return paths, missing
+
+
+def _check_expected_output(
+    task: Tuple[str, str, int, int, int],
+) -> Tuple[str, Optional[Tuple[int, int, int]]]:
+    """Check one expected image and return its missing generation slot if invalid."""
+    output_dir, relative_path, prompt_index, sample_index, seed = task
+    if _is_readable_image(os.path.join(output_dir, relative_path)):
+        return relative_path, None
+    return relative_path, (prompt_index, sample_index, seed)
 
 
 def _is_readable_image(path: str) -> bool:
@@ -431,11 +466,21 @@ class EvaluationRunner:
     def pipeline(self) -> DiffusionPipeline:
         """Return the lazily loaded base pipeline."""
         if self._pipeline is None:
+            started = time.perf_counter()
+            print(
+                f"[Inference model] loading base pipeline model={self.base_model!r} "
+                f"device={self.device} dtype={self.dtype_str}",
+                flush=True,
+            )
             self._pipeline = load_base_pipeline(
                 self.base_model,
                 self.dtype_str,
                 self.device,
                 self.model_type,
+            )
+            print(
+                f"[Inference model] loaded base pipeline elapsed={time.perf_counter() - started:.2f}s",
+                flush=True,
             )
         return self._pipeline
 

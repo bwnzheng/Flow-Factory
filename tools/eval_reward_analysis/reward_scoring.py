@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -73,6 +74,11 @@ def score_reward(
     """
     cached = _load_cached_scores(output_path)
     missing = [row for row in manifest_rows if _sample_key(row) not in cached]
+    print(
+        f"[Reward cache] reward={reward_config.get('name', reward_config.get('reward_model'))!r} "
+        f"total={len(manifest_rows)} cached={len(cached)} missing={len(missing)}",
+        flush=True,
+    )
     if missing:
         chunks = _partition(missing, num_processes)
         results: Dict[str, float] = {}
@@ -142,6 +148,12 @@ def _score_chunk(
         }
     )
     model_class = get_reward_model_class(str(config.reward_model))
+    started = time.perf_counter()
+    print(
+        f"[Reward model] loading name={config.name!r} model={config.reward_model!r} "
+        f"device={device} missing={len(rows)}",
+        flush=True,
+    )
     model = model_class(
         config=config,
         accelerator=_AcceleratorView(device=device_object, local_process_index=device_index),
@@ -176,6 +188,10 @@ def _score_chunk(
             torch.cuda.empty_cache()
         elif device_object.type == "npu":
             torch.npu.empty_cache()
+        print(
+            f"[Reward model] released name={config.name!r} elapsed={time.perf_counter() - started:.2f}s",
+            flush=True,
+        )
     return results
 
 

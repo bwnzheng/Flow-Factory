@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Union
 
 import numpy as np
 import yaml
@@ -49,7 +50,6 @@ from tools.eval_reward_analysis.plots import (
     build_covariance_figure,
     build_jsr_figure,
 )
-from tools.eval_reward_analysis.reward_scoring import score_reward
 from tools.figures import (
     FIGURE_INDEX_NAME,
     FIGURE_MODES,
@@ -59,14 +59,26 @@ from tools.figures import (
     write_figure_data,
     write_figure_index,
 )
-from tools.model_inference import (
-    EvaluationRunner,
-    ParallelEvaluationRunner,
-    resolve_device,
-    run_evaluation_set,
-)
 from tools.train_reward_analysis.reward_logs import load_saved_reward_weight_context
 from tools.utils import PromptRecord, load_prompt_records
+
+if TYPE_CHECKING:
+    from tools.model_inference import EvaluationRunner, ParallelEvaluationRunner
+
+
+# Keep patch points available for tests and callers without importing the model
+# inference stack during CLI startup. The concrete classes are filled on first
+# generation request.
+EvaluationRunner: Any = None
+ParallelEvaluationRunner: Any = None
+run_evaluation_set: Any = None
+
+
+def score_reward(*args: Any, **kwargs: Any) -> Dict[str, float]:
+    """Load the reward scorer only when a reward cache has a missing sample."""
+    from tools.eval_reward_analysis.reward_scoring import score_reward as _score_reward
+
+    return _score_reward(*args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -292,7 +304,14 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
         return {"schema_version": 1, "source": "cached_reward_records", "jsr": result}
     output_root = Path(config.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
+    from tools.model_inference import resolve_device
+
     resolved_device = resolve_device(config.model.device)
+    print(
+        f"[Evaluation reward analysis] start runs={len(config.runs)} sources={len(config.sources)} "
+        f"device={resolved_device} processes={config.model.num_processes}",
+        flush=True,
+    )
     experiment_summaries: List[Dict[str, Any]] = []
     for run in config.runs:
         if run.base_model_only:
@@ -304,6 +323,12 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                 raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint}")
             step = _checkpoint_step(checkpoint)
         for source in config.sources:
+            started = time.perf_counter()
+            print(
+                f"[Evaluation reward analysis] run={run.name!r} source={source.name!r} "
+                f"step={step} cache_dir={output_root / run.name / source.name}",
+                flush=True,
+            )
             prompt_records = load_prompt_records(
                 source.prompts_file, source.prompt_key, source.max_prompts
             )
@@ -344,6 +369,11 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                 write_covariance=(config.covariance or {"enabled": True}).get("enabled", True),
             )
             experiment_summaries.append(summary)
+            print(
+                f"[Evaluation reward analysis] finished run={run.name!r} source={source.name!r} "
+                f"elapsed={time.perf_counter() - started:.2f}s",
+                flush=True,
+            )
     if config.jsr is not None:
         _write_run_jsr_results(config, experiment_summaries)
     metadata = {
@@ -363,6 +393,20 @@ def _generate_images(
     prompt_records: List[PromptRecord],
     image_root: Path,
 ) -> List[Dict[str, Any]]:
+    global EvaluationRunner, ParallelEvaluationRunner, run_evaluation_set
+    if EvaluationRunner is None:
+        from tools.model_inference import EvaluationRunner as _EvaluationRunner
+
+        EvaluationRunner = _EvaluationRunner
+    if ParallelEvaluationRunner is None:
+        from tools.model_inference import ParallelEvaluationRunner as _ParallelEvaluationRunner
+
+        ParallelEvaluationRunner = _ParallelEvaluationRunner
+    if run_evaluation_set is None:
+        from tools.model_inference import run_evaluation_set as _run_evaluation_set
+
+        run_evaluation_set = _run_evaluation_set
+
     prompts = [record.prompt for record in prompt_records]
     runner: EvaluationRunner | ParallelEvaluationRunner
     if config.model.num_processes == 1:
