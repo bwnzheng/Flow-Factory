@@ -57,17 +57,26 @@ sources:
   #       reward_model: "GenEval"  # Use "geneval_ascend" on NPU.
 
 runs:
-  # For a pure base-model covariance evaluation, use base_model_only: true
-  # instead of checkpoint.
+  # For a base-model evaluation, use base_model_only: true instead of
+  # checkpoint. Only the agreement counts need scalarization weights, so a base
+  # model borrows them from the checkpoint runs configured alongside it, here
+  # through their logs/media.jsonl run_context -- the same source the
+  # training-side analysis reads. Covariance and JSR never need any.
   - name: "example_run"
     label: "example"
     checkpoint: "saves/example_run/checkpoints/checkpoint-60"
-    # Scalarization weights for the agreement-count statistics. Omit to inherit
-    # the weights saved in this run's logs/media.jsonl run_context, which is the
-    # same source the training-side analysis reads. Set them explicitly for
-    # base_model_only runs (no training log exists), and keep them identical to
-    # the runs being compared.
+    # Optional override, resolved in this order: this field, then the run's own
+    # saved run context, then, for a base_model_only run, the run contexts of
+    # the configured checkpoint runs, which must agree. A single override covers
+    # one source's reward list, so name every reward of every source it applies
+    # to or leave it out and let the run contexts supply per-source weights.
     # reward_weights: {pick_score: 0.2, clip_score: 0.2, ocr_reward: 1.0}
+
+# Agreeing-count statistics: the only ones that compare each reward against the
+# weighted scalar, and the only ones that resolve reward weights. Turn them off
+# to evaluate a base model without any training log or weight override.
+agreement_count:
+  enabled: true
 
 output:
   dir: "analysis_output/eval_reward_analysis"

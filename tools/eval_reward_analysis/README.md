@@ -39,9 +39,9 @@ summary.json
 ```
 
 `plots/agreement_count.<plot_format>` additionally shows that run's
-agreeing-count distribution: the fraction of its fresh samples whose count of
-rewards pointing the same way as the weighted scalar equals each value from 1 to
-``n_rewards``. The count is computed exactly as the training-side
+agreeing-count distribution, unless `agreement_count.enabled: false`: the
+fraction of its fresh samples whose count of rewards pointing the same way as
+the weighted scalar equals each value from 1 to ``n_rewards``. The count is computed exactly as the training-side
 reward-concordance tool computes it, so fresh-sample numbers here and
 training-batch numbers there share one definition. Figures stay inside each
 run's own directory; compare runs by reading their `summary.json`
@@ -62,15 +62,23 @@ standardized covariance matrix; raw covariance remains available in the JSONL
 artifacts. Set `output.plot_format` to `png` (default) or `pdf` to choose the
 output format.
 
-Covariance, correlation, and negative-pair metrics use no scalarization weights.
-The agreement-count statistics do, because they compare each reward against the
-weighted scalar: weights are inherited from the run's own
-`logs/media.jsonl` run_context (the same source the training-side analysis
-reads), matched by source name and required to cover exactly that source's
-rewards. Set `runs[].reward_weights` to override, which is also required for
-`base_model_only` runs since they have no training log; a base-model run must
-use the same weights as the runs it is compared against. Every `summary.json`
-records `reward_weights` and `reward_weight_source` for auditing.
+Covariance, correlation, negative-pair, and JSR metrics use no scalarization
+weights. Only the agreement-count statistics do, because they compare each
+reward against the weighted scalar, which is why `plots/agreement_count.*` and
+the three agreeing-count keys in the JSONL artifacts are the only outputs
+missing when `agreement_count.enabled: false` is set.
+
+When the agreement counts do run, weights resolve per run and per source in this
+order: an explicit `runs[].reward_weights`, which must cover exactly that
+source's rewards; the run's own `logs/media.jsonl` run_context (the same source
+the training-side analysis reads), matched by source name; and, for a
+`base_model_only` run, the run contexts of the configured checkpoint runs, which
+must agree with each other. A base-model run has no training log of its own, so
+inheriting the weights of the runs it is compared against is what keeps its
+counts on the same axis; because the run context stores weights per source, this
+works for a source whose reward list differs from its siblings'. Every
+`summary.json` records `reward_weights` and `reward_weight_source` for auditing,
+and records `null` with a `disabled` source when the counts are off.
 
 Because fresh rollouts are not shaped by the training-time sample selector, the
 agreement-count numbers here are the ones that show what fine-tuning moved; the
@@ -98,8 +106,15 @@ result = analyze_cached_results(
 ```
 
 For normal use, prefer the run-based configuration in
-`jsr_cached.yaml`: list the shared reference and comparison names in the
+`jsr_runs.yaml`: list the shared reference and comparison names in the
 `jsr` section, and define their checkpoints in the existing `runs` section.
+Note that this is a separate entry from the cached-record workflow above, and
+the two take different `jsr` sections: a `jsr.reference` path plus a `jsr.models`
+mapping feeds existing JSONL records and needs no `runs`, no generation, and no
+reward weights, while `jsr.reference_run` plus `jsr.comparison_runs` generates
+fresh rollouts from the configured `runs` and resolves weights for the
+agreeing counts. The `--cached-reference`/`--cached-model` CLI flags are the same
+cached-record path.
 The tool stores each run under `output.dir/<run>/<source>/`; if its manifest,
 reward caches, or `samples.jsonl` are absent/incomplete, generation and scoring
 resume automatically. Set `covariance.enabled: false` to skip covariance

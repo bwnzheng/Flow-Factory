@@ -36,6 +36,7 @@ from tools.eval_reward_analysis.analyze import (
     _write_analysis_artifacts,
     load_config,
     load_prompt_records,
+    run_analysis,
 )
 from tools.eval_reward_analysis.plots import plot_agreement_count_distribution
 from tools.eval_reward_analysis.reward_scoring import (
@@ -384,6 +385,154 @@ def test_artifacts_preserve_samples_and_prompt_local_matrices(tmp_path: Path) ->
     assert metric_rows[0]["mean_agreement_count"] == pytest.approx(summary["mean_agreement_count"])
 
 
+def test_artifacts_skip_agreement_statistics_without_weights(tmp_path: Path) -> None:
+    # Covariance geometry needs no scalarization weights, so a run that cannot
+    # resolve them still gets its covariance artifacts, just no agreeing counts.
+    config = AnalysisConfig(
+        model=ModelConfig("model", "bfloat16", "cpu", 1),
+        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
+        sources=[],
+        runs=[],
+        output_dir=str(tmp_path),
+    )
+    run = RunConfig("base", "Base", None, base_model_only=True)
+    source = SourceConfig("source", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+    prompts = [PromptRecord("prompt zero", "{}")]
+    manifest = []
+    values = {"a": {}, "b": {}}
+    for sample_index in range(2):
+        key = f"p0_s{sample_index}"
+        manifest.append(
+            {
+                "prompt_index": 0,
+                "sample_index": sample_index,
+                "seed": 42 + sample_index,
+                "prompt": prompts[0].prompt,
+                "image_path": f"checkpoint_0/{key}.png",
+            }
+        )
+        values["a"][key] = float(sample_index)
+        values["b"][key] = float(sample_index * 2)
+
+    summary = _write_analysis_artifacts(
+        config,
+        run,
+        source,
+        0,
+        prompts,
+        manifest,
+        values,
+        tmp_path,
+        None,
+        "disabled",
+    )
+
+    metric_row = json.loads((tmp_path / "prompt_metrics.jsonl").read_text().splitlines()[0])
+    assert "mean_agreement_count" not in metric_row
+    assert "agreement_count_distribution" not in metric_row
+    assert "covariance" in metric_row
+    assert "mean_agreement_count" not in summary
+    assert summary["reward_weights"] is None
+    assert summary["reward_weight_source"] == "disabled"
+    assert summary["agreement_count_plot"] is None
+    assert not (tmp_path / "plots" / "agreement_count.png").exists()
+    assert (tmp_path / summary["covariance_plot"]).is_file()
+
+
+def test_run_analysis_needs_no_weights_for_a_base_model_without_agreement_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: a base-model run used to demand an explicit reward_weights
+    # override even when the configured analysis never consumed one.
+    prompts_path = tmp_path / "prompts.txt"
+    prompts_path.write_text("prompt zero\nprompt one\n", encoding="utf-8")
+    config_path = tmp_path / "analysis.yaml"
+    config_path.write_text(
+        f"""
+model: {{base_model: model, device: cpu}}
+evaluation: {{num_samples_per_prompt: 2}}
+sources:
+  - name: test
+    prompts_file: {prompts_path}
+    rewards:
+      - {{name: a, reward_model: A}}
+      - {{name: b, reward_model: B}}
+runs:
+  - {{name: base, label: Base, base_model_only: true}}
+agreement_count: {{enabled: false}}
+output: {{dir: {tmp_path / "out"}}}
+""",
+        encoding="utf-8",
+    )
+
+    def fake_generate_images(config, run, step, source, prompt_records, image_root):
+        image_root.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "prompt_index": prompt_index,
+                "sample_index": sample_index,
+                "seed": 42 + prompt_index * 2 + sample_index,
+                "prompt": record.prompt,
+                "image_path": f"checkpoint_{step}/p{prompt_index}_s{sample_index}.png",
+            }
+            for prompt_index, record in enumerate(prompt_records)
+            for sample_index in range(2)
+        ]
+        (image_root / "manifest.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+        return rows
+
+    def fake_score_reward(**kwargs):
+        return {
+            f"p{row['prompt_index']}_s{row['sample_index']}": float(
+                row["prompt_index"] + row["sample_index"]
+            )
+            for row in kwargs["manifest_rows"]
+        }
+
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze._generate_images", fake_generate_images)
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze.score_reward", fake_score_reward)
+
+    summary = run_analysis(load_config(config_path))["experiments"][0]
+
+    assert summary["reward_weights"] is None
+    assert summary["reward_weight_source"] == "disabled"
+    assert summary["agreement_count_plot"] is None
+    assert "mean_agreement_count" not in summary
+    assert "covariance" in summary
+
+
+def test_load_config_reads_the_agreement_count_toggle(tmp_path: Path) -> None:
+    config_path = tmp_path / "analysis.yaml"
+    template = """
+model: {{base_model: model}}
+evaluation: {{num_samples_per_prompt: 2}}
+sources:
+  - name: test
+    prompts_file: prompts.txt
+    rewards:
+      - {{name: a, reward_model: A}}
+      - {{name: b, reward_model: B}}
+runs:
+  - {{name: run, base_model_only: true}}
+output: {{dir: output}}
+{extra}"""
+    config_path.write_text(template.format(extra=""), encoding="utf-8")
+    assert load_config(config_path).agreement_count == {"enabled": True}
+
+    config_path.write_text(
+        template.format(extra="agreement_count: {enabled: false}\n"), encoding="utf-8"
+    )
+    assert load_config(config_path).agreement_count == {"enabled": False}
+
+    config_path.write_text(
+        template.format(extra="agreement_count: {enabled: 'yes'}\n"), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be a boolean"):
+        load_config(config_path)
+
+
 def _weights_context_payload(weights_by_source: dict[str, dict[str, float]]) -> dict:
     """Build a run_context whose reward entries carry one weight per source."""
     reward_entries = {}
@@ -400,8 +549,10 @@ def _weights_context_payload(weights_by_source: dict[str, dict[str, float]]) -> 
     return {"record_type": "run_context", "configuration": {"reward": reward_entries}}
 
 
-def _checkpoint_fixture(tmp_path: Path, weights_by_source: dict[str, dict[str, float]]) -> Path:
-    run_dir = tmp_path / "saves" / "run"
+def _checkpoint_fixture(
+    tmp_path: Path, weights_by_source: dict[str, dict[str, float]], name: str = "run"
+) -> Path:
+    run_dir = tmp_path / "saves" / name
     checkpoint = run_dir / "checkpoints" / "checkpoint-10"
     checkpoint.mkdir(parents=True)
     (run_dir / "logs").mkdir(parents=True)
@@ -411,12 +562,22 @@ def _checkpoint_fixture(tmp_path: Path, weights_by_source: dict[str, dict[str, f
     return checkpoint
 
 
+def _analysis_config(runs: list[RunConfig]) -> AnalysisConfig:
+    return AnalysisConfig(
+        model=ModelConfig("model", "bfloat16", "cpu", 1),
+        evaluation=EvaluationConfig(2, 1, 2, 42, {}),
+        sources=[],
+        runs=runs,
+        output_dir="output",
+    )
+
+
 def test_resolve_reward_weights_reads_the_training_run_context(tmp_path: Path) -> None:
     checkpoint = _checkpoint_fixture(tmp_path, {"ocr": {"a": 0.2, "b": 1.0}})
     run = RunConfig("run", "Run", str(checkpoint))
     source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
 
-    weights, origin = _resolve_reward_weights(run, source)
+    weights, origin = _resolve_reward_weights(_analysis_config([run]), run, source)
 
     assert weights == {"a": 0.2, "b": 1.0}
     assert origin == "saved_run_context:ocr"
@@ -427,7 +588,7 @@ def test_resolve_reward_weights_prefers_explicit_run_weights(tmp_path: Path) -> 
     run = RunConfig("run", "Run", str(checkpoint), reward_weights={"a": 1.0, "b": 1.0})
     source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
 
-    weights, origin = _resolve_reward_weights(run, source)
+    weights, origin = _resolve_reward_weights(_analysis_config([run]), run, source)
 
     assert weights == {"a": 1.0, "b": 1.0}
     assert origin == "run_config"
@@ -439,7 +600,7 @@ def test_resolve_reward_weights_rejects_incomplete_names(tmp_path: Path) -> None
     source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
 
     with pytest.raises(ValueError, match="must cover exactly"):
-        _resolve_reward_weights(run, source)
+        _resolve_reward_weights(_analysis_config([run]), run, source)
 
 
 def test_resolve_reward_weights_requires_weights_for_a_base_model_run(tmp_path: Path) -> None:
@@ -447,7 +608,7 @@ def test_resolve_reward_weights_requires_weights_for_a_base_model_run(tmp_path: 
     source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
 
     with pytest.raises(ValueError, match="evaluates the base model"):
-        _resolve_reward_weights(run, source)
+        _resolve_reward_weights(_analysis_config([run]), run, source)
 
 
 def test_resolve_reward_weights_requires_the_source_in_the_run_context(tmp_path: Path) -> None:
@@ -456,7 +617,42 @@ def test_resolve_reward_weights_requires_the_source_in_the_run_context(tmp_path:
     source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
 
     with pytest.raises(ValueError, match="no saved weights for source"):
-        _resolve_reward_weights(run, source)
+        _resolve_reward_weights(_analysis_config([run]), run, source)
+
+
+def test_resolve_reward_weights_inherits_for_a_base_model_run(tmp_path: Path) -> None:
+    # A base-model run borrows the weights its compared checkpoints trained with,
+    # so its agreeing counts stay on the same axis without a hand-copied override.
+    weights = {"ocr": {"a": 0.2, "b": 1.0}}
+    first = RunConfig("first", "First", str(_checkpoint_fixture(tmp_path, weights, name="first")))
+    second = RunConfig(
+        "second", "Second", str(_checkpoint_fixture(tmp_path, weights, name="second"))
+    )
+    base = RunConfig("base", "Base", None, base_model_only=True)
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    resolved, origin = _resolve_reward_weights(
+        _analysis_config([base, first, second]), base, source
+    )
+
+    assert resolved == {"a": 0.2, "b": 1.0}
+    assert origin == "inherited_run_context:first,second"
+
+
+def test_resolve_reward_weights_rejects_disagreeing_comparison_runs(tmp_path: Path) -> None:
+    first = RunConfig(
+        "first", "First", str(_checkpoint_fixture(tmp_path, {"ocr": {"a": 0.2, "b": 1.0}}, "first"))
+    )
+    second = RunConfig(
+        "second",
+        "Second",
+        str(_checkpoint_fixture(tmp_path, {"ocr": {"a": 0.5, "b": 1.0}}, "second")),
+    )
+    base = RunConfig("base", "Base", None, base_model_only=True)
+    source = SourceConfig("ocr", "prompts.txt", "prompt", 0, [{"name": "a"}, {"name": "b"}])
+
+    with pytest.raises(ValueError, match="disagree on the scalarization weights"):
+        _resolve_reward_weights(_analysis_config([base, first, second]), base, source)
 
 
 def test_parse_run_reads_reward_weights(tmp_path: Path) -> None:

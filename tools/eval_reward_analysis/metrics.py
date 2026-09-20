@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 
@@ -27,29 +27,44 @@ from .jsr import (
     reference_quantile,
 )
 
+# Metric keys in emission order; agreement counts appear only when weights are given.
+METRIC_KEYS = (
+    "mean",
+    "covariance",
+    "standardized_covariance",
+    "correlation",
+    "negative_pairwise_correlation_ratio",
+    "mean_negative_pairwise_correlation",
+    "agreement_count_distribution",
+    "mean_agreement_count",
+    "fully_concordant_sample_rate",
+)
+
 
 def compute_group_metrics(
-    rewards: np.ndarray, reward_weights: np.ndarray
+    rewards: np.ndarray, reward_weights: Optional[np.ndarray] = None
 ) -> Dict[str, Union[np.ndarray, float]]:
-    """Compute covariance geometry and agreement counts for one prompt's rollouts.
+    """Compute covariance geometry and, when weights are given, agreement counts.
 
     Args:
         rewards: Finite matrix shaped ``(samples, rewards)``.
-        reward_weights: Positive scalarization weights shaped ``(rewards,)``. The
-            agreement count compares every reward against the weighted scalar, so
-            the weights must be the ones the compared checkpoints were trained
-            with, otherwise the counts are not the same quantity.
+        reward_weights: Positive scalarization weights shaped ``(rewards,)``, or
+            ``None`` to skip the agreement counts, which are the only statistics
+            that need them. The agreement count compares every reward against the
+            weighted scalar, so the weights must be the ones the compared
+            checkpoints were trained with, otherwise the counts are not the same
+            quantity.
 
     Returns:
-        Reward means, covariance, correlation, negative-correlation metrics, and
-        the prompt-local agreement-count distribution over ``0..n_rewards``.
+        Reward means, covariance, correlation, and negative-correlation metrics,
+        plus the prompt-local agreement-count distribution over ``0..n_rewards``
+        when ``reward_weights`` is given.
     """
     rewards = np.asarray(rewards, dtype=np.float64)
     if rewards.ndim != 2 or rewards.shape[0] < 2 or rewards.shape[1] < 2:
         raise ValueError(f"rewards must be (samples >= 2, rewards >= 2), got {rewards.shape}.")
     if not np.isfinite(rewards).all():
         raise ValueError("Rewards must be finite.")
-    weights = _validate_reward_weights(reward_weights, rewards.shape[1])
     covariance = np.cov(rewards, rowvar=False, ddof=1)
     scale = np.sqrt(np.outer(np.diag(covariance), np.diag(covariance)))
     correlation = np.divide(covariance, scale, out=np.eye(rewards.shape[1]), where=scale > 0)
@@ -57,6 +72,19 @@ def compute_group_metrics(
     # Keep the existing finite convention (diag=1, zero-variance cross terms=0).
     standardized_covariance = correlation.copy()
     upper = correlation[np.triu_indices(rewards.shape[1], k=1)]
+    metrics: Dict[str, Union[np.ndarray, float]] = {
+        "mean": rewards.mean(0),
+        "covariance": covariance,
+        "standardized_covariance": standardized_covariance,
+        "correlation": correlation,
+        "negative_pairwise_correlation_ratio": float((upper < 0).mean()),
+        "mean_negative_pairwise_correlation": (
+            float(upper[upper < 0].mean()) if (upper < 0).any() else 0.0
+        ),
+    }
+    if reward_weights is None:
+        return metrics
+    weights = _validate_reward_weights(reward_weights, rewards.shape[1])
     # Agreement counts follow the training-side reward-concordance tool exactly:
     # center and population-standardize each reward inside the prompt, and
     # standardize the weighted scalar the same way. A sample's agreeing count is
@@ -80,19 +108,10 @@ def compute_group_metrics(
     agreement_count_distribution = (
         np.bincount(agreeing_counts, minlength=rewards.shape[1] + 1) / rewards.shape[0]
     )
-    return {
-        "mean": rewards.mean(0),
-        "covariance": covariance,
-        "standardized_covariance": standardized_covariance,
-        "correlation": correlation,
-        "negative_pairwise_correlation_ratio": float((upper < 0).mean()),
-        "mean_negative_pairwise_correlation": (
-            float(upper[upper < 0].mean()) if (upper < 0).any() else 0.0
-        ),
-        "agreement_count_distribution": agreement_count_distribution,
-        "mean_agreement_count": float(agreeing_counts.mean()),
-        "fully_concordant_sample_rate": float(agreement_count_distribution[rewards.shape[1]]),
-    }
+    metrics["agreement_count_distribution"] = agreement_count_distribution
+    metrics["mean_agreement_count"] = float(agreeing_counts.mean())
+    metrics["fully_concordant_sample_rate"] = float(agreement_count_distribution[rewards.shape[1]])
+    return metrics
 
 
 def _validate_reward_weights(reward_weights: np.ndarray, n_rewards: int) -> np.ndarray:
@@ -117,15 +136,7 @@ def aggregate_group_metrics(
     """
     if not groups:
         raise ValueError("Cannot aggregate no prompt groups.")
-    keys = (
-        "mean",
-        "covariance",
-        "standardized_covariance",
-        "correlation",
-        "negative_pairwise_correlation_ratio",
-        "mean_negative_pairwise_correlation",
-        "agreement_count_distribution",
-        "mean_agreement_count",
-        "fully_concordant_sample_rate",
-    )
+    keys = [key for key in METRIC_KEYS if key in groups[0]]
+    if any([key for key in METRIC_KEYS if key in group] != keys for group in groups):
+        raise ValueError("Prompt groups must expose the same metric keys.")
     return {key: np.mean([group[key] for group in groups], axis=0) for key in keys}

@@ -1,0 +1,57 @@
+# JSR analysis over fresh rollouts of the compared runs. "Cached" here means the
+# run outputs are reused: missing or incomplete images, reward caches, or
+# samples.jsonl are regenerated once and then served from output.cache_dir.
+#
+# This is the run-based entry, not the cached-records entry. Feeding existing
+# JSONL records straight to jsr.analyze_cached_results (or to the
+# --cached-reference/--cached-model CLI) skips generation entirely and needs no
+# run configuration at all.
+model:
+  base_model: "stabilityai/stable-diffusion-3.5-medium"
+
+evaluation:
+  num_samples_per_prompt: 16
+  generation_batch_size: 1
+  reward_batch_size: 16
+  seed: 42
+  num_inference_steps: 40
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+
+sources:
+  - name: "pickscore"
+    prompts_file: "dataset/pickscore/test.txt"
+    max_prompts: 100
+    rewards:
+      - {name: "pick_score", reward_model: "PickScore"}
+      - {name: "clip_score", reward_model: "CLIP"}
+
+runs:
+  # The base model has no training log, so it inherits the scalarization weights
+  # of the checkpoint runs below for every statistic that needs them. No
+  # reward_weights are required as long as those runs saved a run_context.
+  - {name: "base", label: "Base", base_model_only: true}
+  - {name: "weighted_sum", label: "Weighted Sum",
+     checkpoint: "saves/sd3-5_lora_nft_20260807_202455/checkpoints/checkpoint-60"}
+  - {name: "src_reweight", label: "SRC-Reweight",
+     checkpoint: "saves/sd3-5_lora_nft_20260808_215750/checkpoints/checkpoint-60"}
+
+jsr:
+  enabled: true
+  overall: true
+  reference_run: "base"
+  comparison_runs: ["weighted_sum", "src_reweight"]
+  q_grid: [0.0, 0.5, 0.8, 0.9, 0.95, 1.0]
+  bootstrap_replicates: 2000
+  bootstrap_seed: 123
+
+# Covariance and JSR never use scalarization weights; only the agreement counts
+# do. Disable them to run this comparison without resolving any weights.
+agreement_count:
+  enabled: true
+
+output:
+  cache_dir: "analysis_cache/eval_reward_analysis/jsr_runs"
+  jsr_dir: "analysis_output/eval_reward_analysis/jsr_runs"
+  plot_format: "png"

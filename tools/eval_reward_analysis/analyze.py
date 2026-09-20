@@ -106,6 +106,7 @@ class AnalysisConfig:
     plot_format: str = "png"
     jsr: Optional[Dict[str, Any]] = None
     covariance: Optional[Dict[str, Any]] = None
+    agreement_count: Optional[Dict[str, Any]] = None
     jsr_output_dir: Optional[str] = None
 
 
@@ -122,7 +123,18 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
     if not isinstance(raw, dict):
         raise ValueError("Analysis config must be a YAML mapping.")
     _reject_unknown(
-        raw, {"model", "evaluation", "sources", "runs", "output", "jsr", "covariance"}, "root"
+        raw,
+        {
+            "model",
+            "evaluation",
+            "sources",
+            "runs",
+            "output",
+            "jsr",
+            "covariance",
+            "agreement_count",
+        },
+        "root",
     )
     model = _mapping(raw, "model")
     evaluation = _mapping(raw, "evaluation")
@@ -133,6 +145,12 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
     covariance = (
         _parse_toggle(covariance_raw, "covariance")
         if covariance_raw is not None
+        else {"enabled": True}
+    )
+    agreement_count_raw = raw.get("agreement_count")
+    agreement_count = (
+        _parse_toggle(agreement_count_raw, "agreement_count")
+        if agreement_count_raw is not None
         else {"enabled": True}
     )
     _reject_unknown(output, {"dir", "cache_dir", "jsr_dir", "plot_format"}, "output")
@@ -217,6 +235,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         plot_format=_plot_format(output.get("plot_format", "png")),
         jsr=jsr,
         covariance=covariance,
+        agreement_count=agreement_count,
         jsr_output_dir=(
             _nonempty_string(output["jsr_dir"], "output.jsr_dir")
             if output.get("jsr_dir") is not None
@@ -280,7 +299,12 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
                     num_processes=config.model.num_processes,
                     batch_size=config.evaluation.reward_batch_size,
                 )
-            reward_weights, reward_weight_source = _resolve_reward_weights(run, source)
+            # Agreement counts are the only statistics that compare rewards against
+            # the weighted scalar, so nothing else forces weights to be resolved.
+            if (config.agreement_count or {"enabled": True}).get("enabled", True):
+                reward_weights, reward_weight_source = _resolve_reward_weights(config, run, source)
+            else:
+                reward_weights, reward_weight_source = None, "disabled"
             summary = _write_analysis_artifacts(
                 config,
                 run,
@@ -353,7 +377,7 @@ def _write_analysis_artifacts(
     manifest_rows: List[Dict[str, Any]],
     reward_values: Dict[str, Dict[str, float]],
     experiment_dir: Path,
-    reward_weights: Dict[str, float],
+    reward_weights: Optional[Dict[str, float]],
     reward_weight_source: str,
     write_covariance: bool = True,
 ) -> Dict[str, Any]:
@@ -390,7 +414,12 @@ def _write_analysis_artifacts(
             dtype=np.float64,
         )
         metric = compute_group_metrics(
-            matrix, np.asarray([reward_weights[name] for name in reward_names], dtype=np.float64)
+            matrix,
+            (
+                np.asarray([reward_weights[name] for name in reward_names], dtype=np.float64)
+                if reward_weights is not None
+                else None
+            ),
         )
         group_metrics.append(metric)
         prompt_metrics.append(
@@ -416,14 +445,18 @@ def _write_analysis_artifacts(
             output_path=covariance_plot_path,
             title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
         )
-    # Fresh rollouts are not shaped by the training-time sample selector, so this
-    # figure shows the agreement structure the checkpoint actually produces.
-    agreement_count_plot_path = experiment_dir / "plots" / f"agreement_count.{config.plot_format}"
-    plot_agreement_count_distribution(
-        distribution=np.asarray(aggregate["agreement_count_distribution"]),
-        output_path=agreement_count_plot_path,
-        title=f"Agreement count: {run.label} checkpoint-{step} ({source.name})",
-    )
+    agreement_count_plot_path = None
+    if reward_weights is not None:
+        # Fresh rollouts are not shaped by the training-time sample selector, so this
+        # figure shows the agreement structure the checkpoint actually produces.
+        agreement_count_plot_path = (
+            experiment_dir / "plots" / f"agreement_count.{config.plot_format}"
+        )
+        plot_agreement_count_distribution(
+            distribution=np.asarray(aggregate["agreement_count_distribution"]),
+            output_path=agreement_count_plot_path,
+            title=f"Agreement count: {run.label} checkpoint-{step} ({source.name})",
+        )
     summary = {
         "run_name": run.name,
         "run_label": run.label,
@@ -433,12 +466,20 @@ def _write_analysis_artifacts(
         "reward_names": reward_names,
         "n_prompts": len(prompt_metrics),
         "samples_per_prompt": config.evaluation.num_samples_per_prompt,
-        "reward_weights": {name: float(reward_weights[name]) for name in reward_names},
+        "reward_weights": (
+            {name: float(reward_weights[name]) for name in reward_names}
+            if reward_weights is not None
+            else None
+        ),
         "reward_weight_source": reward_weight_source,
         "covariance_plot": (
             str(covariance_plot_path.relative_to(experiment_dir)) if covariance_plot_path else None
         ),
-        "agreement_count_plot": str(agreement_count_plot_path.relative_to(experiment_dir)),
+        "agreement_count_plot": (
+            str(agreement_count_plot_path.relative_to(experiment_dir))
+            if agreement_count_plot_path
+            else None
+        ),
         **_json_metrics(aggregate),
     }
     _write_json(experiment_dir / "summary.json", summary)
@@ -718,12 +759,74 @@ def _run_context_path(checkpoint: Path) -> Optional[Path]:
     return None
 
 
-def _resolve_reward_weights(run: RunConfig, source: SourceConfig) -> tuple[Dict[str, float], str]:
+def _saved_weights_for_source(
+    run: RunConfig, source: SourceConfig, reward_names: List[str]
+) -> tuple[Optional[Dict[str, float]], str]:
+    """Read one checkpoint run's saved weights for a source, with a reason if absent."""
+    assert run.checkpoint is not None
+    context_path = _run_context_path(Path(run.checkpoint))
+    if context_path is None:
+        return None, f"no logs/media.jsonl was found above checkpoint {run.checkpoint!r}"
+    context = load_saved_reward_weight_context(context_path.parent.parent)
+    if context is None:
+        return None, f"{context_path} has no run_context record"
+    saved = context.weights_by_source.get(source.name)
+    if saved is None:
+        return None, (
+            f"{context_path} has no saved weights for source {source.name!r}; available "
+            f"sources are {sorted(context.weights_by_source)}"
+        )
+    if set(saved) != set(reward_names):
+        raise ValueError(
+            f"Saved weights for source {source.name!r} in run {run.name!r} cover "
+            f"{sorted(saved)}, but the source config lists {sorted(reward_names)}."
+        )
+    return {name: float(saved[name]) for name in reward_names}, ""
+
+
+def _inherit_reward_weights(
+    config: AnalysisConfig, run: RunConfig, source: SourceConfig, reward_names: List[str]
+) -> tuple[Dict[str, float], str]:
+    """Take a base-model run's weights from the checkpoint runs it is compared with.
+
+    The base model has no training log, so its agreeing counts can only sit on the
+    same axis as the compared runs by borrowing their weights. Inheriting them
+    beats making the config repeat the numbers by hand, which drifts silently.
+    """
+    inherited: Dict[str, Dict[str, float]] = {}
+    for sibling in config.runs:
+        if sibling.checkpoint is None:
+            continue
+        weights, _ = _saved_weights_for_source(sibling, source, reward_names)
+        if weights is not None:
+            inherited[sibling.name] = weights
+    if not inherited:
+        raise ValueError(
+            f"Run {run.name!r} evaluates the base model and has no training log to inherit "
+            f"scalarization weights from, and none of the configured checkpoint runs saved "
+            f"weights for source {source.name!r} either; set runs[{run.name!r}].reward_weights "
+            f"explicitly, or disable the agreement counts with agreement_count.enabled: false."
+        )
+    reference_name, reference = next(iter(inherited.items()))
+    for name, weights in inherited.items():
+        if weights != reference:
+            raise ValueError(
+                f"Configured runs disagree on the scalarization weights for source "
+                f"{source.name!r}: {reference_name!r} uses {reference}, {name!r} uses "
+                f"{weights}; set runs[{run.name!r}].reward_weights explicitly."
+            )
+    return reference, f"inherited_run_context:{','.join(sorted(inherited))}"
+
+
+def _resolve_reward_weights(
+    config: AnalysisConfig, run: RunConfig, source: SourceConfig
+) -> tuple[Dict[str, float], str]:
     """Resolve the scalarization weights used to count agreeing rewards.
 
     The counts are only comparable to the training-side analysis when they use
-    the weights the checkpoints were trained with, so the run's own saved run
-    context is the default source and an explicit override must be complete.
+    the weights the checkpoints were trained with, so an explicit override must be
+    complete, a checkpoint run reads its own saved run context, and a base-model
+    run borrows the weights of the checkpoint runs it is compared against.
     """
     reward_names = [str(reward["name"]) for reward in source.rewards]
     if run.reward_weights is not None:
@@ -737,35 +840,15 @@ def _resolve_reward_weights(run: RunConfig, source: SourceConfig) -> tuple[Dict[
         return {name: run.reward_weights[name] for name in reward_names}, "run_config"
 
     if run.checkpoint is None:
-        raise ValueError(
-            f"Run {run.name!r} evaluates the base model and has no training log to inherit "
-            f"scalarization weights from; set runs[{run.name!r}].reward_weights for source "
-            f"{source.name!r} to the weights its comparison runs were trained with."
-        )
-    context_path = _run_context_path(Path(run.checkpoint))
-    if context_path is None:
-        raise ValueError(
-            f"No logs/media.jsonl found above checkpoint {run.checkpoint!r} for run "
-            f"{run.name!r}; set runs[{run.name!r}].reward_weights explicitly."
-        )
-    context = load_saved_reward_weight_context(context_path.parent.parent)
-    if context is None:
-        raise ValueError(
-            f"{context_path} has no run_context record for run {run.name!r}; set "
-            f"runs[{run.name!r}].reward_weights explicitly."
-        )
-    saved = context.weights_by_source.get(source.name)
+        return _inherit_reward_weights(config, run, source, reward_names)
+
+    saved, reason = _saved_weights_for_source(run, source, reward_names)
     if saved is None:
         raise ValueError(
-            f"Run {run.name!r} has no saved weights for source {source.name!r}; available "
-            f"sources are {sorted(context.weights_by_source)}."
+            f"Run {run.name!r} cannot supply weights for source {source.name!r}: {reason}; "
+            f"set runs[{run.name!r}].reward_weights explicitly."
         )
-    if set(saved) != set(reward_names):
-        raise ValueError(
-            f"Saved weights for source {source.name!r} cover {sorted(saved)}, but the source "
-            f"config lists {sorted(reward_names)}."
-        )
-    return {name: float(saved[name]) for name in reward_names}, f"saved_run_context:{source.name}"
+    return saved, f"saved_run_context:{source.name}"
 
 
 def _checkpoint_step(path: Path) -> int:
@@ -780,7 +863,7 @@ def _sample_key(row: Dict[str, Any]) -> str:
 
 
 def _json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    payload = {
         "reward_mean": np.asarray(metrics["mean"]).tolist(),
         "covariance": np.asarray(metrics["covariance"]).tolist(),
         "standardized_covariance": np.asarray(metrics["standardized_covariance"]).tolist(),
@@ -789,12 +872,16 @@ def _json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
             metrics["negative_pairwise_correlation_ratio"]
         ),
         "mean_negative_pairwise_correlation": float(metrics["mean_negative_pairwise_correlation"]),
-        "agreement_count_distribution": np.asarray(
-            metrics["agreement_count_distribution"]
-        ).tolist(),
-        "mean_agreement_count": float(metrics["mean_agreement_count"]),
-        "fully_concordant_sample_rate": float(metrics["fully_concordant_sample_rate"]),
     }
+    # The agreement counts, and with them every stat that needs weights, are absent
+    # when the analysis runs without scalarization weights.
+    if "agreement_count_distribution" in metrics:
+        payload["agreement_count_distribution"] = np.asarray(
+            metrics["agreement_count_distribution"]
+        ).tolist()
+        payload["mean_agreement_count"] = float(metrics["mean_agreement_count"])
+        payload["fully_concordant_sample_rate"] = float(metrics["fully_concordant_sample_rate"])
+    return payload
 
 
 def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
