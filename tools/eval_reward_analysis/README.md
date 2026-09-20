@@ -113,6 +113,14 @@ plots. The legacy `output.dir` key remains an alias for `cache_dir`. Each JSR
 directory holds one `jsr_curves` figure with its spec and index, so reuse
 redraws those curves from the same kind of data file as the per-run figures.
 
+Where those JSR directories are depends on which JSR entry the config selects.
+The run-based entry writes one directory per source under `output.jsr_dir`, and
+an `overall` directory when `jsr.overall` is set; without `jsr_dir` that root is
+`<output.dir>/jsr`. The cached-record entry, which takes `jsr.reference` and
+`jsr.models` instead, computes a single curve from existing JSONL records and
+writes its figure directly into `output.jsr_dir`, or into `output.dir` when
+`jsr_dir` is unset. Reuse looks in exactly the place the selected entry writes.
+
 Cached JSR records contain `prompt_id` (or `prompt_index`), `image_id` (or
 `sample_index`), and a `rewards` mapping. The reference file is shared by all
 comparison models. Thresholds use a prompt-equally-weighted empirical

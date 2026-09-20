@@ -273,9 +273,9 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
     Returns:
         Top-level experiment metadata and summaries.
     """
-    if config.jsr is not None and "reference" in config.jsr:
+    if _is_cached_jsr(config):
         result = analyze_cached_results(**config.jsr)
-        output_root = Path(config.jsr_output_dir or config.output_dir)
+        output_root = _jsr_output_root(config)
         output_root.mkdir(parents=True, exist_ok=True)
         _write_figures(
             [
@@ -521,6 +521,29 @@ def _write_analysis_artifacts(
     return summary
 
 
+def _is_cached_jsr(config: AnalysisConfig) -> bool:
+    """Whether the config selects the cached-record JSR entry.
+
+    The YAML key is ``jsr.reference``, which the parser stores as
+    ``reference_path``; reading the parsed key is what tells the two entries
+    apart, since the run-based one carries ``reference_run`` instead.
+    """
+    return config.jsr is not None and "reference_path" in config.jsr
+
+
+def _jsr_output_root(config: AnalysisConfig) -> Path:
+    """Return the directory the configured JSR entry writes its figures into.
+
+    The two JSR entries land in different places, which the reader has to mirror
+    exactly: the cached-record entry writes into ``output.jsr_dir`` or the output
+    directory itself, while the run-based entry nests one directory per source
+    under ``output.jsr_dir``, defaulting to ``jsr`` inside the output directory.
+    """
+    if _is_cached_jsr(config):
+        return Path(config.jsr_output_dir or config.output_dir)
+    return Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr"))
+
+
 def _write_figures(
     outputs: Sequence[FigureOutput], plots_dir: Path, config: AnalysisConfig
 ) -> None:
@@ -543,19 +566,21 @@ def _redraw_figures(config: AnalysisConfig) -> List[str]:
     """
     directories: List[Path] = []
     output_root = Path(config.output_dir)
-    for run in config.runs:
-        for source in config.sources:
-            directories.append(output_root / run.name / source.name / "plots")
-    if config.jsr is not None:
-        jsr_root = Path(config.jsr_output_dir or (output_root / "jsr"))
-        if not jsr_root.is_dir():
-            raise FileNotFoundError(
-                f"No JSR output directory at {jsr_root}. Re-run with the regenerate figure mode "
-                "to write the figure data first."
-            )
-        if "reference" in config.jsr:
-            directories.append(jsr_root)
-        else:
+    if _is_cached_jsr(config):
+        # The cached-record entry computes one JSR figure from existing JSONL and
+        # writes no per-run figures, so it is the whole list.
+        directories.append(_jsr_output_root(config))
+    else:
+        for run in config.runs:
+            for source in config.sources:
+                directories.append(output_root / run.name / source.name / "plots")
+        if config.jsr is not None and config.jsr.get("enabled", True):
+            jsr_root = _jsr_output_root(config)
+            if not jsr_root.is_dir():
+                raise FileNotFoundError(
+                    f"No JSR output directory at {jsr_root}. Re-run with the regenerate figure "
+                    "mode to write the figure data first."
+                )
             # One directory per source, plus "overall" when it was configured; a
             # directory without an index is not a JSR panel, so it is skipped
             # rather than treated as missing output.
@@ -607,7 +632,7 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
                 if line
             ]
         all_rows[source.name] = by_name
-        out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / source.name
+        out_dir = _jsr_output_root(config) / source.name
         rewards = [str(item["name"]) for item in source.rewards]
         q_grid = section.get("q_grid", [i / 100 for i in range(101)])
         thresholds = build_reference_thresholds(by_name[reference_name], rewards, q_grid)
@@ -677,7 +702,7 @@ def _write_overall_jsr(
             }
             rows.append(copied)
         curves[name] = compute_jsr(rows, rewards, thresholds, q_grid, allow_positive_inf=True)
-    out_dir = Path(config.jsr_output_dir or (Path(config.output_dir) / "jsr")) / "overall"
+    out_dir = _jsr_output_root(config) / "overall"
     result = {
         "reference_run": reference_name,
         "q": q_grid,
@@ -1159,10 +1184,13 @@ def main() -> None:
         )
         return
     result = run_analysis(config)
-    print(
-        "[Evaluation reward analysis] "
-        f"experiments={len(result['experiments'])} output={config.output_dir}"
+    # The cached-record entry returns one JSR result rather than per-run experiments.
+    detail = (
+        f"experiments={len(result['experiments'])}"
+        if "experiments" in result
+        else f"jsr={result['jsr']['plot']}"
     )
+    print(f"[Evaluation reward analysis] {detail} output={config.output_dir}")
 
 
 if __name__ == "__main__":

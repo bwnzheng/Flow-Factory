@@ -451,10 +451,24 @@ def test_artifacts_skip_agreement_statistics_without_weights(tmp_path: Path) -> 
     assert (tmp_path / summary["covariance_plot"]).is_file()
 
 
-def _base_model_analysis_config(tmp_path: Path, figure_mode: str = "regenerate") -> Path:
-    """Write a one-run base-model config that needs no scalarization weights."""
+def _base_model_analysis_config(
+    tmp_path: Path,
+    figure_mode: str = "regenerate",
+    checkpoint_run: Path | None = None,
+    jsr: str = "",
+) -> Path:
+    """Write a config whose first run is the base model and needs no weights.
+
+    ``checkpoint_run`` adds a second run at that checkpoint, which a run-based
+    JSR section needs as its comparison.
+    """
     prompts_path = tmp_path / "prompts.txt"
     prompts_path.write_text("prompt zero\nprompt one\n", encoding="utf-8")
+    extra_run = (
+        f"  - {{name: ckpt, label: Ckpt, checkpoint: {checkpoint_run}}}\n"
+        if checkpoint_run is not None
+        else ""
+    )
     config_path = tmp_path / "analysis.yaml"
     config_path.write_text(
         f"""
@@ -468,12 +482,23 @@ sources:
       - {{name: b, reward_model: B}}
 runs:
   - {{name: base, label: Base, base_model_only: true}}
-agreement_count: {{enabled: false}}
-output: {{dir: {tmp_path / "out"}, figure_mode: {figure_mode}}}
+{extra_run}agreement_count: {{enabled: false}}
+{jsr}output: {{dir: {tmp_path / "out"}, figure_mode: {figure_mode}}}
 """,
         encoding="utf-8",
     )
     return config_path
+
+
+def _run_based_jsr_section() -> str:
+    """A run-based JSR section comparing the base model against the checkpoint run."""
+    return (
+        "jsr:\n"
+        "  enabled: true\n"
+        "  reference_run: base\n"
+        "  comparison_runs: [ckpt]\n"
+        "  q_grid: [0.0, 0.5, 0.9, 1.0]\n"
+    )
 
 
 def _install_fake_rollouts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,6 +593,124 @@ def test_reuse_redraws_every_figure_without_touching_the_analysis(
     assert redrawn == [str(plots_dir / "covariance_matrix.png")]
     assert (plots_dir / "covariance_matrix.png").stat().st_size > 0
     assert (plots_dir / "covariance_matrix.json").read_text(encoding="utf-8") == data_before
+
+
+def _write_cached_jsr_records(path: Path, offset: float) -> None:
+    """Write one comparison model's per-image reward records."""
+    rows = [
+        {
+            "prompt_id": f"p{prompt}",
+            "image_id": f"i{sample}",
+            "rewards": {"a": offset + 0.1 * sample + 0.05 * prompt, "b": offset + 0.2 * sample},
+        }
+        for prompt in range(4)
+        for sample in range(2)
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _cached_jsr_config(tmp_path: Path, figure_mode: str = "regenerate") -> Path:
+    """Write a cached-record JSR config, which needs no runs, sources, or weights."""
+    reference = tmp_path / "base.jsonl"
+    model = tmp_path / "src.jsonl"
+    _write_cached_jsr_records(reference, 0.0)
+    _write_cached_jsr_records(model, 0.3)
+    config_path = tmp_path / "jsr.yaml"
+    config_path.write_text(
+        f"""
+model: {{base_model: unused}}
+evaluation: {{num_samples_per_prompt: 2}}
+sources: []
+runs: []
+jsr:
+  reference: {reference}
+  models: {{src: {model}}}
+  rewards: [a, b]
+  q_grid: [0.0, 0.5, 0.9, 1.0]
+output: {{dir: {tmp_path / "out"}, figure_mode: {figure_mode}}}
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_cached_jsr_writes_figure_data_and_redraws_from_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cached-record entry writes its JSR figure straight into the output
+    # directory, so reuse has to look for the index exactly there.
+    config = load_config(_cached_jsr_config(tmp_path))
+    result = run_analysis(config)
+
+    assert result["jsr"]["plot"] == "jsr_curves.png"
+    output_root = Path(config.output_dir)
+    assert (output_root / "jsr_curves.png").is_file()
+    assert isinstance(read_spec(output_root / "jsr_curves.json"), FigureSpec)
+    index = json.loads((output_root / FIGURE_INDEX_NAME).read_text(encoding="utf-8"))
+    assert index["figures"] == ["jsr_curves"]
+
+    (output_root / "jsr_curves.png").unlink()
+
+    def fail(*args, **kwargs):
+        raise AssertionError("reuse must not re-analyze cached records")
+
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze.analyze_cached_results", fail)
+    redrawn = analyze._redraw_figures(load_config(_cached_jsr_config(tmp_path, "reuse")))
+
+    assert redrawn == [str(output_root / "jsr_curves.png")]
+    assert (output_root / "jsr_curves.png").stat().st_size > 0
+
+
+def test_run_based_jsr_panels_are_redrawn_from_their_own_indexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every JSR panel -- one directory per source, plus "overall" when configured
+    # -- carries the same figure data as a per-run figure, so reuse redraws each
+    # from its own index.
+    _install_fake_rollouts(monkeypatch)
+    checkpoint = _checkpoint_fixture(tmp_path, {"test": {"a": 1.0, "b": 1.0}})
+    run_analysis(
+        load_config(
+            _base_model_analysis_config(
+                tmp_path, checkpoint_run=checkpoint, jsr=_run_based_jsr_section()
+            )
+        )
+    )
+
+    jsr_root = Path(load_config(_base_model_analysis_config(tmp_path)).output_dir) / "jsr"
+    panels = sorted(path.name for path in jsr_root.iterdir() if path.is_dir())
+    assert panels == ["test"]
+    spec = read_spec(jsr_root / "test" / "jsr_curves.json")
+    assert isinstance(spec, FigureSpec)
+    assert [series.label for series in spec.series] == ["Ckpt"]
+    (jsr_root / "test" / "jsr_curves.png").unlink()
+
+    reuse = load_config(
+        _base_model_analysis_config(
+            tmp_path, "reuse", checkpoint_run=checkpoint, jsr=_run_based_jsr_section()
+        )
+    )
+    redrawn = analyze._redraw_figures(reuse)
+
+    assert str(jsr_root / "test" / "jsr_curves.png") in redrawn
+    assert (jsr_root / "test" / "jsr_curves.png").stat().st_size > 0
+
+
+def test_reuse_ignores_a_disabled_jsr_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_rollouts(monkeypatch)
+    run_analysis(load_config(_base_model_analysis_config(tmp_path)))
+
+    config = load_config(
+        _base_model_analysis_config(tmp_path, "reuse", jsr="jsr: {enabled: false}\n")
+    )
+
+    # Nothing was written under output/jsr, and reuse must not go looking for it.
+    redrawn = analyze._redraw_figures(config)
+
+    plots_dir = Path(config.output_dir) / "base" / "test" / "plots"
+    assert redrawn == [str(plots_dir / "covariance_matrix.png")]
 
 
 def test_reuse_reports_a_missing_figure_index(tmp_path: Path) -> None:
