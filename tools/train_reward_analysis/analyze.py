@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -35,19 +34,23 @@ from typing import Any, Sequence
 import numpy as np
 import yaml
 
-from tools.train_reward_analysis.figure_spec import SPEC_VERSION, read_spec
+from tools.figures import (
+    SPEC_VERSION,
+    FigureOutput,
+    figure_stems,
+    plot_worker_count,
+    read_spec,
+    render_figures,
+    spec_path,
+    write_figure_data,
+)
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
     compute_src_sample_weights,
     compute_weighted_advantage_sign_metrics,
 )
-from tools.train_reward_analysis.plots import (
-    FigureOutput,
-    build_figures,
-    render_figure,
-    write_figure_data,
-)
+from tools.train_reward_analysis.plots import build_figures
 from tools.train_reward_analysis.reward_logs import (
     RewardGroup,
     SavedRewardWeightContext,
@@ -126,8 +129,10 @@ def main() -> None:
     if config.cache_mode == "reuse":
         metadata = _read_metadata(output_dir)
         outputs = [
-            (stem, read_spec(_spec_path(output_dir, stem)))
-            for stem in _figure_stems(metadata, output_dir)
+            (stem, read_spec(spec_path(output_dir, stem)))
+            for stem in figure_stems(
+                metadata.get("figures"), output_dir, str(output_dir / "metadata.json")
+            )
         ]
         print(f"[Reward concordance] Reusing {len(outputs)} figure specs from {output_dir}")
     else:
@@ -138,7 +143,7 @@ def main() -> None:
 
     metadata["format_version"] = SPEC_VERSION
     metadata["plot_format"] = config.plot_format
-    metadata["plot_workers"] = _plot_worker_count(len(outputs))
+    metadata["plot_workers"] = plot_worker_count(len(outputs))
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -152,11 +157,6 @@ def main() -> None:
         "[Reward concordance] "
         f"runs={len(config.runs)} figures={len(outputs)} output={output_dir}"
     )
-
-
-def _spec_path(output_dir: Path, stem: str) -> Path:
-    """Return the data file that sits beside one figure's image."""
-    return output_dir / f"{stem}.json"
 
 
 def _read_metadata(output_dir: Path) -> dict[str, Any]:
@@ -185,69 +185,13 @@ def _remove_legacy_data_files(output_dir: Path) -> list[str]:
     return removed
 
 
-def _figure_stems(metadata: dict[str, Any], output_dir: Path) -> list[str]:
-    """List the figures the last regeneration wrote, refusing to guess.
-
-    Reading the index rather than globbing means a figure whose data was deleted
-    is reported instead of silently disappearing, and a leftover file from an
-    older configuration is never redrawn.
-    """
-    stems = metadata.get("figures")
-    if not stems:
-        raise ValueError(
-            f"{output_dir / 'metadata.json'} lists no figures, so there is nothing to redraw. "
-            "Re-run with output.cache_mode: regenerate."
-        )
-    if not isinstance(stems, list) or not all(isinstance(stem, str) and stem for stem in stems):
-        raise ValueError(
-            f"{output_dir / 'metadata.json'} must list figure path stems as non-empty strings. "
-            "Re-run with output.cache_mode: regenerate."
-        )
-    if len(stems) != len(set(stems)):
-        raise ValueError(
-            f"{output_dir / 'metadata.json'} lists duplicate figures. Re-run with "
-            "output.cache_mode: regenerate."
-        )
-    missing = [stem for stem in stems if not _spec_path(output_dir, stem).is_file()]
-    if missing:
-        raise FileNotFoundError(
-            f"Figure data missing for {missing}. Re-run with output.cache_mode: regenerate."
-        )
-    return [str(stem) for stem in stems]
-
-
-def _render_figure_task(task: tuple[Any, ...]) -> None:
-    """Draw one figure inside a worker process."""
-    spec, output_dir, stem, plot_format = task
-    render_figure(spec, output_dir, stem, plot_format)
-
-
-def _plot_worker_count(figure_count: int) -> int:
-    """Pick how many worker processes the figure stage should use."""
-    return max(1, min(figure_count, os.cpu_count() or 1))
-
-
 def _render_figures(
     config: AnalysisConfig,
     outputs: Sequence[FigureOutput],
     output_dir: Path,
 ) -> None:
-    """Render every figure, spreading them over worker processes.
-
-    Matplotlib is imported by this module and keeps global state, so the pool is
-    spawned rather than forked: forking a process that already loaded extension
-    modules and started threads risks deadlocking the children. Worker startup
-    costs a fresh interpreter import, which the parallel figures amortize.
-    """
-    tasks = [(spec, str(output_dir), stem, config.plot_format) for stem, spec in outputs]
-    workers = _plot_worker_count(len(tasks))
-    if workers == 1:
-        for task in tasks:
-            _render_figure_task(task)
-        return
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
-        list(executor.map(_render_figure_task, tasks))
+    """Render every figure of one analysis in this tool's configured format."""
+    render_figures(outputs, output_dir, config.plot_format)
 
 
 def run_analysis(config: AnalysisConfig) -> tuple[list[dict[str, Any]], dict[str, Any]]:

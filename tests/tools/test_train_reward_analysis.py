@@ -27,6 +27,23 @@ import numpy as np
 import pytest
 from matplotlib.lines import Line2D
 
+from tools.figures import (
+    CATEGORICAL_COLORS,
+    SPEC_VERSION,
+    FigureAxis,
+    FigureFontSizes,
+    FigureLegend,
+    FigureSeries,
+    FigureSpec,
+    LegendEntry,
+    read_spec,
+)
+from tools.figures import render as figures_render
+from tools.figures import (
+    render_figure,
+)
+from tools.figures.render import moving_average
+from tools.figures.workflow import figure_stems, write_figure_data
 from tools.train_reward_analysis import analyze, plots
 from tools.train_reward_analysis.analyze import (
     CACHE_MODES,
@@ -38,23 +55,11 @@ from tools.train_reward_analysis.analyze import (
     _render_figures,
     run_analysis,
 )
-from tools.train_reward_analysis.figure_spec import (
-    SPEC_VERSION,
-    FigureAxis,
-    FigureFontSizes,
-    FigureLegend,
-    FigureSeries,
-    FigureSpec,
-    LegendEntry,
-    read_spec,
-)
 from tools.train_reward_analysis.metrics import (
     aggregate_group_metrics,
     compute_reward_concordance_metrics,
 )
 from tools.train_reward_analysis.plots import (
-    _CATEGORICAL_COLORS,
-    _moving_average,
     _percent_of_own_range,
     _percent_points,
     build_agreement_count_distribution_figures,
@@ -62,8 +67,6 @@ from tools.train_reward_analysis.plots import (
     build_concordance_rate_figures,
     build_figures,
     build_run_training_progress_figures,
-    render_figure,
-    write_figure_data,
 )
 from tools.train_reward_analysis.reward_logs import load_train_reward_groups
 
@@ -521,10 +524,10 @@ def test_plot_format_accepts_pdf_and_rejects_unknown_value(tmp_path: Path) -> No
 def test_centered_smoothing_uses_available_edge_points() -> None:
     values = np.asarray([1.0, 2.0, 3.0, 4.0])
 
-    np.testing.assert_allclose(_moving_average(values, 3), [1.5, 2.0, 3.0, 3.5])
-    np.testing.assert_allclose(_moving_average(values, 1), values)
+    np.testing.assert_allclose(moving_average(values, 3), [1.5, 2.0, 3.0, 3.5])
+    np.testing.assert_allclose(moving_average(values, 1), values)
     with pytest.raises(ValueError, match="positive odd integer"):
-        _moving_average(values, 4)
+        moving_average(values, 4)
 
 
 def test_every_figure_carries_the_configured_smoothing_window() -> None:
@@ -598,11 +601,11 @@ def test_font_sizes_round_trip_and_apply_to_continuous_dual_axis(
     )
     write_figure_data([("fonts", spec)], tmp_path)
     loaded = read_spec(tmp_path / "fonts.json")
-    original_close = plots.plt.close
-    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
+    original_close = figures_render.plt.close
+    monkeypatch.setattr(figures_render.plt, "close", lambda figure: None)
 
     render_figure(loaded, tmp_path, "fonts", "png")
-    figure = plots.plt.gcf()
+    figure = figures_render.plt.gcf()
     left_axis, right_axis = figure.axes
 
     assert loaded == spec
@@ -669,11 +672,11 @@ def test_broken_axis_round_trips_and_renders_two_panels(
     )
     write_figure_data([("broken", spec)], tmp_path)
     loaded = read_spec(tmp_path / "broken.json")
-    original_close = plots.plt.close
-    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
+    original_close = figures_render.plt.close
+    monkeypatch.setattr(figures_render.plt, "close", lambda figure: None)
 
     path = render_figure(loaded, tmp_path, "broken", "png")
-    figure = plots.plt.gcf()
+    figure = figures_render.plt.gcf()
 
     assert loaded == spec
     assert path.stat().st_size > 0
@@ -725,11 +728,11 @@ def test_matching_dual_y_breaks_render_both_axes(
         smoothing_window=1,
         font_sizes=FigureFontSizes(right_y_label=15.0, right_y_tick=11.0),
     )
-    original_close = plots.plt.close
-    monkeypatch.setattr(plots.plt, "close", lambda figure: None)
+    original_close = figures_render.plt.close
+    monkeypatch.setattr(figures_render.plt, "close", lambda figure: None)
 
     path = render_figure(spec, tmp_path, "dual-broken", "png")
-    figure = plots.plt.gcf()
+    figure = figures_render.plt.gcf()
 
     assert path.stat().st_size > 0
     right_axes = figure.axes[2:]
@@ -965,10 +968,10 @@ def test_render_figures_spreads_specs_over_workers(
 def test_figure_index_refuses_to_guess_what_to_redraw(tmp_path: Path) -> None:
     """Reuse reads the recorded index, so a deleted spec is reported."""
     with pytest.raises(ValueError, match="lists no figures"):
-        analyze._figure_stems({}, tmp_path)
+        figure_stems(None, tmp_path, "index")
 
     with pytest.raises(FileNotFoundError, match="Figure data missing"):
-        analyze._figure_stems({"figures": ["ocr/missing"]}, tmp_path)
+        figure_stems(["ocr/missing"], tmp_path, "index")
 
 
 def test_figure_data_rejects_duplicate_output_names(tmp_path: Path) -> None:
@@ -1192,7 +1195,7 @@ def test_concordance_figure_rejects_more_runs_than_the_palette_holds() -> None:
     rows = _training_progress_rows()
     rows.extend(
         {**row, "run_label": f"run_{index}"}
-        for index in range(len(_CATEGORICAL_COLORS))
+        for index in range(len(CATEGORICAL_COLORS))
         for row in _training_progress_rows()
     )
 

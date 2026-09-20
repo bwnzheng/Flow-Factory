@@ -13,15 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate fresh checkpoint rollouts and analyze prompt-local reward geometry."""
+"""Generate fresh checkpoint rollouts and analyze prompt-local reward geometry.
+
+Usage::
+
+    python -m tools.eval_reward_analysis.analyze \\
+        -c tools/eval_reward_analysis/jsr_runs.yaml
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Union
 
 import numpy as np
 import yaml
@@ -36,11 +42,23 @@ from tools.eval_reward_analysis.metrics import (
     compute_group_metrics,
 )
 from tools.eval_reward_analysis.plots import (
-    plot_agreement_count_distribution,
-    plot_covariance_matrix,
-    plot_jsr_curves,
+    AGREEMENT_COUNT_STEM,
+    COVARIANCE_STEM,
+    JSR_STEM,
+    build_agreement_count_figure,
+    build_covariance_figure,
+    build_jsr_figure,
 )
 from tools.eval_reward_analysis.reward_scoring import score_reward
+from tools.figures import (
+    FIGURE_INDEX_NAME,
+    FIGURE_MODES,
+    FigureOutput,
+    read_indexed_figures,
+    render_figures,
+    write_figure_data,
+    write_figure_index,
+)
 from tools.model_inference import (
     EvaluationRunner,
     ParallelEvaluationRunner,
@@ -108,6 +126,7 @@ class AnalysisConfig:
     covariance: Optional[Dict[str, Any]] = None
     agreement_count: Optional[Dict[str, Any]] = None
     jsr_output_dir: Optional[str] = None
+    figure_mode: str = "regenerate"
 
 
 def load_config(path: Union[str, Path]) -> AnalysisConfig:
@@ -153,7 +172,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
         if agreement_count_raw is not None
         else {"enabled": True}
     )
-    _reject_unknown(output, {"dir", "cache_dir", "jsr_dir", "plot_format"}, "output")
+    _reject_unknown(output, {"dir", "cache_dir", "jsr_dir", "plot_format", "figure_mode"}, "output")
     _reject_unknown(model, {"base_model", "dtype", "device", "num_processes"}, "model")
     _reject_unknown(
         evaluation,
@@ -241,6 +260,7 @@ def load_config(path: Union[str, Path]) -> AnalysisConfig:
             if output.get("jsr_dir") is not None
             else None
         ),
+        figure_mode=_figure_mode(output.get("figure_mode", "regenerate")),
     )
 
 
@@ -257,12 +277,17 @@ def run_analysis(config: AnalysisConfig) -> Dict[str, Any]:
         result = analyze_cached_results(**config.jsr)
         output_root = Path(config.jsr_output_dir or config.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
-        plot_jsr_curves(
-            {name: values["jsr"] for name, values in result["models"].items()},
-            result["q"],
-            output_root / f"jsr_curves.{config.plot_format}",
+        _write_figures(
+            [
+                build_jsr_figure(
+                    {name: values["jsr"] for name, values in result["models"].items()},
+                    result["q"],
+                )
+            ],
+            output_root,
+            config,
         )
-        result["plot"] = f"jsr_curves.{config.plot_format}"
+        result["plot"] = f"{JSR_STEM}.{config.plot_format}"
         _write_json(output_root / "jsr_results.json", _json_safe_jsr(result))
         return {"schema_version": 1, "source": "cached_reward_records", "jsr": result}
     output_root = Path(config.output_dir)
@@ -436,27 +461,37 @@ def _write_analysis_artifacts(
         )
     _write_jsonl(experiment_dir / "prompt_metrics.jsonl", prompt_metrics)
     aggregate = aggregate_group_metrics(group_metrics)
-    covariance_plot_path = None
+    plots_dir = experiment_dir / "plots"
+    outputs: List[FigureOutput] = []
     if write_covariance:
-        covariance_plot_path = experiment_dir / "plots" / f"covariance_matrix.{config.plot_format}"
-        plot_covariance_matrix(
-            covariance=np.asarray(aggregate["standardized_covariance"]),
-            reward_names=reward_names,
-            output_path=covariance_plot_path,
-            title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
+        outputs.append(
+            build_covariance_figure(
+                covariance=np.asarray(aggregate["standardized_covariance"]),
+                reward_names=reward_names,
+                title=f"Reward covariance: {run.label} checkpoint-{step} ({source.name})",
+            )
         )
-    agreement_count_plot_path = None
     if reward_weights is not None:
         # Fresh rollouts are not shaped by the training-time sample selector, so this
         # figure shows the agreement structure the checkpoint actually produces.
-        agreement_count_plot_path = (
-            experiment_dir / "plots" / f"agreement_count.{config.plot_format}"
+        outputs.append(
+            build_agreement_count_figure(
+                distribution=np.asarray(aggregate["agreement_count_distribution"]),
+                title=f"Agreement count: {run.label} checkpoint-{step} ({source.name})",
+            )
         )
-        plot_agreement_count_distribution(
-            distribution=np.asarray(aggregate["agreement_count_distribution"]),
-            output_path=agreement_count_plot_path,
-            title=f"Agreement count: {run.label} checkpoint-{step} ({source.name})",
-        )
+    written = {stem for stem, _ in outputs}
+    _write_figures(outputs, plots_dir, config)
+    covariance_plot_path = (
+        plots_dir / f"{COVARIANCE_STEM}.{config.plot_format}"
+        if COVARIANCE_STEM in written
+        else None
+    )
+    agreement_count_plot_path = (
+        plots_dir / f"{AGREEMENT_COUNT_STEM}.{config.plot_format}"
+        if AGREEMENT_COUNT_STEM in written
+        else None
+    )
     summary = {
         "run_name": run.name,
         "run_label": run.label,
@@ -484,6 +519,69 @@ def _write_analysis_artifacts(
     }
     _write_json(experiment_dir / "summary.json", summary)
     return summary
+
+
+def _write_figures(
+    outputs: Sequence[FigureOutput], plots_dir: Path, config: AnalysisConfig
+) -> None:
+    """Write one figures directory: the specs, their index, and the images.
+
+    The index is what the reuse figure mode reads, so a directory is always
+    redrawable from its own contents alone.
+    """
+    stems = write_figure_data(outputs, plots_dir)
+    write_figure_index(plots_dir, stems, config.figure_mode, config.plot_format)
+    render_figures(outputs, plots_dir, config.plot_format)
+
+
+def _redraw_figures(config: AnalysisConfig) -> List[str]:
+    """Redraw every figure an earlier run described, without re-analyzing anything.
+
+    The directories come from the configuration, so this enumerates exactly the
+    runs, sources, and JSR panels the config claims, and each one's own index
+    decides what to draw. Nothing here reads images, reward caches, or metrics.
+    """
+    directories: List[Path] = []
+    output_root = Path(config.output_dir)
+    for run in config.runs:
+        for source in config.sources:
+            directories.append(output_root / run.name / source.name / "plots")
+    if config.jsr is not None:
+        jsr_root = Path(config.jsr_output_dir or (output_root / "jsr"))
+        if not jsr_root.is_dir():
+            raise FileNotFoundError(
+                f"No JSR output directory at {jsr_root}. Re-run with the regenerate figure mode "
+                "to write the figure data first."
+            )
+        if "reference" in config.jsr:
+            directories.append(jsr_root)
+        else:
+            # One directory per source, plus "overall" when it was configured; a
+            # directory without an index is not a JSR panel, so it is skipped
+            # rather than treated as missing output.
+            panels = [
+                path
+                for path in sorted(jsr_root.iterdir())
+                if path.is_dir() and (path / FIGURE_INDEX_NAME).is_file()
+            ]
+            if not panels:
+                raise FileNotFoundError(
+                    f"No {FIGURE_INDEX_NAME} under {jsr_root}. Re-run with the regenerate figure "
+                    "mode to write the figure data first."
+                )
+            directories.extend(panels)
+
+    redrawn: List[str] = []
+    for directory in directories:
+        if not (directory / FIGURE_INDEX_NAME).is_file():
+            raise FileNotFoundError(
+                f"No {FIGURE_INDEX_NAME} in {directory}. Re-run with the regenerate figure mode "
+                "to write the figure data first."
+            )
+        outputs = read_indexed_figures(directory)
+        render_figures(outputs, directory, config.plot_format)
+        redrawn.extend(str(directory / f"{stem}.{config.plot_format}") for stem, _ in outputs)
+    return redrawn
 
 
 def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any]]) -> None:
@@ -525,10 +623,15 @@ def _write_run_jsr_results(config: AnalysisConfig, summaries: List[Dict[str, Any
             "models": curves,
         }
         _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
-        plot_jsr_curves(
-            {labels.get(name, name): data["jsr"] for name, data in curves.items()},
-            q_grid,
-            out_dir / f"jsr_curves.{config.plot_format}",
+        _write_figures(
+            [
+                build_jsr_figure(
+                    {labels.get(name, name): data["jsr"] for name, data in curves.items()},
+                    q_grid,
+                )
+            ],
+            out_dir,
+            config,
         )
     if section.get("overall", False):
         _write_overall_jsr(config, all_rows, section)
@@ -584,14 +687,19 @@ def _write_overall_jsr(
         "models": curves,
     }
     _write_json(out_dir / "jsr_results.json", _json_safe_jsr(result))
-    plot_jsr_curves(
-        {
-            {run.name: run.label for run in config.runs}.get(name, name): data["jsr"]
-            for name, data in curves.items()
-        },
-        q_grid,
-        out_dir / f"jsr_curves.{config.plot_format}",
-        title="Overall Joint Success Rate",
+    _write_figures(
+        [
+            build_jsr_figure(
+                {
+                    {run.name: run.label for run in config.runs}.get(name, name): data["jsr"]
+                    for name, data in curves.items()
+                },
+                q_grid,
+                title="Overall Joint Success Rate",
+            )
+        ],
+        out_dir,
+        config,
     )
 
 
@@ -962,6 +1070,20 @@ def _plot_format(value: Any) -> str:
     return value.lower()
 
 
+def _figure_mode(value: Any) -> str:
+    """Validate whether the figure stage redraws from its data or rebuilds it.
+
+    This governs the figures only. Generated images and reward scores are always
+    reused when they exist, whatever this is set to.
+    """
+    if not isinstance(value, str) or value.lower() not in FIGURE_MODES:
+        raise ValueError(
+            f"output.figure_mode must be one of {list(FIGURE_MODES)}; it controls the figure "
+            "stage only, never the image and reward caches."
+        )
+    return value.lower()
+
+
 def main() -> None:
     """Parse CLI arguments and run the checkpoint covariance experiment."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -988,6 +1110,17 @@ def main() -> None:
     parser.add_argument("--bootstrap-replicates", type=int, default=0)
     parser.add_argument("--bootstrap-seed", type=int, default=0)
     parser.add_argument("--jsr-output", help="Write cached JSR result JSON to this path.")
+    parser.add_argument(
+        "--figures",
+        choices=FIGURE_MODES,
+        default=None,
+        help=(
+            "Override output.figure_mode for this invocation, so redrawing from an existing "
+            "set of per-figure JSON files needs no edit to the config file. Omit to use the "
+            "config value. This never affects generated images or reward scores: those caches "
+            "are always reused when they exist."
+        ),
+    )
     args = parser.parse_args()
     if args.cached_reference:
         if not args.cached_model or not args.jsr_rewards or not args.q_grid:
@@ -1016,6 +1149,15 @@ def main() -> None:
         print(rendered)
         return
     config = load_config(args.config)
+    if args.figures is not None:
+        config = replace(config, figure_mode=args.figures)
+    if config.figure_mode == "reuse":
+        redrawn = _redraw_figures(config)
+        print(
+            "[Evaluation reward analysis] "
+            f"figures={len(redrawn)} mode=reuse output={config.output_dir}"
+        )
+        return
     result = run_analysis(config)
     print(
         "[Evaluation reward analysis] "

@@ -55,3 +55,7 @@ output:
   cache_dir: "analysis_cache/eval_reward_analysis/jsr_runs"
   jsr_dir: "analysis_output/eval_reward_analysis/jsr_runs"
   plot_format: "png"
+  # regenerate rebuilds the figures from the analysis; reuse redraws them from the
+  # <stem>.json beside each image, skipping generation, scoring, and metrics. The
+  # image and reward caches are reused either way. Override with --figures reuse.
+  figure_mode: "regenerate"

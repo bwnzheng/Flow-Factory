@@ -35,17 +35,39 @@ reward_scores/<reward>.jsonl
 samples.jsonl
 prompt_metrics.jsonl
 plots/covariance_matrix.<plot_format>
+plots/covariance_matrix.json
+plots/figures.json
 summary.json
 ```
 
-`plots/agreement_count.<plot_format>` additionally shows that run's
+Every figure is written twice: as an image, and as the spec that produced it.
+Nothing draws from the metrics directly, so `plots/<stem>.json` is a complete
+description of its image, and `plots/figures.json` lists which figures the last
+run wrote. That is what makes `output.figure_mode: reuse` possible -- it reads
+each directory's index and redraws those specs, skipping generation, reward
+scoring, and metric computation entirely. Override the config per invocation
+with `--figures reuse`:
+
+```bash
+python -m tools.eval_reward_analysis.analyze \
+  -c tools/eval_reward_analysis/jsr_runs.yaml --figures reuse
+```
+
+This mode governs the figure stage only. Generated images and reward scores are
+always reused when they exist, whatever it is set to, and a missing figure index
+is a hard error rather than a silent regeneration. The figure specs, renderer,
+and this reuse workflow are shared with `tools/train_reward_analysis` through
+`tools.figures`; the train tool calls the same stage `cache_mode`.
+
+`plots/agreement_count.<plot_format>` and its spec additionally show that run's
 agreeing-count distribution, unless `agreement_count.enabled: false`: the
 fraction of its fresh samples whose count of rewards pointing the same way as
-the weighted scalar equals each value from 1 to ``n_rewards``. The count is computed exactly as the training-side
-reward-concordance tool computes it, so fresh-sample numbers here and
-training-batch numbers there share one definition. Figures stay inside each
-run's own directory; compare runs by reading their `summary.json`
-(`mean_agreement_count`, `fully_concordant_sample_rate`) side by side.
+the weighted scalar equals each value from 1 to ``n_rewards``. The count is
+computed exactly as the training-side reward-concordance tool computes it, so
+fresh-sample numbers here and training-batch numbers there share one definition.
+Figures stay inside each run's own directory; compare runs by reading their
+`summary.json` (`mean_agreement_count`, `fully_concordant_sample_rate`) side by
+side.
 
 Runs may evaluate the base model directly by setting `base_model_only: true`
 instead of `checkpoint`. Base-model samples use `checkpoint_0/` and are marked
@@ -60,7 +82,7 @@ numerically equivalent to the prompt-local Pearson correlation matrix. The
 `plots/covariance_matrix.<plot_format>` heatmap uses the prompt-macro-averaged
 standardized covariance matrix; raw covariance remains available in the JSONL
 artifacts. Set `output.plot_format` to `png` (default) or `pdf` to choose the
-output format.
+output format; it applies to every figure, and the JSR curves use it too.
 
 Covariance, correlation, negative-pair, and JSR metrics use no scalarization
 weights. Only the agreement-count statistics do, because they compare each
@@ -87,7 +109,9 @@ training-side tool's figures describe the selected batch instead.
 Use separate `output.cache_dir` and `output.jsr_dir` values when running the
 run-based workflow. `cache_dir` contains generated images, manifests, reward
 caches, and per-run summaries; `jsr_dir` contains only JSR result tables and
-plots. The legacy `output.dir` key remains an alias for `cache_dir`.
+plots. The legacy `output.dir` key remains an alias for `cache_dir`. Each JSR
+directory holds one `jsr_curves` figure with its spec and index, so reuse
+redraws those curves from the same kind of data file as the per-run figures.
 
 Cached JSR records contain `prompt_id` (or `prompt_index`), `image_id` (or
 `sample_index`), and a `rewards` mapping. The reference file is shared by all

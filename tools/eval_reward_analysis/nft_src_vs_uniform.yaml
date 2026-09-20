@@ -47,4 +47,8 @@ runs:
     checkpoint: "saves/sd3-5_lora_nft_20260808_215750/checkpoints/checkpoint-60"
 output:
   dir: "analysis_output/eval_reward_analysis/nft_src_vs_uniform"
-  plot_format: "png"  # Covariance heatmap format: png or pdf.
+  plot_format: "png"  # Figure format: png or pdf.
+  # regenerate rebuilds every figure from the analysis; reuse redraws each figure
+  # from the <stem>.json beside it and skips the analysis entirely. The image and
+  # reward caches are reused either way. Override with --figures reuse.
+  figure_mode: "regenerate"

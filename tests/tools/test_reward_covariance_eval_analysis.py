@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import torch
 
+from tools.eval_reward_analysis import analyze
 from tools.eval_reward_analysis.analyze import (
     AnalysisConfig,
     EvaluationConfig,
@@ -38,11 +39,22 @@ from tools.eval_reward_analysis.analyze import (
     load_prompt_records,
     run_analysis,
 )
-from tools.eval_reward_analysis.plots import plot_agreement_count_distribution
+from tools.eval_reward_analysis.plots import (
+    build_agreement_count_figure,
+    build_covariance_figure,
+    build_jsr_figure,
+)
 from tools.eval_reward_analysis.reward_scoring import (
     _AcceleratorView,
     _partition,
     _worker_device,
+)
+from tools.figures import (
+    FIGURE_INDEX_NAME,
+    FigureSpec,
+    MatrixFigureSpec,
+    read_spec,
+    render_figure,
 )
 
 
@@ -439,11 +451,8 @@ def test_artifacts_skip_agreement_statistics_without_weights(tmp_path: Path) -> 
     assert (tmp_path / summary["covariance_plot"]).is_file()
 
 
-def test_run_analysis_needs_no_weights_for_a_base_model_without_agreement_counts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Regression: a base-model run used to demand an explicit reward_weights
-    # override even when the configured analysis never consumed one.
+def _base_model_analysis_config(tmp_path: Path, figure_mode: str = "regenerate") -> Path:
+    """Write a one-run base-model config that needs no scalarization weights."""
     prompts_path = tmp_path / "prompts.txt"
     prompts_path.write_text("prompt zero\nprompt one\n", encoding="utf-8")
     config_path = tmp_path / "analysis.yaml"
@@ -460,10 +469,15 @@ sources:
 runs:
   - {{name: base, label: Base, base_model_only: true}}
 agreement_count: {{enabled: false}}
-output: {{dir: {tmp_path / "out"}}}
+output: {{dir: {tmp_path / "out"}, figure_mode: {figure_mode}}}
 """,
         encoding="utf-8",
     )
+    return config_path
+
+
+def _install_fake_rollouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace generation and reward scoring with deterministic stand-ins."""
 
     def fake_generate_images(config, run, step, source, prompt_records, image_root):
         image_root.mkdir(parents=True, exist_ok=True)
@@ -494,13 +508,78 @@ output: {{dir: {tmp_path / "out"}}}
     monkeypatch.setattr("tools.eval_reward_analysis.analyze._generate_images", fake_generate_images)
     monkeypatch.setattr("tools.eval_reward_analysis.analyze.score_reward", fake_score_reward)
 
-    summary = run_analysis(load_config(config_path))["experiments"][0]
+
+def test_run_analysis_needs_no_weights_for_a_base_model_without_agreement_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: a base-model run used to demand an explicit reward_weights
+    # override even when the configured analysis never consumed one.
+    _install_fake_rollouts(monkeypatch)
+
+    summary = run_analysis(load_config(_base_model_analysis_config(tmp_path)))["experiments"][0]
 
     assert summary["reward_weights"] is None
     assert summary["reward_weight_source"] == "disabled"
     assert summary["agreement_count_plot"] is None
     assert "mean_agreement_count" not in summary
     assert "covariance" in summary
+
+
+def test_figures_are_written_beside_their_data_and_indexed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_rollouts(monkeypatch)
+    config = load_config(_base_model_analysis_config(tmp_path))
+
+    summary = run_analysis(config)["experiments"][0]
+
+    plots_dir = Path(config.output_dir) / "base" / "test" / "plots"
+    assert (plots_dir / "covariance_matrix.png").is_file()
+    assert isinstance(read_spec(plots_dir / "covariance_matrix.json"), MatrixFigureSpec)
+    index = json.loads((plots_dir / FIGURE_INDEX_NAME).read_text(encoding="utf-8"))
+    assert index["figures"] == ["covariance_matrix"]
+    assert index["figure_mode"] == "regenerate"
+    assert index["plot_format"] == "png"
+    assert summary["covariance_plot"] == "plots/covariance_matrix.png"
+
+
+def test_reuse_redraws_every_figure_without_touching_the_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The whole point of the reuse figure mode: regenerate writes the specs, and a
+    # later run redraws from them without generating images or scoring rewards.
+    _install_fake_rollouts(monkeypatch)
+    config = load_config(_base_model_analysis_config(tmp_path, figure_mode="reuse"))
+    regenerate = load_config(_base_model_analysis_config(tmp_path))
+    run_analysis(regenerate)
+
+    plots_dir = Path(config.output_dir) / "base" / "test" / "plots"
+    data_before = (plots_dir / "covariance_matrix.json").read_text(encoding="utf-8")
+    (plots_dir / "covariance_matrix.png").unlink()
+
+    def fail(*args, **kwargs):
+        raise AssertionError("reuse must not generate images or score rewards")
+
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze._generate_images", fail)
+    monkeypatch.setattr("tools.eval_reward_analysis.analyze.score_reward", fail)
+
+    redrawn = analyze._redraw_figures(config)
+
+    assert redrawn == [str(plots_dir / "covariance_matrix.png")]
+    assert (plots_dir / "covariance_matrix.png").stat().st_size > 0
+    assert (plots_dir / "covariance_matrix.json").read_text(encoding="utf-8") == data_before
+
+
+def test_reuse_reports_a_missing_figure_index(tmp_path: Path) -> None:
+    config = load_config(_base_model_analysis_config(tmp_path, figure_mode="reuse"))
+
+    with pytest.raises(FileNotFoundError, match=FIGURE_INDEX_NAME):
+        analyze._redraw_figures(config)
+
+
+def test_figure_mode_rejects_an_unknown_value(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="figure_mode must be one of"):
+        load_config(_base_model_analysis_config(tmp_path, figure_mode="rebuild"))
 
 
 def test_load_config_reads_the_agreement_count_toggle(tmp_path: Path) -> None:
@@ -690,19 +769,18 @@ def test_agreement_count_plot_writes_one_run_distribution(
 
     monkeypatch.setattr(matplotlib.axes.Axes, "text", capturing_text)
 
-    plot_agreement_count_distribution(
+    stem, spec = build_agreement_count_figure(
         [0.0, 0.183, 0.421, 0.396],
-        tmp_path / "plots" / "agreement_count.png",
         title="Agreement count: SRC checkpoint-60 (ocr)",
     )
+    render_figure(spec, tmp_path / "plots", stem, "png")
 
     assert (tmp_path / "plots" / "agreement_count.png").stat().st_size > 0
     # One value label per drawn bar; the structurally empty c = 0 bin has none.
     assert labels == ["0.183", "0.421", "0.396"]
+    assert spec.x_tick_labels == ["c=1", "c=2", "c=3"]
 
 
 def test_agreement_count_plot_rejects_a_negative_fraction(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
-        plot_agreement_count_distribution(
-            [0.0, -0.1, 0.6, 0.5], tmp_path / "agreement_count.png", title="bad"
-        )
+        build_agreement_count_figure([0.0, -0.1, 0.6, 0.5], title="bad")

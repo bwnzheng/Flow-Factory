@@ -80,4 +80,10 @@ agreement_count:
 
 output:
   dir: "analysis_output/eval_reward_analysis"
-  plot_format: "png"  # Covariance heatmap format: png or pdf.
+  plot_format: "png"  # Figure format: png or pdf.
+  # regenerate rebuilds every figure from the analysis; reuse redraws each figure
+  # from the <stem>.json beside it and skips the analysis entirely, so restyling
+  # costs no generation or scoring. This never affects the image and reward
+  # caches: those are always reused when they exist. Override per invocation with
+  # --figures reuse.
+  figure_mode: "regenerate"

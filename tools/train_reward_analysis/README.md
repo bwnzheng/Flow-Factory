@@ -339,6 +339,11 @@ segments and identical `segment_height_ratios`; their numeric segment bounds
 may differ. The renderer rejects mismatched layouts because the stacked panels
 would otherwise imply a false correspondence between the two scales.
 
+The spec schema, the renderer that draws it, and the reuse workflow around it
+live in `tools.figures`, shared with `tools.eval_reward_analysis`. This tool
+keeps its metric-specific builders in `tools/train_reward_analysis/plots.py`,
+which is why a spec can describe an image with no analysis code involved.
+
 The dataset directory is recovered from the saved run context source (for
 example, `pickscore` or `ocr`), so the fixed reward combination for each
 dataset is unambiguous. The agreement-count figures are therefore written per
@@ -409,7 +414,7 @@ Set `output.cache_mode: reuse` to skip reward-pickle analysis and redraw every
 figure directly from the per-figure JSON files indexed by `metadata.json`. If
 the index or any listed JSON is absent, use `regenerate` first. A JSON whose
 `spec_version` is unsupported is rejected rather than being drawn with changed
-semantics. The current renderer writes version 6 and still reads versions 1-5.
+semantics. The current renderer writes version 7 and still reads versions 1-6.
 
 The former aggregate `plot_data.json` and `metrics.csv` are no longer written:
 they repeated dataset, run, reward, and metric identifiers on every point and

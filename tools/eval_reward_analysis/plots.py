@@ -12,33 +12,57 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Matplotlib visualizations for aggregate reward covariance metrics."""
+"""Figures and the figure-shaped data behind them for the eval analysis.
+
+Each builder turns finished metrics into a spec, and the shared renderer in
+:mod:`tools.figures` draws that spec. Nothing draws from the metrics directly,
+so the spec beside each image is a complete description of it: the image can be
+recovered from the data alone, which is what ``figure_mode: reuse`` does.
+"""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Sequence, Union
+from typing import Sequence
 
 import numpy as np
 
-os.environ.setdefault("MPLBACKEND", "Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+from tools.figures import (
+    BAR_SERIES_KIND,
+    CATEGORICAL_COLORS,
+    Figure,
+    FigureAxis,
+    FigureLegend,
+    FigureMatrix,
+    FigureSeries,
+    FigureSpec,
+    LegendEntry,
+    MatrixFigureSpec,
+)
+
+# Stems inside one experiment's plots directory.
+COVARIANCE_STEM = "covariance_matrix"
+AGREEMENT_COUNT_STEM = "agreement_count"
+JSR_STEM = "jsr_curves"
+
+# The heatmap annotates every cell, so a cell reads dark-on-light only when its
+# magnitude is far from the middle of the colour scale.
+_ANNOTATION_COLOR_THRESHOLD = 0.55
 
 
-def plot_covariance_matrix(
+def build_covariance_figure(
     covariance: np.ndarray,
     reward_names: Sequence[str],
-    output_path: Union[str, Path],
     title: str,
-) -> None:
-    """Write an annotated heatmap for one checkpoint's aggregate covariance.
+) -> tuple[str, MatrixFigureSpec]:
+    """Build the annotated covariance heatmap for one checkpoint's aggregate.
 
     Args:
         covariance: Square covariance matrix averaged across prompt groups.
         reward_names: Labels for the matrix rows and columns.
-        output_path: PNG or PDF path to write.
         title: Figure title identifying the checkpoint and source.
+
+    Returns:
+        The figure's path stem and its spec.
     """
     matrix = np.asarray(covariance, dtype=np.float64)
     labels = [str(name) for name in reward_names]
@@ -52,44 +76,37 @@ def plot_covariance_matrix(
         raise ValueError("covariance must contain only finite values.")
 
     size = max(4.5, 1.1 * len(labels) + 2.0)
-    figure, axis = plt.subplots(figsize=(size, size))
-    limit = float(np.max(np.abs(matrix))) or 1.0
-    image = axis.imshow(matrix, cmap="RdBu_r", vmin=-limit, vmax=limit)
-    figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04, label="Covariance")
-    axis.set_xticks(range(len(labels)), labels, rotation=45, ha="right")
-    axis.set_yticks(range(len(labels)), labels)
-    axis.set_title(title)
-    axis.set_xlabel("Reward")
-    axis.set_ylabel("Reward")
-    threshold = limit * 0.55
-    for row in range(matrix.shape[0]):
-        for column in range(matrix.shape[1]):
-            axis.text(
-                column,
-                row,
-                f"{matrix[row, column]:.3g}",
-                ha="center",
-                va="center",
-                color="white" if abs(matrix[row, column]) > threshold else "black",
-            )
-    figure.tight_layout()
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path)
-    plt.close(figure)
+    spec = MatrixFigureSpec(
+        title=title,
+        matrix=FigureMatrix(
+            values=matrix.tolist(),
+            row_labels=labels,
+            column_labels=labels,
+            colorbar_label="Covariance",
+            colormap="RdBu_r",
+            symmetric_limits=True,
+            annotation_format=".3g",
+            annotation_color_threshold=_ANNOTATION_COLOR_THRESHOLD,
+            x_label="Reward",
+            y_label="Reward",
+        ),
+        figsize=[size, size],
+    )
+    return COVARIANCE_STEM, spec
 
 
-def plot_agreement_count_distribution(
+def build_agreement_count_figure(
     distribution: Sequence[float],
-    output_path: Union[str, Path],
     title: str,
-) -> None:
-    """Write one run's agreeing-count distribution as a bar chart.
+) -> tuple[str, FigureSpec]:
+    """Build one run's agreeing-count distribution as a labelled bar chart.
 
     Args:
         distribution: Sample fraction per agreeing count, indexed by count.
-        output_path: PNG or PDF path to write.
         title: Figure title identifying the checkpoint and source.
+
+    Returns:
+        The figure's path stem and its spec.
     """
     values = np.asarray(distribution, dtype=np.float64)
     if values.ndim != 1 or values.size < 3:
@@ -99,59 +116,93 @@ def plot_agreement_count_distribution(
     # A sample below the prompt mean on every reward is also below the mean of the
     # weighted scalar, so c = 0 is unreachable and its bin is always empty.
     counts = [count for count in range(1, values.size) if values[count] > 0.0]
-    heights = [values[count] for count in counts]
-    figure, axis = plt.subplots(figsize=(max(4.5, 1.0 * len(counts) + 3.0), 4.5))
-    axis.bar(np.arange(len(counts), dtype=np.float64), heights, width=0.7)
-    for position, height in enumerate(heights):
-        axis.text(
-            position,
-            height,
-            f"{height:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
-    axis.set_xticks(np.arange(len(counts), dtype=np.float64), [f"c={count}" for count in counts])
-    axis.set_xlabel("Agreeing rewards per sample")
-    axis.set_ylabel("Sample fraction")
-    axis.set_title(title)
-    axis.grid(alpha=0.25, axis="y")
-    # Leave room for the value labels above the bars.
-    axis.set_ylim(0.0, max(heights) * 1.15 if heights and max(heights) > 0.0 else 1.0)
-    figure.tight_layout()
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path)
-    plt.close(figure)
+    heights = [float(values[count]) for count in counts]
+    positions = [float(index) for index in range(len(counts))]
+    top = max(heights) if heights else 0.0
+    spec = FigureSpec(
+        title=title,
+        x_label="Agreeing rewards per sample",
+        left=FigureAxis(
+            label="Sample fraction",
+            limits=[0.0, top * 1.15 if top > 0.0 else 1.0],
+            grid=True,
+            grid_axis="y",
+        ),
+        series=[
+            FigureSeries(
+                label="sample fraction",
+                points=[[position, height] for position, height in zip(positions, heights)],
+                color=CATEGORICAL_COLORS[0],
+                kind=BAR_SERIES_KIND,
+                value_labels=True,
+                value_label_format=".3f",
+                value_label_fontsize=8.0,
+            )
+        ],
+        figsize=[max(4.5, 1.0 * len(counts) + 3.0), 4.5],
+        x_ticks=positions,
+        x_tick_labels=[f"c={count}" for count in counts],
+    )
+    return AGREEMENT_COUNT_STEM, spec
 
 
-def plot_jsr_curves(
+def build_jsr_figure(
     curves: dict[str, Sequence[float]],
     q_grid: Sequence[float],
-    output_path: Union[str, Path],
     title: str = "Joint Success Rate",
-) -> None:
-    """Write JSR curves against the reference-model percentile axis."""
+) -> tuple[str, FigureSpec]:
+    """Build the JSR curves against the reference-model percentile axis.
+
+    Args:
+        curves: One JSR curve per compared run, labelled by run.
+        q_grid: Reference percentile axis shared by every curve.
+        title: Figure title.
+
+    Returns:
+        The figure's path stem and its spec.
+    """
     q = np.asarray(q_grid, dtype=float)
     if q.ndim != 1 or not len(q) or np.any((q < 0) | (q > 1)):
         raise ValueError("q_grid must contain values in [0, 1].")
-    figure, axis = plt.subplots(figsize=(7, 4.5))
-    for name, values in curves.items():
+    series: list[FigureSeries] = []
+    entries: list[LegendEntry] = []
+    for index, (name, values) in enumerate(curves.items()):
         y = np.asarray(values, dtype=float)
         if y.shape != q.shape or not np.isfinite(y).all() or np.any((y < 0) | (y > 1)):
             raise ValueError(f"Invalid JSR curve for {name!r}.")
-        axis.plot(q, y, label=name)
-    axis.set(
-        xlim=(0, 1),
-        ylim=(0, 1),
-        xlabel="Base-model reference percentile q",
-        ylabel="Joint Success Rate",
+        color = CATEGORICAL_COLORS[index % len(CATEGORICAL_COLORS)]
+        points = [[float(x), float(value)] for x, value in zip(q, y)]
+        series.append(
+            FigureSeries(
+                label=name,
+                points=points,
+                color=color,
+                linewidth=1.8,
+                markersize=4.0,
+                # The default q grid has 101 points, so a marker per point would
+                # read as a solid band rather than a line.
+                markevery=max(1, len(points) // 12),
+                faint_raw_trace=False,
+            )
+        )
+        entries.append(LegendEntry(label=name, color=color, linewidth=1.8, marker=""))
+    spec = FigureSpec(
         title=title,
+        x_label="Base-model reference percentile q",
+        left=FigureAxis(label="Joint Success Rate", limits=[0.0, 1.0], grid=True),
+        series=series,
+        legend=FigureLegend(entries=entries),
+        smoothing_window=1,
+        figsize=[7.0, 4.5],
+        x_limits=[0.0, 1.0],
     )
-    axis.grid(alpha=0.25)
-    axis.legend()
-    figure.tight_layout()
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path)
-    plt.close(figure)
+    return JSR_STEM, spec
+
+
+def figures_by_stem(outputs: Sequence[tuple[str, Figure]]) -> dict[str, Figure]:
+    """Index built figures by stem, rejecting duplicate names."""
+    stems = [stem for stem, _ in outputs]
+    if len(stems) != len(set(stems)):
+        duplicates = sorted({stem for stem in stems if stems.count(stem) > 1})
+        raise ValueError(f"Figure builders produced duplicate output stems: {duplicates}")
+    return dict(outputs)

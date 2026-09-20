@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Figure-shaped data: one spec per figure, holding every line and point.
+"""Figure specs: the data behind one image, and how to store it.
 
-A spec is what the renderer needs to draw a figure and nothing else. It is
-written beside its own image as ``<figure>.json``, so the data for a figure and
-the figure travel together, and ``cache_mode: reuse`` redraws from the specs
-without touching the reward pickles again.
-
-The spec is deliberately figure-shaped rather than normalized: a reader can
-open one file and see the lines that figure draws, in order, each with its own
-points. Default style values are omitted to keep the data compact; everything
-that differs from those versioned defaults is stored with the points.
+A spec is a complete description of a figure, so the image can be recovered
+from its ``<stem>.json`` alone. Two kinds exist. An :class:`FigureSpec` is an
+xy figure drawn from line or bar series against one or two y-axes, and a
+:class:`MatrixFigureSpec` is an annotated heatmap. A serialized spec carries
+``figure_kind`` when it is not an xy figure, so older specs -- which predate the
+field -- read back as xy figures.
 """
 
 from __future__ import annotations
@@ -36,17 +33,33 @@ from typing import Any
 # Bumped whenever the spec's shape or meaning changes. Readers list compatible
 # historical versions explicitly so incompatible data is never rendered with
 # changed semantics.
-SPEC_VERSION = 6
-SUPPORTED_SPEC_VERSIONS = (1, 2, 3, 4, 5, SPEC_VERSION)
+SPEC_VERSION = 7
+SUPPORTED_SPEC_VERSIONS = (1, 2, 3, 4, 5, 6, SPEC_VERSION)
+
+# Figure kinds, keyed by the serialized ``figure_kind`` value.
+AXIS_FIGURE_KIND = "axis"
+MATRIX_FIGURE_KIND = "matrix"
+FIGURE_KINDS = (AXIS_FIGURE_KIND, MATRIX_FIGURE_KIND)
+
+# Series kinds inside an xy figure.
+LINE_SERIES_KIND = "line"
+BAR_SERIES_KIND = "bar"
+SERIES_KINDS = (LINE_SERIES_KIND, BAR_SERIES_KIND)
+
+# Which grid lines a gridded axis may draw.
+GRID_AXES = ("both", "x", "y")
 
 
 @dataclass(frozen=True)
 class FigureSeries:
-    """One drawn line: its legend label, its points, and how it is styled.
+    """One drawn line or bar set: its legend label, its points, and its styling.
 
     ``points`` are the values this figure plots at each recorded step, before
-    any smoothing. The renderer derives the smoothed foreground and the faint
-    unsmoothed background from them.
+    any smoothing. For a line the renderer derives the smoothed foreground and
+    the faint unsmoothed background from them; for a bar series each point's two
+    values are the bar centre and its height. The line-only fields --
+    ``linestyle``, ``marker``, ``markevery``, the faint-trace settings, and the
+    smoothing window -- do not apply to a bar series.
     """
 
     label: str
@@ -64,6 +77,11 @@ class FigureSeries:
     faint_zorder: float = 1.0
     zorder: float = 2.0
     scatter_sizes: list[float] | None = None
+    kind: str = LINE_SERIES_KIND
+    bar_width: float = 0.7
+    value_labels: bool = False
+    value_label_format: str = ".3f"
+    value_label_fontsize: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +91,9 @@ class FigureAxis:
     label: str
     limits: list[float] | None = None
     grid: bool = True
+    # Which grid lines a gridded axis draws. Categorical bars read better with
+    # horizontal lines only, while a numeric x axis usually wants both.
+    grid_axis: str = "both"
     segments: list[list[float]] | None = None
     segment_height_ratios: list[float] | None = None
 
@@ -129,7 +150,7 @@ class FigureFontSizes:
 
 @dataclass(frozen=True)
 class FigureSpec:
-    """Everything needed to redraw one figure, and nothing more."""
+    """Everything needed to redraw one xy figure, and nothing more."""
 
     title: str
     x_label: str
@@ -145,10 +166,49 @@ class FigureSpec:
     border_width: float | None = None
     top_margin: float | None = None
     bottom_margin: float | None = None
+    x_limits: list[float] | None = None
+    x_ticks: list[float] | None = None
+    x_tick_labels: list[str] | None = None
     font_sizes: FigureFontSizes = field(default_factory=FigureFontSizes)
 
 
-def to_json(spec: FigureSpec) -> str:
+@dataclass(frozen=True)
+class FigureMatrix:
+    """One annotated heatmap: its values, labels, and how its colour map is anchored.
+
+    ``symmetric_limits`` centres the colour scale on zero, which is what makes a
+    signed matrix such as a covariance readable at a glance. ``row_labels`` index
+    the rows from the top down, matching how the matrix is drawn.
+    """
+
+    values: list[list[float]]
+    row_labels: list[str]
+    column_labels: list[str]
+    colorbar_label: str = ""
+    colormap: str = "RdBu_r"
+    symmetric_limits: bool = True
+    annotation_format: str = ".3g"
+    annotation_color_threshold: float = 0.55
+    x_label: str = ""
+    y_label: str = ""
+
+
+@dataclass(frozen=True)
+class MatrixFigureSpec:
+    """Everything needed to redraw one annotated heatmap, and nothing more."""
+
+    title: str
+    matrix: FigureMatrix
+    figsize: list[float] | None = None
+    border_width: float | None = None
+    font_sizes: FigureFontSizes = field(default_factory=FigureFontSizes)
+
+
+# Either figure a spec file can describe.
+Figure = FigureSpec | MatrixFigureSpec
+
+
+def to_json(spec: Figure) -> str:
     """Serialize one spec, keeping each point on its own line.
 
     ``json.dumps(indent=...)`` would explode every point pair across three
@@ -157,10 +217,22 @@ def to_json(spec: FigureSpec) -> str:
     like the line it describes.
     """
     validate_spec(spec)
+    if isinstance(spec, MatrixFigureSpec):
+        return (
+            _dumps(
+                {
+                    "spec_version": SPEC_VERSION,
+                    "figure_kind": MATRIX_FIGURE_KIND,
+                    **_as_mapping(spec),
+                },
+                0,
+            )
+            + "\n"
+        )
     return _dumps({"spec_version": SPEC_VERSION, **_as_mapping(spec)}, 0) + "\n"
 
 
-def write_spec(spec: FigureSpec, directory: str | Path, stem: str) -> Path:
+def write_spec(spec: Figure, directory: str | Path, stem: str) -> Path:
     """Write one spec next to the image that shares its name."""
     path = Path(directory) / f"{stem}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +240,7 @@ def write_spec(spec: FigureSpec, directory: str | Path, stem: str) -> Path:
     return path
 
 
-def read_spec(path: str | Path) -> FigureSpec:
+def read_spec(path: str | Path) -> Figure:
     """Load one spec written by :func:`to_json`."""
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -177,16 +249,25 @@ def read_spec(path: str | Path) -> FigureSpec:
     if version not in SUPPORTED_SPEC_VERSIONS:
         raise ValueError(
             f"Figure data {path} was written by unsupported spec_version {version!r}; supported "
-            f"versions are {list(SUPPORTED_SPEC_VERSIONS)}. Re-run with "
-            "output.cache_mode: regenerate."
+            f"versions are {list(SUPPORTED_SPEC_VERSIONS)}. Re-run to regenerate the figure data."
         )
-    spec = _spec_from_mapping(raw, str(path))
+    kind = raw.get("figure_kind", AXIS_FIGURE_KIND)
+    if kind not in FIGURE_KINDS:
+        raise ValueError(f"Figure data {path} has unknown figure_kind {kind!r}.")
+    spec = (
+        _spec_from_mapping(raw, str(path))
+        if kind == AXIS_FIGURE_KIND
+        else _matrix_spec_from_mapping(raw, str(path))
+    )
     validate_spec(spec, str(path))
     return spec
 
 
-def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
+def validate_spec(spec: Figure, context: str = "figure spec") -> None:
     """Reject layouts that cannot be represented without ambiguous axes."""
+    if isinstance(spec, MatrixFigureSpec):
+        _validate_matrix_spec(spec, context)
+        return
     if spec.smoothing_window < 1 or spec.smoothing_window % 2 == 0:
         raise ValueError(f"{context}: smoothing_window must be a positive odd integer.")
     if len(spec.figsize) != 2 or any(
@@ -215,16 +296,14 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
         not math.isfinite(spec.bottom_margin) or not 0.0 <= spec.bottom_margin < 1.0
     ):
         raise ValueError(f"{context}: bottom_margin must be finite and in [0.0, 1.0).")
+    _validate_x_axis(spec, context)
     if spec.legend is not None and (
         isinstance(spec.legend.ncol, bool)
         or not isinstance(spec.legend.ncol, int)
         or spec.legend.ncol < 1
     ):
         raise ValueError(f"{context}: legend.ncol must be a positive integer.")
-    for name in _FONT_SIZE_FIELDS:
-        value = getattr(spec.font_sizes, name)
-        if value is not None and (not math.isfinite(value) or value <= 0.0):
-            raise ValueError(f"{context}: font_sizes.{name} must be finite and strictly positive.")
+    _validate_font_sizes(spec.font_sizes, context)
 
     _validate_axis(spec.left, "left", context)
     if spec.right is not None:
@@ -239,6 +318,7 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
             raise ValueError(
                 f"{context}: series {series.label!r} uses the right axis, but no right axis exists."
             )
+        _validate_series(series, context)
 
     left_count = len(spec.left.segments or [])
     right_count = len(spec.right.segments or []) if spec.right is not None else 0
@@ -257,6 +337,104 @@ def validate_spec(spec: FigureSpec, context: str = "figure spec") -> None:
             )
 
 
+def _validate_series(series: FigureSeries, context: str) -> None:
+    """Validate one series' kind and the fields that kind reads."""
+    if series.kind not in SERIES_KINDS:
+        raise ValueError(
+            f"{context}: series {series.label!r} uses unknown kind {series.kind!r}; known kinds "
+            f"are {list(SERIES_KINDS)}."
+        )
+    if series.kind != BAR_SERIES_KIND:
+        return
+    if not math.isfinite(series.bar_width) or not 0.0 < series.bar_width <= 1.0:
+        raise ValueError(
+            f"{context}: bar series {series.label!r} needs a bar_width in (0, 1], got "
+            f"{series.bar_width}."
+        )
+    if not series.value_label_format:
+        raise ValueError(f"{context}: bar series {series.label!r} needs a value_label_format.")
+
+
+def _validate_x_axis(spec: FigureSpec, context: str) -> None:
+    """Validate the optional explicit x extent and tick labelling."""
+    if spec.x_limits is not None:
+        if len(spec.x_limits) != 2:
+            raise ValueError(f"{context}: x_limits must contain [lower, upper].")
+        lower, upper = spec.x_limits
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise ValueError(
+                f"{context}: x_limits must be finite and strictly increasing, got {spec.x_limits}."
+            )
+    if spec.x_ticks is not None:
+        if not spec.x_ticks or any(not math.isfinite(value) for value in spec.x_ticks):
+            raise ValueError(f"{context}: x_ticks must be a non-empty list of finite values.")
+        if sorted(spec.x_ticks) != list(spec.x_ticks):
+            raise ValueError(f"{context}: x_ticks must be ascending, got {spec.x_ticks}.")
+    if spec.x_tick_labels is not None:
+        if spec.x_ticks is None:
+            raise ValueError(f"{context}: x_tick_labels requires x_ticks.")
+        if len(spec.x_tick_labels) != len(spec.x_ticks):
+            raise ValueError(
+                f"{context}: x_tick_labels must have one label per x_ticks entry, got "
+                f"{len(spec.x_tick_labels)} labels for {len(spec.x_ticks)} ticks."
+            )
+
+
+def _validate_font_sizes(font_sizes: FigureFontSizes, context: str) -> None:
+    for name in _FONT_SIZE_FIELDS:
+        value = getattr(font_sizes, name)
+        if value is not None and (not math.isfinite(value) or value <= 0.0):
+            raise ValueError(f"{context}: font_sizes.{name} must be finite and strictly positive.")
+
+
+def _validate_matrix_spec(spec: MatrixFigureSpec, context: str) -> None:
+    """Validate a heatmap's shape, labels, and colour scale."""
+    matrix = spec.matrix
+    if spec.figsize is not None and (
+        len(spec.figsize) != 2
+        or any(not math.isfinite(value) or value <= 0.0 for value in spec.figsize)
+    ):
+        raise ValueError(f"{context}: figsize must contain two finite positive values.")
+    if spec.border_width is not None and (
+        not math.isfinite(spec.border_width) or spec.border_width <= 0.0
+    ):
+        raise ValueError(f"{context}: border_width must be finite and strictly positive.")
+    _validate_font_sizes(spec.font_sizes, context)
+    if not matrix.values:
+        raise ValueError(f"{context}: matrix.values must contain at least one row.")
+    width = len(matrix.values[0])
+    if width == 0:
+        raise ValueError(f"{context}: matrix.values rows must not be empty.")
+    for index, row in enumerate(matrix.values):
+        if len(row) != width:
+            raise ValueError(
+                f"{context}: matrix.values row {index} has {len(row)} entries, expected {width}."
+            )
+        if any(not math.isfinite(value) for value in row):
+            raise ValueError(f"{context}: matrix.values row {index} must be finite.")
+    if len(matrix.row_labels) != len(matrix.values):
+        raise ValueError(
+            f"{context}: matrix.row_labels must have one label per row, got "
+            f"{len(matrix.row_labels)} labels for {len(matrix.values)} rows."
+        )
+    if len(matrix.column_labels) != width:
+        raise ValueError(
+            f"{context}: matrix.column_labels must have one label per column, got "
+            f"{len(matrix.column_labels)} labels for {width} columns."
+        )
+    if not matrix.colormap:
+        raise ValueError(f"{context}: matrix.colormap must not be empty.")
+    if not matrix.annotation_format:
+        raise ValueError(f"{context}: matrix.annotation_format must not be empty.")
+    if (
+        not math.isfinite(matrix.annotation_color_threshold)
+        or not 0.0 <= matrix.annotation_color_threshold < 1.0
+    ):
+        raise ValueError(
+            f"{context}: matrix.annotation_color_threshold must be finite and in [0.0, 1.0)."
+        )
+
+
 def _validate_axis(axis: FigureAxis, name: str, context: str) -> None:
     """Validate one continuous or segmented y-axis."""
     if axis.limits is not None:
@@ -268,6 +446,10 @@ def _validate_axis(axis: FigureAxis, name: str, context: str) -> None:
                 f"{context}: {name}.limits must be finite and strictly increasing, got "
                 f"{axis.limits}."
             )
+    if axis.grid_axis not in GRID_AXES:
+        raise ValueError(
+            f"{context}: {name}.grid_axis must be one of {list(GRID_AXES)}, got {axis.grid_axis!r}."
+        )
     if axis.segments is None:
         if axis.segment_height_ratios is not None:
             raise ValueError(f"{context}: {name}.segment_height_ratios requires {name}.segments.")
@@ -306,8 +488,14 @@ def _validate_axis(axis: FigureAxis, name: str, context: str) -> None:
         )
 
 
-def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
+def _as_mapping(spec: Figure) -> dict[str, Any]:
     """Lay one spec out in the order its keys should read."""
+    if isinstance(spec, MatrixFigureSpec):
+        return _matrix_spec_to_mapping(spec)
+    return _axis_spec_to_mapping(spec)
+
+
+def _axis_spec_to_mapping(spec: FigureSpec) -> dict[str, Any]:
     result = {
         "title": spec.title,
         "x_label": spec.x_label,
@@ -333,6 +521,44 @@ def _as_mapping(spec: FigureSpec) -> dict[str, Any]:
         result["top_margin"] = spec.top_margin
     if spec.bottom_margin is not None:
         result["bottom_margin"] = spec.bottom_margin
+    if spec.x_limits is not None:
+        result["x_limits"] = list(spec.x_limits)
+    if spec.x_ticks is not None:
+        result["x_ticks"] = list(spec.x_ticks)
+    if spec.x_tick_labels is not None:
+        result["x_tick_labels"] = list(spec.x_tick_labels)
+    font_sizes = _font_sizes_to_mapping(spec.font_sizes)
+    if font_sizes:
+        result["font_sizes"] = font_sizes
+    return result
+
+
+def _matrix_spec_to_mapping(spec: MatrixFigureSpec) -> dict[str, Any]:
+    """Keep the values first, then the labels that name them, then the styling."""
+    matrix = spec.matrix
+    result: dict[str, Any] = {
+        "title": spec.title,
+        "row_labels": matrix.row_labels,
+        "column_labels": matrix.column_labels,
+        "values": matrix.values,
+    }
+    defaults = FigureMatrix(values=[], row_labels=[], column_labels=[])
+    for name in (
+        "colorbar_label",
+        "colormap",
+        "symmetric_limits",
+        "annotation_format",
+        "annotation_color_threshold",
+        "x_label",
+        "y_label",
+    ):
+        value = getattr(matrix, name)
+        if value != getattr(defaults, name):
+            result[name] = value
+    if spec.figsize is not None:
+        result["figsize"] = list(spec.figsize)
+    if spec.border_width is not None:
+        result["border_width"] = spec.border_width
     font_sizes = _font_sizes_to_mapping(spec.font_sizes)
     if font_sizes:
         result["font_sizes"] = font_sizes
@@ -345,6 +571,8 @@ def _axis_to_mapping(axis: FigureAxis) -> dict[str, Any]:
         result["limits"] = axis.limits
     if not axis.grid:
         result["grid"] = False
+    if axis.grid_axis != "both":
+        result["grid_axis"] = axis.grid_axis
     if axis.segments is not None:
         result["segments"] = axis.segments
     if axis.segment_height_ratios is not None:
@@ -373,6 +601,11 @@ def _series_to_mapping(series: FigureSeries) -> dict[str, Any]:
         "faint_zorder",
         "zorder",
         "scatter_sizes",
+        "kind",
+        "bar_width",
+        "value_labels",
+        "value_label_format",
+        "value_label_fontsize",
     ):
         value = getattr(series, name)
         if value != getattr(defaults, name):
@@ -434,10 +667,12 @@ def _legend_entry_to_mapping(entry: LegendEntry) -> dict[str, Any]:
 
 
 def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
-    """Rebuild a spec from its serialized form, rejecting unknown shapes."""
+    """Rebuild an xy spec from its serialized form, rejecting unknown shapes."""
     legend = raw.get("legend")
     right = raw.get("right")
     font_sizes = raw.get("font_sizes")
+    x_ticks = raw.get("x_ticks")
+    x_tick_labels = raw.get("x_tick_labels")
     return FigureSpec(
         title=str(raw["title"]),
         x_label=str(raw["x_label"]),
@@ -453,6 +688,44 @@ def _spec_from_mapping(raw: dict[str, Any], path: str) -> FigureSpec:
         border_width=(None if raw.get("border_width") is None else float(raw["border_width"])),
         top_margin=None if raw.get("top_margin") is None else float(raw["top_margin"]),
         bottom_margin=(None if raw.get("bottom_margin") is None else float(raw["bottom_margin"])),
+        x_limits=(
+            None if raw.get("x_limits") is None else [float(value) for value in raw["x_limits"]]
+        ),
+        x_ticks=None if x_ticks is None else [float(value) for value in x_ticks],
+        x_tick_labels=None if x_tick_labels is None else [str(value) for value in x_tick_labels],
+        font_sizes=(
+            FigureFontSizes() if font_sizes is None else _font_sizes_from_mapping(font_sizes, path)
+        ),
+    )
+
+
+def _matrix_spec_from_mapping(raw: dict[str, Any], path: str) -> MatrixFigureSpec:
+    """Rebuild a heatmap spec from its serialized form."""
+    values = raw.get("values")
+    row_labels = raw.get("row_labels")
+    column_labels = raw.get("column_labels")
+    if not isinstance(values, list) or not isinstance(row_labels, list):
+        raise ValueError(f"Figure matrix needs values and row_labels lists: {path}")
+    if not isinstance(column_labels, list):
+        raise ValueError(f"Figure matrix needs a column_labels list: {path}")
+    figsize = raw.get("figsize")
+    font_sizes = raw.get("font_sizes")
+    return MatrixFigureSpec(
+        title=str(raw["title"]),
+        matrix=FigureMatrix(
+            values=[[float(value) for value in row] for row in values],
+            row_labels=[str(label) for label in row_labels],
+            column_labels=[str(label) for label in column_labels],
+            colorbar_label=str(raw.get("colorbar_label", "")),
+            colormap=str(raw.get("colormap", "RdBu_r")),
+            symmetric_limits=bool(raw.get("symmetric_limits", True)),
+            annotation_format=str(raw.get("annotation_format", ".3g")),
+            annotation_color_threshold=float(raw.get("annotation_color_threshold", 0.55)),
+            x_label=str(raw.get("x_label", "")),
+            y_label=str(raw.get("y_label", "")),
+        ),
+        figsize=None if figsize is None else [float(value) for value in figsize],
+        border_width=(None if raw.get("border_width") is None else float(raw["border_width"])),
         font_sizes=(
             FigureFontSizes() if font_sizes is None else _font_sizes_from_mapping(font_sizes, path)
         ),
@@ -479,6 +752,7 @@ def _axis_from_mapping(raw: dict[str, Any], path: str) -> FigureAxis:
         label=str(raw["label"]),
         limits=None if limits is None else [float(value) for value in limits],
         grid=bool(raw.get("grid", True)),
+        grid_axis=str(raw.get("grid_axis", "both")),
         segments=(
             None
             if segments is None
@@ -547,6 +821,11 @@ def _series_from_mapping(raw: dict[str, Any], path: str) -> FigureSeries:
         faint_zorder=float(raw.get("faint_zorder", 1.0)),
         zorder=float(raw.get("zorder", 2.0)),
         scatter_sizes=None if sizes is None else [float(value) for value in sizes],
+        kind=str(raw.get("kind", LINE_SERIES_KIND)),
+        bar_width=float(raw.get("bar_width", 0.7)),
+        value_labels=bool(raw.get("value_labels", False)),
+        value_label_format=str(raw.get("value_label_format", ".3f")),
+        value_label_fontsize=float(raw.get("value_label_fontsize", 8.0)),
     )
 
 
