@@ -38,6 +38,14 @@ Based on the fix type, write the fix entry to the appropriate document:
 
 <!-- This section accumulates over time. Append new records at the end using the template above. -->
 
+### Aesthetic predictor omitted CLIP feature normalization
+- **Date**: 2026-09-24
+- **Symptom**: Flow-Factory aesthetic scores differed substantially from the official Improved Aesthetic Predictor and other implementations.
+- **Root Cause**: The CLIP projected image features were passed to the trained MLP without the official L2 normalization step.
+- **Fix**: `rewards/aesthetic_score.py` now extracts Tensor/ModelOutput features compatibly across Transformers versions, L2-normalizes them in float32 before applying the MLP, and adds a regression test for both return types.
+- **Lesson**: When adapting a pretrained head, preserve the upstream feature preprocessing contract as well as the architecture and checkpoint; a missing normalization can invalidate the output scale without raising an error.
+- **Related Constraint**: N/A
+
 ### UniReward zero-valued pointwise scores
 - **Date**: 2026-09-05
 - **Symptom**: Offline UniReward workers failed with `scores outside the expected 1-5 range` when the model returned a zero for one or more dimensions.

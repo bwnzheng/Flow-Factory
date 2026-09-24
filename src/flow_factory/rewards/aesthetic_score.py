@@ -18,13 +18,16 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from accelerate import Accelerator
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
+from transformers.utils.generic import ModelOutput
 
 from ..hparams import RewardArguments
 from ..utils.logger_utils import setup_logger
@@ -38,6 +41,18 @@ logger = setup_logger(__name__, rank_zero_only=True)
 
 _MLP_STATE_DICT_URL = "camenduru/improved-aesthetic-predictor"
 _MLP_CHECKPOINT_FILE = "sac+logos+ava1-l14-linearMSE.pth"
+
+
+def _extract_feature_tensor(output: Any) -> torch.Tensor:
+    """Extract the projected CLIP features across Transformers versions."""
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, ModelOutput):
+        return output.pooler_output
+    raise TypeError(
+        "expected torch.Tensor or ModelOutput from get_image_features(), "
+        f"got {type(output).__name__}: {output!r}"
+    )
 
 
 class AestheticMLP(nn.Module):
@@ -112,8 +127,6 @@ class AestheticScoreRewardModel(PointwiseRewardModel):
             device=self.device, dtype=self.dtype
         )
 
-        from huggingface_hub import hf_hub_download
-
         ckpt_path = hf_hub_download(mlp_repo, mlp_file)
         state_dict = torch.load(ckpt_path, map_location=self.device, weights_only=True)
         self.mlp.load_state_dict(state_dict)
@@ -158,8 +171,11 @@ class AestheticScoreRewardModel(PointwiseRewardModel):
 
             # CLIP projected image features (projection_dim, typically 768)
             pixel_values = inputs["pixel_values"]
-            image_features = self.clip_model.get_image_features(pixel_values)
-            image_features = image_features.pooler_output.to(dtype=self.dtype)
+            feature_output = self.clip_model.get_image_features(pixel_values=pixel_values)
+            image_features = _extract_feature_tensor(feature_output)
+            image_features = F.normalize(image_features.float(), p=2, dim=-1).to(
+                dtype=self.dtype
+            )
 
             scores = self.mlp(image_features).squeeze(-1)  # (batch,)
             all_scores.append(scores.float().cpu())
