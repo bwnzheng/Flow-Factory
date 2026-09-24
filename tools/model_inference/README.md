@@ -92,3 +92,11 @@ try:
 finally:
     runner.close()
 ```
+
+### Image cache validation
+
+Existing images are checked with PIL before generation resumes. Fewer than 32
+expected images are checked serially; otherwise the thread count is the smaller
+of `os.cpu_count() or 1` (platform logical processor count) and the number of
+expected images. This is independent of the accelerator `num_processes` setting.
+The `[Image cache]` log reports the validation mode and elapsed time.

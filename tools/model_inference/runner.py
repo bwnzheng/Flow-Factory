@@ -47,7 +47,6 @@ ManifestRow = Dict[str, Union[int, str]]
 _CHECKPOINT_PATTERN = re.compile(r"checkpoint-(\d+)")
 _PIPELINE_LOAD_LOCK = threading.Lock()
 _IMAGE_VERIFY_THREAD_THRESHOLD = 32
-_IMAGE_VERIFY_MAX_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -347,7 +346,7 @@ def _expected_outputs(
         checked = [_check_expected_output(task) for task in tasks]
         validation_mode = "serial"
     else:
-        worker_count = min(_IMAGE_VERIFY_MAX_WORKERS, os.cpu_count() or 1, len(tasks))
+        worker_count = min(os.cpu_count() or 1, len(tasks))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             checked = list(executor.map(_check_expected_output, tasks))
         validation_mode = f"threads:{worker_count}"

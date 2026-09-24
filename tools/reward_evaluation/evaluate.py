@@ -36,8 +36,8 @@ from tools.model_inference import (
     run_evaluation_set,
 )
 from tools.model_inference.model_types import validate_model_type
+from tools.reward_evaluation.scoring import _load_cached_scores, score_reward
 from tools.utils import PromptRecord, load_prompt_records
-from tools.reward_evaluation.scoring import score_reward
 
 
 def _progress(message: str) -> None:
@@ -223,6 +223,13 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
                 f"[Reward evaluation] images ready source={source.name} "
                 f"samples={len(manifest_rows)} manifest={image_root / 'manifest.jsonl'}"
             )
+            reward_caches = {
+                str(reward["name"]): _load_cached_scores(
+                    experiment_dir / "reward_scores" / f"{reward['name']}.jsonl"
+                )
+                for reward in source.rewards
+            }
+            reward_stage_caches = {str(reward["name"]): {} for reward in source.rewards}
             for step, checkpoint_path in checkpoints:
                 checkpoint_rows = [
                     row for row in manifest_rows if int(row["checkpoint_step"]) == step
@@ -249,6 +256,8 @@ def run_evaluation(config: EvaluationSuiteConfig) -> Dict[str, Any]:
                         dtype=config.model.dtype,
                         num_processes=config.model.num_processes,
                         batch_size=config.evaluation.reward_batch_size,
+                        cached_scores=reward_caches[reward_name],
+                        staged_cached_scores=reward_stage_caches[reward_name],
                     )
                     _progress(
                         f"[Reward evaluation] scored source={source.name} "

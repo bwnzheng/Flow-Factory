@@ -25,7 +25,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -72,6 +72,8 @@ def score_reward(
     dtype: str,
     num_processes: int,
     batch_size: int,
+    cached_scores: Optional[Dict[str, float]] = None,
+    staged_cached_scores: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, float]:
     """Score a manifest with any registry reward that accepts image inputs.
 
@@ -109,9 +111,11 @@ def score_reward(
             dtype=dtype,
             num_processes=num_processes,
             batch_size=batch_size,
+            cached_scores=cached_scores,
+            staged_cached_scores=staged_cached_scores,
         )
 
-    cached = _load_cached_scores(output_path)
+    cached = _load_cached_scores(output_path) if cached_scores is None else cached_scores
     expected = {_sample_key(row) for row in manifest_rows}
     cache_scope = _sample_scope(next(iter(expected)))
     unknown = {key for key in cached if _sample_scope(key) == cache_scope and key not in expected}
@@ -242,10 +246,12 @@ def _score_vision_reward_staged(
     dtype: str,
     num_processes: int,
     batch_size: int,
+    cached_scores: Optional[Dict[str, float]] = None,
+    staged_cached_scores: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, float]:
     """Run VisionReward components in disjoint worker lifetimes and combine on CPU."""
     expected = {_sample_key(row) for row in manifest_rows}
-    cached = _load_cached_scores(output_path)
+    cached = _load_cached_scores(output_path) if cached_scores is None else cached_scores
     _validate_cache_scope(output_path, cached, expected)
     missing_final = [row for row in manifest_rows if _sample_key(row) not in cached]
     reward_name = str(reward_config.get("name", "vision_reward"))
@@ -267,8 +273,20 @@ def _score_vision_reward_staged(
 
     alignment_path = _stage_cache_path(output_path, _VISION_REWARD_ALIGNMENT_STAGE)
     vqa_path = _stage_cache_path(output_path, _VISION_REWARD_VQA_STAGE)
-    alignments = _load_cached_scores(alignment_path)
-    vqa_features = _load_feature_vectors(vqa_path, feature_count)
+    if staged_cached_scores is None:
+        alignments = _load_cached_scores(alignment_path)
+        vqa_features = _load_feature_vectors(vqa_path, feature_count)
+    else:
+        if _VISION_REWARD_ALIGNMENT_STAGE not in staged_cached_scores:
+            staged_cached_scores[_VISION_REWARD_ALIGNMENT_STAGE] = _load_cached_scores(
+                alignment_path
+            )
+        if _VISION_REWARD_VQA_STAGE not in staged_cached_scores:
+            staged_cached_scores[_VISION_REWARD_VQA_STAGE] = _load_feature_vectors(
+                vqa_path, feature_count
+            )
+        alignments = staged_cached_scores[_VISION_REWARD_ALIGNMENT_STAGE]
+        vqa_features = staged_cached_scores[_VISION_REWARD_VQA_STAGE]
     _validate_cache_scope(alignment_path, alignments, expected)
     _validate_cache_scope(vqa_path, vqa_features, expected)
 
